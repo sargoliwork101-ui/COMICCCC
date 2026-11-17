@@ -90,10 +90,12 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
     !window.document.getElementById('second').classList.contains('wtpdf-page-translation-pickable'));
   secondCheckbox.checked = false;
   secondCheckbox.dispatchEvent(new window.Event('change', { bubbles: true }));
+  const engineSelect = window.document.querySelector('[data-role="translation-engine"]');
+  engineSelect.value = 'google'; engineSelect.dispatchEvent(new window.Event('change', { bubbles: true }));
   window.document.querySelector('[data-action="translate-selected"]').click();
   await new Promise((resolve) => setTimeout(resolve, 20));
   check('only the checked paragraph is sent to the selected engine',
-    requests.length === 1 && requests[0].entries.every((entry) =>
+    requests.length === 1 && requests[0].engine === 'google' && requests[0].entries.every((entry) =>
       /Hello|world|from this page/.test(entry.text)) && requests[0].entries.every((entry) => !/This paragraph/.test(entry.text)));
   check('paragraph status distinguishes a successful translation from an unselected paragraph',
     window.document.querySelector('[data-status-for="group-1"]').dataset.state === 'translated' &&

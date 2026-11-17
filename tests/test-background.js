@@ -12,6 +12,7 @@ function bootBackground(initialStorage, translationApis = {}) {
   const listeners = {};
   const chrome = {
     runtime: {
+      id: 'ext',
       onMessage: { addListener: (fn) => { listeners.message = fn; } },
       onStartup: { addListener: (fn) => { listeners.startup = fn; } },
       onInstalled: { addListener: (fn) => { listeners.installed = fn; } },
@@ -22,6 +23,7 @@ function bootBackground(initialStorage, translationApis = {}) {
       local: {
         get: async (key) => {
           if (key === null) return Object.fromEntries(store);
+          if (Array.isArray(key)) return Object.fromEntries(key.map((item) => [item, store.get(item)]));
           return { [key]: store.get(key) };
         },
         set: async (obj) => Object.entries(obj).forEach(([k, v]) => store.set(k, v)),
@@ -30,8 +32,14 @@ function bootBackground(initialStorage, translationApis = {}) {
     },
     tabs: {
       create: (opts, cb) => cb({ id: 42 }),
-      update: (id, patch, cb) => cb()
-    }
+      update: (id, patch, cb) => cb(),
+      get: async () => null,
+      duplicate: async () => null,
+      sendMessage: async () => null,
+      remove: async () => {},
+      onUpdated: { addListener: () => {}, removeListener: () => {} }
+    },
+    scripting: { executeScript: async () => [] }
   };
   const ctx = { chrome, console, URL, setTimeout, Math, Date, Promise, ...translationApis };
   vm.createContext(ctx);
@@ -96,10 +104,25 @@ function bootBackground(initialStorage, translationApis = {}) {
     check('failed tab creation leaves no orphan job', ![...b.store.keys()].some((k) => k.startsWith('job_')));
   }
 
-  // 4. webpage text is translated only through the explicit extension message and uses the configured route
+  // 4. page text cannot be sent until the user has saved explicit consent in the popup
+  {
+    let translateCalls = 0;
+    const b = bootBackground({}, {
+      TranslateTools: { translate: async () => { translateCalls++; return { ok: true, text: 'x' }; } },
+      AiTranslateTools: {}
+    });
+    let response = null;
+    b.listeners.message({ type: 'WTPDF_TRANSLATE_PAGE_BATCH', entries: [{ id: 'p000001', text: 'Private text.' }] },
+      { tab: { id: 19, url: 'https://example.test/' } }, (result) => { response = result; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    check('webpage translation is blocked until consent is stored',
+      response && response.ok === false && /ارسال متن/.test(response.error) && translateCalls === 0, response);
+  }
+
+  // 5. webpage text is translated only through the explicit extension message and uses the configured route
   {
     const calls = [];
-    const b = bootBackground({}, {
+    const b = bootBackground({ wtpdf_page_translation_consent_v1: true }, {
       TranslateTools: { translate: async (text, sourceLang, _fetchFn, engine) => {
         calls.push({ text, sourceLang, engine });
         return { ok: true, text: `FA:${text}` };
@@ -123,7 +146,7 @@ function bootBackground(initialStorage, translationApis = {}) {
       engine: 'ai', enabled: false, provider: 'openai', skill: 'web style',
       providers: { openai: { model: 'gpt-web', profiles: [{ name: 'Saved', apiKey: 'private-key' }] } }
     };
-    const b = bootBackground({ gemini_translation_settings_v1: settings }, {
+    const b = bootBackground({ wtpdf_page_translation_consent_v1: true, gemini_translation_settings_v1: settings }, {
       TranslateTools: { translate: async () => { throw new Error('free fallback must not run'); } },
       AiTranslateTools: {
         translateWithFailover: async (options) => {
@@ -139,13 +162,36 @@ function bootBackground(initialStorage, translationApis = {}) {
     check('configured AI is used for webpage text with a general webpage context',
       calls.length === 1 && calls[0].provider === 'openai' && calls[0].context === 'webpage' &&
       calls[0].entries[0].text === 'Good morning.' && calls[0].profiles[0].apiKey === 'private-key' &&
-      response && response.provider === 'هوش مصنوعی');
+      response && response.provider === 'OpenAI');
     check('AI response does not return or expose saved API keys',
       response && response.translations[0].text === 'سلام' && !JSON.stringify(response).includes('private-key'), response);
   }
   {
     const calls = [];
-    const b = bootBackground({ gemini_translation_settings_v1: { engine: 'google', enabled: false } }, {
+    const settings = {
+      engine: 'auto', provider: 'gemini',
+      providers: { openrouter: { model: 'openrouter/model-x', profiles: [{ name: 'Routed', apiKey: 'router-secret' }] } }
+    };
+    const b = bootBackground({ wtpdf_page_translation_consent_v1: true, gemini_translation_settings_v1: settings }, {
+      TranslateTools: { translate: async () => { throw new Error('explicit AI selection must not use free translation'); } },
+      AiTranslateTools: { translateWithFailover: async (options) => {
+        calls.push(options);
+        return { translations: new Map([[options.entries[0].id, 'ترجمهٔ OpenRouter']]) };
+      } }
+    });
+    let response = null;
+    b.listeners.message({ type: 'WTPDF_TRANSLATE_PAGE_BATCH', engine: 'ai:openrouter',
+      entries: [{ id: 'p000003', text: 'Choose this AI engine.' }] },
+    { tab: { id: 20, url: 'https://example.test/' } }, (result) => { response = result; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    check('page selector chooses an AI provider independently of the saved default',
+      calls.length === 1 && calls[0].provider === 'openrouter' && calls[0].model === 'openrouter/model-x' &&
+      calls[0].profiles[0].apiKey === 'router-secret' && response && response.provider === 'OpenRouter' &&
+      response.translations[0].text === 'ترجمهٔ OpenRouter' && !JSON.stringify(response).includes('router-secret'));
+  }
+  {
+    const calls = [];
+    const b = bootBackground({ wtpdf_page_translation_consent_v1: true, gemini_translation_settings_v1: { engine: 'mymemory', enabled: false } }, {
       TranslateTools: { translate: async (text, sourceLang, _fetchFn, engine) => {
         calls.push({ text, sourceLang, engine });
         return { ok: true, text: 'ترجمهٔ Google' };
@@ -153,7 +199,7 @@ function bootBackground(initialStorage, translationApis = {}) {
       AiTranslateTools: { translateWithFailover: async () => { throw new Error('selected Google, not AI'); } }
     });
     let response = null;
-    b.listeners.message({ type: 'WTPDF_TRANSLATE_PAGE_BATCH', entries: [{ id: 'p000003', text: 'Sample.' }] },
+    b.listeners.message({ type: 'WTPDF_TRANSLATE_PAGE_BATCH', engine: 'google', entries: [{ id: 'p000003', text: 'Sample.' }] },
       { tab: { id: 20, url: 'https://example.test/' } }, (result) => { response = result; });
     await new Promise((resolve) => setTimeout(resolve, 10));
     check('page translation honors the explicit Google Translate choice',
@@ -162,7 +208,7 @@ function bootBackground(initialStorage, translationApis = {}) {
   }
   {
     const calls = [];
-    const b = bootBackground({ gemini_translation_settings_v1: { engine: 'mymemory', enabled: false } }, {
+    const b = bootBackground({ wtpdf_page_translation_consent_v1: true, gemini_translation_settings_v1: { engine: 'mymemory', enabled: false } }, {
       TranslateTools: { translate: async (text, sourceLang, _fetchFn, engine) => {
         calls.push({ text, sourceLang, engine });
         return { ok: true, text: 'ترجمهٔ MyMemory' };
@@ -179,7 +225,7 @@ function bootBackground(initialStorage, translationApis = {}) {
   }
   {
     let translateCalls = 0;
-    const b = bootBackground({}, {
+    const b = bootBackground({ wtpdf_page_translation_consent_v1: true }, {
       TranslateTools: { translate: async () => { translateCalls++; return { ok: true, text: 'x' }; } },
       AiTranslateTools: {}
     });
@@ -191,7 +237,40 @@ function bootBackground(initialStorage, translationApis = {}) {
       response && response.ok === false && translateCalls === 0, response);
   }
 
-  // 5. unrelated messages are ignored (no return value, no throw)
+  // 6. the popup launches a translated copy directly, without an intermediate consent page
+  {
+    const b = bootBackground({ wtpdf_page_translation_consent_v1: true });
+    const calls = { duplicate: [], inject: [], send: [], update: [] };
+    b.chrome.tabs.get = async (id) => ({ id, status: 'complete', url: 'https://example.test/story' });
+    b.chrome.tabs.duplicate = async (id) => { calls.duplicate.push(id); return { id: 44, status: 'complete', url: 'https://example.test/story' }; };
+    b.chrome.tabs.sendMessage = async (id, message) => {
+      calls.send.push({ id, message });
+      return { ok: true, readyForSelection: true, paragraphs: 3 };
+    };
+    b.chrome.tabs.update = async (id, patch) => { calls.update.push({ id, patch }); };
+    b.chrome.scripting.executeScript = async (details) => { calls.inject.push(details); return []; };
+    let response = null;
+    const keepOpen = b.listeners.message({ type: 'WTPDF_PAGE_TRANSLATE_CREATE_COPY', tabId: 19, engine: 'google' },
+      { id: 'ext', url: 'chrome-extension://ext/src/popup/popup.html' }, (result) => { response = result; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    check('popup copy-launch request stays alive while the translated tab is prepared', keepOpen === true);
+    check('translated copy is duplicated, injected, and started directly with the chosen engine',
+      calls.duplicate[0] === 19 && calls.inject[0].target.tabId === 44 &&
+      calls.inject[0].files.join(',') === 'src/core/page-translation.js,src/page-translator/content.js' &&
+      calls.send[0].message.type === 'WTPDF_PAGE_TRANSLATE_START' && calls.send[0].message.engine === 'google' &&
+      response && response.ok && response.paragraphs === 3 && calls.update[0].patch.active === true, { calls, response });
+  }
+  {
+    const b = bootBackground({});
+    let duplicateCalls = 0, response = null;
+    b.chrome.tabs.duplicate = async () => { duplicateCalls++; return { id: 45, status: 'complete' }; };
+    b.listeners.message({ type: 'WTPDF_PAGE_TRANSLATE_CREATE_COPY', tabId: 19, engine: 'auto' },
+      { id: 'ext', url: 'chrome-extension://ext/src/popup/popup.html' }, (result) => { response = result; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    check('copy is not opened before the one-time privacy consent is saved', duplicateCalls === 0 && response && !response.ok);
+  }
+
+  // 7. unrelated messages are ignored (no return value, no throw)
   {
     const b = bootBackground({});
     const ret = b.listeners.message({ type: 'SOMETHING_ELSE' }, {}, () => {});

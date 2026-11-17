@@ -103,8 +103,11 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
   check('start button present', !!pdoc.getElementById('startBtn'));
   check('PDF-to-image action is clearly visible in popup',
     !!pdoc.getElementById('pdfConvertBtn') && /تبدیل PDF به تصویر/.test(pdoc.getElementById('pdfConvertBtn').textContent));
-  check('translated-copy action is available for the current HTML page',
+  check('translated-copy action is available directly from the popup',
     !!pdoc.getElementById('translatePageBtn') && /ترجمهٔ همین صفحه/.test(pdoc.getElementById('translatePageBtn').textContent));
+  check('popup exposes the translation engine and one-time privacy consent controls',
+    !!pdoc.getElementById('pageTranslationEngine') && !!pdoc.getElementById('pageTranslationConsent') &&
+    pdoc.querySelectorAll('#pageTranslationEngine option').length === 7);
   check('AI API settings are directly accessible from the popup',
     !!pdoc.getElementById('aiSettingsBtn') && /تنظیمات API هوش مصنوعی/.test(pdoc.getElementById('aiSettingsBtn').textContent) &&
     fs.readFileSync(path.join(ROOT, 'src/popup/popup.js'), 'utf8').includes("src/ai-settings/settings.html"));
@@ -131,6 +134,18 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
 }
 // popup.js keeps the status box hidden unless an error/warning actually happens
 const popupCode = fs.readFileSync(__dirname + '/../src/popup/popup.js', 'utf8');
+function makeLocalStorage(initial = {}) {
+  const data = { ...initial };
+  return {
+    data,
+    get: async (keys) => {
+      if (typeof keys === 'string') return { [keys]: data[keys] };
+      if (Array.isArray(keys)) return Object.fromEntries(keys.map((key) => [key, data[key]]));
+      return { ...data };
+    },
+    set: async (values) => { Object.assign(data, values); }
+  };
+}
 check('popup has setStatus helper (text only)', /const setStatus = \(text\)/.test(popupCode));
 check('popup reveals the box only via showError', /const showError = \(text\)/.test(popupCode) &&
   /statusBox\.classList\.remove\('hidden'\)/.test(popupCode));
@@ -236,26 +251,58 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
       openedUrl === 'chrome-extension://ext/src/ai-settings/settings.html', openedUrl);
   }
 
-  // The page-translation action opens a consent/progress page with the selected web tab metadata.
+  // One saved consent and a direct provider choice launch translation without an intermediary tab.
   {
     const translateDom = new JSDOM(fs.readFileSync(__dirname + '/../src/popup/popup.html', 'utf8'), {
       url: 'chrome-extension://ext/src/popup/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
     });
     const translateWindow = translateDom.window;
-    let openedUrl = '';
+    const storage = makeLocalStorage({
+      wtpdf_page_translation_consent_v1: false,
+      wtpdf_page_translation_engine_v1: 'auto'
+    });
+    const calls = { created: [], launched: [] };
+    let closed = false;
+    translateWindow.close = () => { closed = true; };
     translateWindow.chrome = {
-      runtime: { getURL: (resource) => `chrome-extension://ext/${resource}` },
+      runtime: {
+        getURL: (resource) => `chrome-extension://ext/${resource}`,
+        sendMessage: async (message) => {
+          calls.launched.push(message);
+          return { ok: true, tabId: 44, paragraphs: 4 };
+        }
+      },
+      storage: { local: storage },
       tabs: {
         query: async () => [{ id: 33, url: 'https://news.example.test/story/1' }],
-        create: async (options) => { openedUrl = options.url; return { id: 77 }; }
+        sendMessage: async () => { throw new Error('no content listener on ordinary page'); },
+        create: async (options) => { calls.created.push(options); return { id: 77 }; }
       }
     };
     vm.runInContext(popupCode, translateDom.getInternalVMContext(), { filename: 'popup.js' });
-    const translateButton = translateWindow.document.getElementById('translatePageBtn');
-    if (translateButton) translateButton.click();
     await new Promise((resolve) => setTimeout(resolve, 10));
-    check('page translation opens the consent page for the active website tab',
-      openedUrl === 'chrome-extension://ext/src/page-translator/page.html?tabId=33&host=news.example.test', openedUrl);
+    const translateButton = translateWindow.document.getElementById('translatePageBtn');
+    const consent = translateWindow.document.getElementById('pageTranslationConsent');
+    check('translation stays disabled until one-time consent is given', translateButton.disabled === true);
+    consent.checked = true;
+    consent.dispatchEvent(new translateWindow.Event('change', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    translateWindow.document.getElementById('pageTranslationEngine').value = 'ai:openai';
+    translateWindow.document.getElementById('pageTranslationEngine').dispatchEvent(new translateWindow.Event('change', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    check('consent and the chosen engine are saved for future popup opens',
+      storage.data.wtpdf_page_translation_consent_v1 === true && storage.data.wtpdf_page_translation_engine_v1 === 'ai:openai');
+    translateButton.click();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    check('page translation launches a direct copy request with the selected engine, not a consent tab',
+      calls.launched.length === 1 && calls.launched[0].type === 'WTPDF_PAGE_TRANSLATE_CREATE_COPY' &&
+      calls.launched[0].tabId === 33 && calls.launched[0].engine === 'ai:openai' &&
+      calls.created.length === 0 && closed, calls);
+    consent.checked = false;
+    consent.dispatchEvent(new translateWindow.Event('change', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    check('unchecking consent revokes it and disables future translation',
+      storage.data.wtpdf_page_translation_consent_v1 === false && translateButton.disabled === true);
   }
   {
     const sameTabDom = new JSDOM(fs.readFileSync(__dirname + '/../src/popup/popup.html', 'utf8'), {
@@ -265,6 +312,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     let created = 0, requested = null;
     sameTabWindow.chrome = {
       runtime: { getURL: (resource) => `chrome-extension://ext/${resource}` },
+      storage: { local: makeLocalStorage({ wtpdf_page_translation_consent_v1: true }) },
       tabs: {
         query: async () => [{ id: 37, url: 'https://news.example.test/translated-copy' }],
         sendMessage: async (_id, message) => { requested = message; return { ok: true, translatedCopy: true }; },
@@ -272,6 +320,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
       }
     };
     vm.runInContext(popupCode, sameTabDom.getInternalVMContext(), { filename: 'popup.js' });
+    await new Promise((resolve) => setTimeout(resolve, 10));
     sameTabWindow.document.getElementById('translatePageBtn').click();
     await new Promise((resolve) => setTimeout(resolve, 10));
     check('retranslate from the popup opens paragraph selection in the existing copy tab',
@@ -288,12 +337,14 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     let created = 0;
     blockedWindow.chrome = {
       runtime: { getURL: (resource) => `chrome-extension://ext/${resource}` },
+      storage: { local: makeLocalStorage({ wtpdf_page_translation_consent_v1: true }) },
       tabs: {
         query: async () => [{ id: 34, url: 'chrome://settings/' }],
         create: async () => { created++; }
       }
     };
     vm.runInContext(popupCode, blockedDom.getInternalVMContext(), { filename: 'popup.js' });
+    await new Promise((resolve) => setTimeout(resolve, 10));
     const translateButton = blockedWindow.document.getElementById('translatePageBtn');
     if (translateButton) translateButton.click();
     await new Promise((resolve) => setTimeout(resolve, 10));

@@ -45,33 +45,114 @@ if (aiSettingsBtn) {
 }
 
 const translatePageBtn = document.getElementById('translatePageBtn');
+const pageTranslationConsent = document.getElementById('pageTranslationConsent');
+const pageTranslationEngine = document.getElementById('pageTranslationEngine');
+const PAGE_TRANSLATION_CONSENT_KEY = 'wtpdf_page_translation_consent_v1';
+const PAGE_TRANSLATION_ENGINE_KEY = 'wtpdf_page_translation_engine_v1';
+const PAGE_TRANSLATION_SETTINGS_KEY = 'gemini_translation_settings_v1';
+const PAGE_TRANSLATION_ENGINES = new Set([
+  'auto', 'google', 'mymemory', 'ai:gemini', 'ai:openai', 'ai:openrouter', 'ai:avalai'
+]);
+let pageTranslationPreferencesReady = false;
+let pageTranslationIsConsented = false;
+let pageTranslationBusy = false;
+
+const updatePageTranslationButton = () => {
+  if (translatePageBtn) translatePageBtn.disabled = !pageTranslationPreferencesReady || !pageTranslationIsConsented || pageTranslationBusy;
+};
+
+async function loadPageTranslationPreferences() {
+  if (!translatePageBtn || !pageTranslationConsent || !pageTranslationEngine) return;
+  if (!chrome.storage || !chrome.storage.local || typeof chrome.storage.local.get !== 'function') return;
+  const stored = await chrome.storage.local.get([
+    PAGE_TRANSLATION_CONSENT_KEY, PAGE_TRANSLATION_ENGINE_KEY, PAGE_TRANSLATION_SETTINGS_KEY
+  ]);
+  pageTranslationIsConsented = stored[PAGE_TRANSLATION_CONSENT_KEY] === true;
+  const preferred = stored[PAGE_TRANSLATION_ENGINE_KEY];
+  const settings = stored[PAGE_TRANSLATION_SETTINGS_KEY] || {};
+  let engine = PAGE_TRANSLATION_ENGINES.has(preferred) ? preferred : '';
+  if (!engine) {
+    if (settings.engine === 'google' || settings.engine === 'mymemory') engine = settings.engine;
+    else if (settings.engine === 'ai' && ['gemini', 'openai', 'openrouter', 'avalai'].includes(settings.provider)) engine = `ai:${settings.provider}`;
+    else engine = 'auto';
+  }
+  pageTranslationConsent.checked = pageTranslationIsConsented;
+  pageTranslationEngine.value = engine;
+  pageTranslationPreferencesReady = true;
+  updatePageTranslationButton();
+}
+loadPageTranslationPreferences().catch((error) => {
+  showError('تنظیمات ترجمه خوانده نشد: ' + (error && error.message ? error.message : error));
+});
+
+if (pageTranslationConsent) {
+  pageTranslationConsent.addEventListener('change', async () => {
+    if (!pageTranslationPreferencesReady) return;
+    const previous = pageTranslationIsConsented;
+    pageTranslationIsConsented = pageTranslationConsent.checked;
+    updatePageTranslationButton();
+    try {
+      await chrome.storage.local.set({ [PAGE_TRANSLATION_CONSENT_KEY]: pageTranslationIsConsented });
+      if (!pageTranslationIsConsented) setStatus('اجازهٔ ارسال متن لغو شد؛ هر زمان خواستید می‌توانید دوباره تیک بزنید.');
+      else hideStatus();
+    } catch (error) {
+      pageTranslationIsConsented = previous;
+      pageTranslationConsent.checked = previous;
+      updatePageTranslationButton();
+      showError('ذخیرهٔ اجازهٔ ترجمه ناموفق بود: ' + (error && error.message ? error.message : error));
+    }
+  });
+}
+
+if (pageTranslationEngine) {
+  pageTranslationEngine.addEventListener('change', async () => {
+    if (!PAGE_TRANSLATION_ENGINES.has(pageTranslationEngine.value)) return;
+    try {
+      await chrome.storage.local.set({ [PAGE_TRANSLATION_ENGINE_KEY]: pageTranslationEngine.value });
+      hideStatus();
+    } catch (error) {
+      showError('ذخیرهٔ موتور ترجمه ناموفق بود: ' + (error && error.message ? error.message : error));
+    }
+  });
+}
+
 if (translatePageBtn) {
+  translatePageBtn.disabled = true;
   translatePageBtn.addEventListener('click', async () => {
-    translatePageBtn.disabled = true;
+    if (translatePageBtn.disabled || !pageTranslationPreferencesReady || !pageTranslationIsConsented) return;
+    pageTranslationBusy = true;
+    updatePageTranslationButton();
     hideStatus();
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab || !Number.isInteger(tab.id) || !tab.url) throw new Error('صفحهٔ فعالی برای ترجمه پیدا نشد.');
-      try {
-        const existingCopy = await chrome.tabs.sendMessage(tab.id, { type: 'WTPDF_PAGE_TRANSLATE_OPEN_SELECTION' });
-        if (existingCopy && existingCopy.translatedCopy) {
-          translatePageBtn.disabled = false;
-          try { window.close(); } catch { /* browser popup may already be closing */ }
-          return;
-        }
-      } catch { /* ordinary page: open the consent screen and make a translated copy */ }
       const pageUrl = new URL(tab.url);
       const isWebStore = pageUrl.hostname === 'chromewebstore.google.com' ||
         (pageUrl.hostname === 'chrome.google.com' && pageUrl.pathname.startsWith('/webstore'));
       if (!['http:', 'https:'].includes(pageUrl.protocol) || isWebStore) {
         throw new Error('ترجمه فقط روی صفحه‌های وب معمولی انجام می‌شود؛ صفحه‌های داخلی مرورگر و فروشگاه افزونه پشتیبانی نمی‌شوند.');
       }
-      const target = chrome.runtime.getURL('src/page-translator/page.html') +
-        `?tabId=${tab.id}&host=${encodeURIComponent(pageUrl.hostname)}`;
-      await chrome.tabs.create({ url: target, active: true });
+      const engine = PAGE_TRANSLATION_ENGINES.has(pageTranslationEngine.value) ? pageTranslationEngine.value : 'auto';
+      try {
+        const existingCopy = await chrome.tabs.sendMessage(tab.id, {
+          type: 'WTPDF_PAGE_TRANSLATE_OPEN_SELECTION', engine
+        });
+        if (existingCopy && existingCopy.translatedCopy) {
+          try { window.close(); } catch { /* popup may already be closing */ }
+          return;
+        }
+      } catch { /* regular page: ask the service worker to duplicate and prepare it */ }
+      setStatus('در حال آماده‌کردن کپی صفحه...');
+      const result = await chrome.runtime.sendMessage({
+        type: 'WTPDF_PAGE_TRANSLATE_CREATE_COPY', tabId: tab.id, engine
+      });
+      if (!result || !result.ok) throw new Error(result && result.error || 'کپی صفحه برای ترجمه آماده نشد.');
+      try { window.close(); } catch { /* duplicate tab is active */ }
     } catch (error) {
       showError(error && error.message ? error.message : String(error));
-      translatePageBtn.disabled = false;
+    } finally {
+      pageTranslationBusy = false;
+      updatePageTranslationButton();
     }
   });
 }

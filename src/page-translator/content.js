@@ -80,6 +80,8 @@
       [data-wtpdf-page-translation-ui="panel"] [data-role="variant-row"]{display:flex;align-items:center;gap:7px;color:#cbd5e1;font-size:11px;}
       [data-wtpdf-page-translation-ui="panel"] [data-role="variant"]{max-width:210px;padding:5px 7px;}
       [data-wtpdf-page-translation-ui="panel"] [data-role="panel-controls"]{display:flex;flex-wrap:wrap;gap:7px;}
+      [data-wtpdf-page-translation-ui="panel"] [data-role="engine-row"]{display:flex;align-items:center;gap:8px;color:#e2e8f0;font-size:12px;}
+      [data-wtpdf-page-translation-ui="panel"] [data-role="translation-engine"]{flex:1;min-width:0;}
       [data-wtpdf-page-translation-ui="panel"] [data-role="panel-status"]{min-height:1.4em;margin:0;color:#cbd5e1;font-size:12px;}
       [data-wtpdf-page-translation-ui="panel"] button:disabled{opacity:.55;cursor:wait;}
       @media(max-width:720px){[data-wtpdf-page-translation-ui="toolbar"]{flex-wrap:wrap;justify-content:center;top:6px;}
@@ -117,6 +119,12 @@
     pending: 'هنوز ترجمه نشده', translating: 'در حال ترجمه',
     translated: 'ترجمه شد', partial: 'ناقص؛ بخشی ترجمه نشد', failed: 'ناموفق؛ ترجمه‌ای دریافت نشد'
   };
+  const PAGE_ENGINE_OPTIONS = [
+    ['auto', 'Google؛ در صورت خطا MyMemory'], ['google', 'فقط Google Translate'], ['mymemory', 'فقط MyMemory'],
+    ['ai:gemini', 'Google Gemini (مدل تنظیم‌شده)'], ['ai:openai', 'OpenAI (مدل تنظیم‌شده)'],
+    ['ai:openrouter', 'OpenRouter (مدل تنظیم‌شده)'], ['ai:avalai', 'AvalAI (مدل تنظیم‌شده)']
+  ];
+  const PAGE_ENGINE_LABELS = Object.fromEntries(PAGE_ENGINE_OPTIONS);
 
   function refreshGroupStatuses(state) {
     if (!state.ui.panel) return;
@@ -157,6 +165,12 @@
   function closePanel(state) {
     if (state.ui.panel) state.ui.panel.remove();
     state.ui.panel = null;
+  }
+
+  function setTranslationEngine(state, engine) {
+    state.translationEngine = PAGE_ENGINE_LABELS[engine] ? engine : 'auto';
+    const select = state.ui.panel && state.ui.panel.querySelector('[data-role="translation-engine"]');
+    if (select) select.value = state.translationEngine;
   }
 
   function savePanelSelection(state, panel = state.ui.panel) {
@@ -271,6 +285,23 @@
     const none = document.createElement('button');
     none.type = 'button'; none.textContent = 'پاک‌کردن انتخاب'; none.dataset.action = 'select-none';
     controls.append(all, none);
+    const engineRow = document.createElement('label');
+    engineRow.dataset.role = 'engine-row';
+    const engineLabel = document.createElement('span'); engineLabel.textContent = 'موتور این ترجمه:';
+    const engineSelect = document.createElement('select');
+    engineSelect.dataset.role = 'translation-engine';
+    engineSelect.setAttribute('aria-label', 'انتخاب موتور ترجمه برای این صفحه');
+    PAGE_ENGINE_OPTIONS.forEach(([value, label]) => {
+      const option = document.createElement('option');
+      option.value = value; option.textContent = label;
+      engineSelect.appendChild(option);
+    });
+    engineSelect.value = state.translationEngine;
+    engineSelect.addEventListener('change', () => {
+      state.translationEngine = engineSelect.value;
+      panelStatus.textContent = `موتور این ترجمه: ${PAGE_ENGINE_LABELS[state.translationEngine]}.`;
+    });
+    engineRow.append(engineLabel, engineSelect);
     const list = document.createElement('div');
     list.dataset.role = 'panel-list';
     state.groups.forEach((group) => {
@@ -329,7 +360,7 @@
       savePanelSelection(state, panel);
       if (state.pickMode) syncPageSelection(state);
     });
-    panel.append(head, controls, list, panelStatus, pickOnPage, translate, retry);
+    panel.append(head, controls, engineRow, list, panelStatus, pickOnPage, translate, retry);
     document.documentElement.appendChild(panel);
     state.ui.panel = panel;
     refreshGroupStatuses(state);
@@ -376,21 +407,24 @@
     button.disabled = true;
     panel.querySelectorAll('button, input, select').forEach((control) => { control.disabled = true; });
     refreshGroupStatuses(state);
+    const engineLabel = PAGE_ENGINE_LABELS[state.translationEngine];
     panelStatus.textContent = retryOnly
-      ? `در حال تلاش دوباره برای بخش‌های ناموفقِ ${selected.length} پاراگراف...`
-      : `در حال ترجمهٔ ${selected.length} پاراگراف...`;
+      ? `در حال تلاش دوباره با ${engineLabel} برای بخش‌های ناقص/ناموفقِ ${selected.length} پاراگراف...`
+      : `در حال ترجمه با ${engineLabel}؛ ${selected.length} پاراگراف انتخاب شده...`;
     state.ui.status.textContent = panelStatus.textContent;
     sendProgress(state.jobId, 'working', { total: batches.length, textNodes: entries.length });
     try {
       const translations = new Map();
       const batchErrors = [];
+      const providerResults = new Set();
       for (let index = 0; index < batches.length; index++) {
         panelStatus.textContent = `در حال ترجمه... بستهٔ ${index + 1} از ${batches.length}`;
         try {
           const response = await chrome.runtime.sendMessage({
-            type: 'WTPDF_TRANSLATE_PAGE_BATCH', entries: batches[index]
+            type: 'WTPDF_TRANSLATE_PAGE_BATCH', entries: batches[index], engine: state.translationEngine
           });
           if (!response || !response.ok) throw new Error(response && response.error || 'سرویس ترجمه پاسخ نداد.');
+          if (response.provider) providerResults.add(response.provider);
           (response.translations || []).forEach((row) => {
             if (row && typeof row.id === 'string' && typeof row.text === 'string' && row.text.trim()) {
               translations.set(row.id, row.text);
@@ -438,10 +472,11 @@
       refreshVersionSelects(state);
       refreshGroupStatuses(state);
       const summary = `${completedParagraphs} کامل، ${partialParagraphs} ناقص، ${failedParagraphs} ناموفق`;
+      const actualEngine = [...providerResults].join(' / ') || engineLabel;
       panelStatus.textContent = updatedParagraphs
-        ? `نتیجه: ${summary}. ترجمه‌های موفق و نسخه‌های قبلی حفظ شدند؛ می‌توانید فقط موارد ناقص/ناموفق را دوباره بفرستید.`
-        : `نتیجه: ${summary}. ترجمه‌های قبلی دست‌نخورده ماندند؛ می‌توانید دوباره تلاش کنید.`;
-      state.ui.status.textContent = `${summary}؛ وضعیت هر پاراگراف در فهرست مشخص است.`;
+        ? `موتور: ${actualEngine}. نتیجه: ${summary}. ترجمه‌های موفق و نسخه‌های قبلی حفظ شدند؛ می‌توانید فقط موارد ناقص/ناموفق را دوباره بفرستید.`
+        : `موتور: ${actualEngine}. نتیجه: ${summary}. ترجمه‌های قبلی دست‌نخورده ماندند؛ می‌توانید دوباره تلاش کنید.`;
+      state.ui.status.textContent = `${actualEngine} · ${summary}؛ وضعیت هر پاراگراف در فهرست مشخص است.`;
       sendProgress(state.jobId, failedParagraphs || partialParagraphs ? 'error' : 'done', {
         completed: batches.length, total: batches.length, textNodes: entries.length
       });
@@ -483,9 +518,10 @@
     window.__wtpdfPageTranslation = null;
   }
 
-  function initializePage(jobId) {
+  function initializePage(jobId, engine = 'auto') {
     const current = window.__wtpdfPageTranslation;
     if (current && current.records && current.records.length) {
+      setTranslationEngine(current, engine);
       openPanel(current, false);
       return { ok: true, alreadyReady: true, textNodes: current.records.length, paragraphs: current.groups.length };
     }
@@ -495,6 +531,7 @@
     const state = {
       running: false, records, groups, groupByBlock: new Map(groups.map((group) => [group.block, group])),
       jobId: String(jobId || ''), selectedGroups: new Set(), initialSelection: true,
+      translationEngine: PAGE_ENGINE_LABELS[engine] ? engine : 'auto',
       pickMode: false, pickClickHandler: null, pickKeyHandler: null, ui: null
     };
     window.__wtpdfPageTranslation = state;
@@ -514,7 +551,7 @@
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message) return undefined;
     if (message.type === 'WTPDF_PAGE_TRANSLATE_START') {
-      sendResponse(initializePage(String(message.jobId || '')));
+      sendResponse(initializePage(String(message.jobId || ''), message.engine || 'auto'));
       return false;
     }
     if (message.type === 'WTPDF_PAGE_TRANSLATE_OPEN_SELECTION') {
@@ -523,6 +560,7 @@
         sendResponse({ ok: false, translatedCopy: false });
         return false;
       }
+      setTranslationEngine(state, message.engine || state.translationEngine);
       openPanel(state, false);
       sendResponse({ ok: true, translatedCopy: true });
       return false;
