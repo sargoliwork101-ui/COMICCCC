@@ -30,7 +30,10 @@
           block,
           records: [],
           versions: [],
-          activeVersion: 0
+          activeVersion: 0,
+          status: 'pending',
+          lastAttempt: new Map(),
+          failedPartIds: new Set()
         };
         byBlock.set(block, group);
       }
@@ -65,8 +68,12 @@
       [data-wtpdf-page-translation-ui="panel"] [data-role="panel-head"]{display:flex;align-items:center;justify-content:space-between;gap:8px;}
       [data-wtpdf-page-translation-ui="panel"] [data-role="panel-list"]{display:flex;flex-direction:column;gap:8px;overflow:auto;min-height:70px;padding:2px;}
       [data-wtpdf-page-translation-ui="panel"] [data-role="paragraph"]{display:grid;grid-template-columns:auto 1fr;gap:5px 8px;padding:9px;border:1px solid #46566d;border-radius:10px;background:#202c3d;}
-      [data-wtpdf-page-translation-ui="panel"] [data-role="paragraph"] input{grid-row:1 / span 2;align-self:start;margin-top:4px;accent-color:#a5b4fc;}
+      [data-wtpdf-page-translation-ui="panel"] [data-role="paragraph"] input{grid-row:1 / span 3;align-self:start;margin-top:4px;accent-color:#a5b4fc;}
       [data-wtpdf-page-translation-ui="panel"] [data-role="snippet"]{max-height:4.8em;overflow:auto;color:#e2e8f0;overflow-wrap:anywhere;}
+      [data-wtpdf-page-translation-ui="panel"] [data-role="paragraph-status"]{font-size:11px;color:#cbd5e1;}
+      [data-wtpdf-page-translation-ui="panel"] [data-state="translated"]{color:#86efac;}
+      [data-wtpdf-page-translation-ui="panel"] [data-state="partial"],[data-wtpdf-page-translation-ui="panel"] [data-state="failed"]{color:#fca5a5;}
+      [data-wtpdf-page-translation-ui="panel"] [data-state="translating"]{color:#fde68a;}
       [data-wtpdf-page-translation-ui="panel"] [data-role="variant-row"]{display:flex;align-items:center;gap:7px;color:#cbd5e1;font-size:11px;}
       [data-wtpdf-page-translation-ui="panel"] [data-role="variant"]{max-width:210px;padding:5px 7px;}
       [data-wtpdf-page-translation-ui="panel"] [data-role="panel-controls"]{display:flex;flex-wrap:wrap;gap:7px;}
@@ -100,11 +107,37 @@
     return tools.showVersion(records, values, translatedIds);
   }
 
+  const STATUS_LABELS = {
+    pending: 'هنوز ترجمه نشده', translating: 'در حال ترجمه',
+    translated: 'ترجمه شد', partial: 'ناقص؛ بخشی ترجمه نشد', failed: 'ناموفق؛ ترجمه‌ای دریافت نشد'
+  };
+
+  function refreshGroupStatuses(state) {
+    if (!state.ui.panel) return;
+    state.groups.forEach((group) => {
+      const badge = state.ui.panel.querySelector(`[data-status-for="${group.id}"]`);
+      if (badge) {
+        badge.dataset.state = group.status;
+        badge.textContent = STATUS_LABELS[group.status] || STATUS_LABELS.pending;
+      }
+    });
+    const retry = state.ui.panel.querySelector('[data-action="retry-failed"]');
+    if (retry) retry.disabled = !state.groups.some((group) => group.status === 'partial' || group.status === 'failed');
+  }
+
   function refreshVersionSelects(state) {
     if (!state.ui.panel) return;
     state.groups.forEach((group) => {
       const select = state.ui.panel.querySelector(`[data-version-for="${group.id}"]`);
-      if (select) select.value = String(group.activeVersion);
+      if (!select) return;
+      select.replaceChildren();
+      group.versions.forEach((version, index) => {
+        const option = document.createElement('option');
+        option.value = String(index); option.textContent = version.label;
+        select.appendChild(option);
+      });
+      select.value = String(group.activeVersion);
+      select.disabled = group.versions.length < 2;
     });
   }
 
@@ -154,6 +187,10 @@
       checkbox.checked = initial ? true : state.selectedGroups.has(group.id);
       const snippet = document.createElement('span');
       snippet.dataset.role = 'snippet'; snippet.textContent = group.sourceText || '(متن خالی)';
+      const paragraphStatus = document.createElement('span');
+      paragraphStatus.dataset.role = 'paragraph-status'; paragraphStatus.dataset.statusFor = group.id;
+      paragraphStatus.dataset.state = group.status;
+      paragraphStatus.textContent = STATUS_LABELS[group.status] || STATUS_LABELS.pending;
       const variantRow = document.createElement('span');
       variantRow.dataset.role = 'variant-row';
       const variantLabel = document.createElement('span'); variantLabel.textContent = 'نمایش:';
@@ -169,7 +206,7 @@
       variantSelect.disabled = group.versions.length < 2;
       variantSelect.addEventListener('change', () => setGroupVersion(group, variantSelect.value));
       variantRow.append(variantLabel, variantSelect);
-      row.append(checkbox, snippet, variantRow);
+      row.append(checkbox, snippet, paragraphStatus, variantRow);
       list.appendChild(row);
     });
     const panelStatus = document.createElement('p');
@@ -180,78 +217,142 @@
     const translate = document.createElement('button');
     translate.type = 'button'; translate.dataset.action = 'translate-selected'; translate.textContent = 'ترجمهٔ انتخاب‌شده‌ها';
     translate.addEventListener('click', () => translateSelected(state, panel));
+    const retry = document.createElement('button');
+    retry.type = 'button'; retry.dataset.action = 'retry-failed'; retry.textContent = 'تلاش دوباره برای ناقص/ناموفق‌ها';
+    retry.title = 'فقط بخش‌هایی را می‌فرستد که در تلاش قبلی ترجمه نشدند.';
+    retry.addEventListener('click', () => translateSelected(state, panel, true));
     all.addEventListener('click', () => list.querySelectorAll('[data-group-select]').forEach((input) => { input.checked = true; }));
     none.addEventListener('click', () => list.querySelectorAll('[data-group-select]').forEach((input) => { input.checked = false; }));
-    panel.append(head, controls, list, panelStatus, translate);
+    panel.append(head, controls, list, panelStatus, translate, retry);
     document.documentElement.appendChild(panel);
     state.ui.panel = panel;
+    refreshGroupStatuses(state);
   }
 
-  async function translateSelected(state, panel) {
+  async function translateSelected(state, panel, retryOnly = false) {
     if (state.running) return;
-    const selected = [...panel.querySelectorAll('[data-group-select]:checked')]
-      .map((checkbox) => state.groups.find((group) => group.id === checkbox.dataset.groupSelect)).filter(Boolean);
+    let selected;
+    if (retryOnly) {
+      selected = state.groups.filter((group) => group.status === 'partial' || group.status === 'failed');
+      panel.querySelectorAll('[data-group-select]').forEach((input) => {
+        input.checked = selected.some((group) => group.id === input.dataset.groupSelect);
+      });
+    } else {
+      selected = [...panel.querySelectorAll('[data-group-select]:checked')]
+        .map((checkbox) => state.groups.find((group) => group.id === checkbox.dataset.groupSelect)).filter(Boolean);
+    }
     const panelStatus = panel.querySelector('[data-role="panel-status"]');
     if (!selected.length) {
-      panelStatus.textContent = 'برای ادامه، دست‌کم یک پاراگراف را انتخاب کنید.';
+      panelStatus.textContent = retryOnly
+        ? 'پاراگراف ناقص یا ناموفقی برای تلاش دوباره وجود ندارد.'
+        : 'برای ادامه، دست‌کم یک پاراگراف را انتخاب کنید.';
       return;
     }
     const selectedIds = new Set(selected.map((group) => group.id));
-    const entries = selected.flatMap((group) => tools.createEntries(group.records));
+    const entries = selected.flatMap((group) => {
+      const allEntries = tools.createEntries(group.records);
+      if (!retryOnly) {
+        group.lastAttempt = new Map();
+        group.failedPartIds = new Set();
+      }
+      group.status = 'translating';
+      return retryOnly ? allEntries.filter((entry) => group.failedPartIds.has(entry.id)) : allEntries;
+    });
     const batches = tools.splitBatches(entries);
+    if (!entries.length) {
+      selected.forEach((group) => { group.status = 'failed'; });
+      refreshGroupStatuses(state);
+      panelStatus.textContent = 'بخش تازه‌ای برای ارسال پیدا نشد؛ ترجمه‌های قبلی حفظ شده‌اند.';
+      return;
+    }
     const button = panel.querySelector('[data-action="translate-selected"]');
     state.running = true;
     button.disabled = true;
     panel.querySelectorAll('button, input, select').forEach((control) => { control.disabled = true; });
-    panelStatus.textContent = `در حال ترجمهٔ ${selected.length} پاراگراف...`;
-    state.ui.status.textContent = `در حال ترجمهٔ ${selected.length} پاراگراف...`;
+    refreshGroupStatuses(state);
+    panelStatus.textContent = retryOnly
+      ? `در حال تلاش دوباره برای بخش‌های ناموفقِ ${selected.length} پاراگراف...`
+      : `در حال ترجمهٔ ${selected.length} پاراگراف...`;
+    state.ui.status.textContent = panelStatus.textContent;
     sendProgress(state.jobId, 'working', { total: batches.length, textNodes: entries.length });
     try {
       const translations = new Map();
+      const batchErrors = [];
       for (let index = 0; index < batches.length; index++) {
         panelStatus.textContent = `در حال ترجمه... بستهٔ ${index + 1} از ${batches.length}`;
-        const response = await chrome.runtime.sendMessage({
-          type: 'WTPDF_TRANSLATE_PAGE_BATCH', entries: batches[index]
-        });
-        if (!response || !response.ok) throw new Error(response && response.error || 'سرویس ترجمه پاسخ نداد.');
-        (response.translations || []).forEach((row) => {
-          if (row && typeof row.id === 'string' && typeof row.text === 'string') translations.set(row.id, row.text);
-        });
+        try {
+          const response = await chrome.runtime.sendMessage({
+            type: 'WTPDF_TRANSLATE_PAGE_BATCH', entries: batches[index]
+          });
+          if (!response || !response.ok) throw new Error(response && response.error || 'سرویس ترجمه پاسخ نداد.');
+          (response.translations || []).forEach((row) => {
+            if (row && typeof row.id === 'string' && typeof row.text === 'string' && row.text.trim()) {
+              translations.set(row.id, row.text);
+            }
+          });
+        } catch (error) {
+          batchErrors.push(error && error.message ? error.message : 'خطای ارتباط با سرویس ترجمه');
+        }
         sendProgress(state.jobId, 'working', { completed: index + 1, total: batches.length, textNodes: entries.length });
       }
-      let updatedParagraphs = 0, translatedRecords = 0;
+      let updatedParagraphs = 0, completedParagraphs = 0, partialParagraphs = 0, failedParagraphs = 0;
       selected.forEach((group) => {
-        const groupTranslations = new Map();
-        group.records.forEach((record) => (record.parts || []).forEach((part) => {
-          if (translations.has(part.id)) groupTranslations.set(part.id, translations.get(part.id));
-        }));
-        tools.applyTranslations(group.records, groupTranslations);
+        translations.forEach((text, id) => {
+          if (group.records.some((record) => (record.parts || []).some((part) => part.id === id))) {
+            group.lastAttempt.set(id, text);
+          }
+        });
+        const expectedParts = group.records.flatMap((record) => record.parts || []);
+        const translatedParts = expectedParts.filter((part) => group.lastAttempt.has(part.id) &&
+          String(group.lastAttempt.get(part.id)).trim()).length;
+        group.failedPartIds = new Set(expectedParts.filter((part) => !group.lastAttempt.has(part.id)).map((part) => part.id));
+        if (translatedParts === expectedParts.length && expectedParts.length) {
+          group.status = 'translated'; completedParagraphs++;
+        } else if (translatedParts) {
+          group.status = 'partial'; partialParagraphs++;
+        } else {
+          group.status = 'failed'; failedParagraphs++;
+        }
+        if (!translatedParts) return;
+
+        tools.applyTranslations(group.records, group.lastAttempt);
         const translatedIds = new Set(group.records.filter((record) => record.hasTranslation).map((record) => record.id));
-        if (!translatedIds.size) return;
         const values = new Map(group.records.map((record) => [record.id, record.translated]));
-        group.versions.push({ label: `ترجمهٔ ${group.versions.length}`, values, translatedIds });
+        const version = {
+          label: group.status === 'partial' ? `ترجمهٔ ${group.versions.length} (ناقص)` : `ترجمهٔ ${group.versions.length}`,
+          values, translatedIds
+        };
+        group.versions.push(version);
         group.activeVersion = group.versions.length - 1;
         versionTextMap(group.records, values, translatedIds);
-        translatedRecords += translatedIds.size;
         updatedParagraphs++;
       });
-      if (!translatedRecords) throw new Error('از موتور انتخاب‌شده ترجمه‌ای دریافت نشد؛ متن‌های قبلی حفظ شدند.');
       state.selectedGroups = selectedIds;
       state.initialSelection = false;
-      closePanel(state);
-      openPanel(state, false);
-      state.ui.panel.querySelector('[data-role="panel-status"]').textContent =
-        `ترجمهٔ تازه برای ${updatedParagraphs} پاراگراف ذخیره شد؛ از فهرست نسخهٔ هرکدام را انتخاب کنید.`;
-      state.ui.status.textContent = `${updatedParagraphs} پاراگراف ترجمه شد؛ نسخه‌ها قابل انتخاب‌اند.`;
-      sendProgress(state.jobId, 'done', { completed: batches.length, total: batches.length, textNodes: translatedRecords });
+      refreshVersionSelects(state);
+      refreshGroupStatuses(state);
+      const summary = `${completedParagraphs} کامل، ${partialParagraphs} ناقص، ${failedParagraphs} ناموفق`;
+      panelStatus.textContent = updatedParagraphs
+        ? `نتیجه: ${summary}. ترجمه‌های موفق و نسخه‌های قبلی حفظ شدند؛ می‌توانید فقط موارد ناقص/ناموفق را دوباره بفرستید.`
+        : `نتیجه: ${summary}. ترجمه‌های قبلی دست‌نخورده ماندند؛ می‌توانید دوباره تلاش کنید.`;
+      state.ui.status.textContent = `${summary}؛ وضعیت هر پاراگراف در فهرست مشخص است.`;
+      sendProgress(state.jobId, failedParagraphs || partialParagraphs ? 'error' : 'done', {
+        completed: batches.length, total: batches.length, textNodes: entries.length
+      });
+      if (batchErrors.length) panelStatus.title = batchErrors.join('\n');
     } catch (error) {
       const message = error && error.message ? error.message : 'ترجمه ناموفق بود.';
-      panelStatus.textContent = message;
-      state.ui.status.textContent = message;
+      selected.forEach((group) => { if (group.status === 'translating') group.status = 'failed'; });
+      refreshGroupStatuses(state);
+      panelStatus.textContent = `${message} ترجمه‌های قبلی حفظ شدند؛ می‌توانید موارد ناموفق را دوباره تلاش کنید.`;
+      state.ui.status.textContent = 'ترجمه کامل نشد؛ نسخه‌های قبلی حفظ شدند.';
       sendProgress(state.jobId, 'error', { textNodes: entries.length });
     } finally {
       state.running = false;
-      if (state.ui.panel) state.ui.panel.querySelectorAll('button, input, select').forEach((control) => { control.disabled = false; });
+      if (state.ui.panel) {
+        state.ui.panel.querySelectorAll('button, input, select').forEach((control) => { control.disabled = false; });
+        refreshGroupStatuses(state);
+      }
     }
   }
 

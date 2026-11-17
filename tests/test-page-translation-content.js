@@ -18,7 +18,7 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
   </main></body></html>`, { url: 'https://example.test/article', runScripts: 'outside-only', pretendToBeVisual: true });
   const { window } = dom;
   const requests = [], progress = [];
-  let listener = null, translationRun = 0;
+  let listener = null, translationRun = 0, responseMode = 'full';
   const coreSource = fs.readFileSync(path.join(__dirname, '../src/core/page-translation.js'), 'utf8');
   vm.runInContext(coreSource, dom.getInternalVMContext(), { filename: 'page-translation.js' });
   window.chrome = {
@@ -28,9 +28,13 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
         if (message.type === 'WTPDF_TRANSLATE_PAGE_BATCH') {
           requests.push(message);
           translationRun++;
+          if (responseMode === 'fail') return { ok: false, error: 'test service failure' };
+          const entries = responseMode === 'partial'
+            ? message.entries.filter((entry) => !/world/.test(entry.text))
+            : message.entries;
           return {
             ok: true, provider: 'Google Translate',
-            translations: message.entries.map((entry) => ({ id: entry.id, text: `V${translationRun}(${entry.text.trim()})` }))
+            translations: entries.map((entry) => ({ id: entry.id, text: `V${translationRun}(${entry.text.trim()})` }))
           };
         }
         if (message.type === 'WTPDF_PAGE_TRANSLATE_PROGRESS') progress.push(message);
@@ -60,6 +64,9 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
   check('only the checked paragraph is sent to the selected engine',
     requests.length === 1 && requests[0].entries.every((entry) =>
       /Hello|world|from this page/.test(entry.text)) && requests[0].entries.every((entry) => !/This paragraph/.test(entry.text)));
+  check('paragraph status distinguishes a successful translation from an unselected paragraph',
+    window.document.querySelector('[data-status-for="group-1"]').dataset.state === 'translated' &&
+    window.document.querySelector('[data-status-for="group-2"]').dataset.state === 'pending');
   check('successful paragraph receives its first RTL translation while unselected text remains unchanged',
     window.document.querySelector('#article').textContent.includes('V1(') &&
     window.document.querySelector('#article').getAttribute('dir') === 'rtl' &&
@@ -99,6 +106,35 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
   firstVersions.value = '2'; firstVersions.dispatchEvent(new window.Event('change', { bubbles: true }));
   check('per-paragraph selector can switch back to the new translation', window.document.querySelector('#article').textContent.includes('V2('));
 
+  responseMode = 'fail';
+  window.document.querySelector('[data-action="translate-selected"]').click();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  check('failed request marks the paragraph and keeps the previous successful version visible',
+    window.document.querySelector('[data-status-for="group-1"]').dataset.state === 'failed' &&
+    window.document.querySelector('#article').textContent.includes('V2(') &&
+    window.document.querySelector('[data-version-for="group-1"]').options.length === 3);
+  responseMode = 'partial';
+  window.document.querySelector('[data-action="retry-failed"]').click();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  check('retry of a failed paragraph records partial completion without losing its saved version',
+    requests[3].entries.length === 3 &&
+    window.document.querySelector('[data-status-for="group-1"]').dataset.state === 'partial' &&
+    window.document.querySelector('#article').textContent.includes('V4(') &&
+    window.document.querySelector('#article').textContent.includes('world') &&
+    window.document.querySelector('[data-version-for="group-1"]').options.length === 4);
+  responseMode = 'full';
+  window.document.querySelector('[data-action="retry-failed"]').click();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  check('retry sends only the missing text segment and combines it with earlier successes',
+    requests[4].entries.length === 1 && /world/.test(requests[4].entries[0].text) &&
+    window.document.querySelector('[data-status-for="group-1"]').dataset.state === 'translated' &&
+    window.document.querySelector('#article').textContent.includes('V4(') &&
+    window.document.querySelector('#article').textContent.includes('V5(world)'));
+  firstVersions = window.document.querySelector('[data-version-for="group-1"]');
+  firstVersions.value = '2'; firstVersions.dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('older complete translation remains selectable after failed and partial retries',
+    window.document.querySelector('#article').textContent.includes('V2(') && firstVersions.options.length === 5);
+
   window.document.querySelector('[data-action="original"]').click();
   check('global original control restores all paragraphs and original directions',
     window.document.querySelector('#article').textContent === 'Hello world from this page.' &&
@@ -106,7 +142,8 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
     window.document.querySelector('#second').textContent === 'This paragraph can remain unchanged.');
   window.document.querySelector('[data-action="translated"]').click();
   check('global translation control restores each paragraph’s latest saved version',
-    window.document.querySelector('#article').textContent.includes('V2('));
+    window.document.querySelector('#article').textContent.includes('V4(') &&
+    window.document.querySelector('#article').textContent.includes('V5(world)'));
   check('translation progress never includes paragraph text', progress.length > 0 && progress.every((item) => !Object.hasOwn(item, 'text')));
   window.document.querySelector('[data-action="restore"]').click();
   check('restore removes the toolbar and chooser and returns the original page text',
