@@ -257,7 +257,7 @@ function webpageAiConfig(settings, providerOverride = '') {
   const defaultSkill = typeof AiTranslateTools !== 'undefined' ? AiTranslateTools.DEFAULT_SKILL : '';
   return {
     provider,
-    model: providerData && providerData.model || settings.model || '',
+    model: providerData && providerData.model || (provider === 'gemini' ? settings.model : '') || '',
     profiles: profiles.map((profile, index) => ({
       id: String(profile && profile.id || `api-${index + 1}`),
       name: String(profile && profile.name || `API ${index + 1}`),
@@ -265,6 +265,21 @@ function webpageAiConfig(settings, providerOverride = '') {
     })).filter((profile) => profile.apiKey.trim()),
     skill: typeof settings.skill === 'string' && settings.skill !== defaultSkill ? settings.skill : ''
   };
+}
+
+function configuredWebpageAiEngines(settings) {
+  const providerLabels = { gemini: 'Google Gemini', openai: 'OpenAI', openrouter: 'OpenRouter', avalai: 'AvalAI' };
+  const defaults = { gemini: 'gemini-2.5-flash', openai: 'gpt-4o-mini', openrouter: 'openai/gpt-4o-mini', avalai: 'gpt-6-luna' };
+  return [...WEBPAGE_AI_PROVIDERS].flatMap((provider) => {
+    const config = webpageAiConfig(settings || {}, provider);
+    if (!config.profiles.length) return [];
+    let model = String(config.model || defaults[provider]).trim() || defaults[provider];
+    if (provider === 'gemini') model = model.replace(/^models\//, '');
+    if (typeof AiTranslateTools !== 'undefined' && typeof AiTranslateTools.normalizeModel === 'function') {
+      try { model = AiTranslateTools.normalizeModel(model, provider); } catch { /* keep the user's model visible so it can be corrected in settings */ }
+    }
+    return [{ value: `ai:${provider}`, provider, model, label: `${providerLabels[provider]} · ${model}` }];
+  });
 }
 
 async function translateWebpageBatch(rawEntries, requestedEngine = '') {
@@ -294,9 +309,13 @@ async function translateWebpageBatch(rawEntries, requestedEngine = '') {
     const result = await AiTranslateTools.translateWithFailover({
       ...config, entries, sourceLang: 'auto', context: 'webpage'
     });
+    const model = typeof AiTranslateTools.normalizeModel === 'function'
+      ? AiTranslateTools.normalizeModel(config.model, config.provider)
+      : config.model;
     return {
       ok: true,
       provider: ({ gemini: 'Google Gemini', openai: 'OpenAI', openrouter: 'OpenRouter', avalai: 'AvalAI' })[config.provider] || 'هوش مصنوعی',
+      model,
       translations: [...result.translations.entries()].map(([id, text]) => ({ id, text }))
     };
   }
@@ -350,13 +369,15 @@ function waitForTranslationTabComplete(tab) {
 }
 
 async function createTranslatedPageCopy(sourceTabId, engine) {
-  const stored = await chrome.storage.local.get(WEBPAGE_TRANSLATION_CONSENT_KEY);
+  const stored = await chrome.storage.local.get([WEBPAGE_TRANSLATION_CONSENT_KEY, WEBPAGE_TRANSLATION_SETTINGS_KEY]);
   if (stored[WEBPAGE_TRANSLATION_CONSENT_KEY] !== true) {
     throw new Error('ابتدا در پنجرهٔ افزونه، اجازهٔ ارسال متن انتخاب‌شده را فعال کنید.');
   }
   if (!Number.isSafeInteger(sourceTabId) || sourceTabId < 0) throw new Error('صفحهٔ فعالی برای ترجمه پیدا نشد.');
-  if (!['auto', 'google', 'mymemory', ...[...WEBPAGE_AI_PROVIDERS].map((provider) => `ai:${provider}`)].includes(engine)) {
-    throw new Error('موتور ترجمهٔ انتخاب‌شده معتبر نیست.');
+  const availableAiEngines = configuredWebpageAiEngines(stored[WEBPAGE_TRANSLATION_SETTINGS_KEY] || {});
+  const validEngines = ['auto', 'google', 'mymemory', ...availableAiEngines.map((item) => item.value)];
+  if (!validEngines.includes(engine)) {
+    throw new Error('برای نمایش این سرویس در فهرست، ابتدا مدل و کلید API آن را در تنظیمات وارد کنید.');
   }
   const sourceTab = await chrome.tabs.get(sourceTabId);
   if (!sourceTab || !supportedTranslationPageUrl(sourceTab.url)) {
@@ -377,7 +398,8 @@ async function createTranslatedPageCopy(sourceTabId, engine) {
     const result = await chrome.tabs.sendMessage(duplicate.id, {
       type: 'WTPDF_PAGE_TRANSLATE_START',
       jobId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-      engine
+      engine,
+      availableAiEngines
     });
     if (!result || !result.ok) throw new Error(result && result.error || 'متن قابل ترجمه‌ای در صفحه پیدا نشد.');
     try { await chrome.tabs.update(duplicate.id, { active: true }); } catch { /* duplicate may already be active */ }

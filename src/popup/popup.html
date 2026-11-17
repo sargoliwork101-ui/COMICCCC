@@ -13,7 +13,7 @@
       <h1>PIC TO PDF</h1>
       <p>کمیک را به PDF یا تصویر تبدیل کن</p>
     </div>
-    <span class="version-pill">v2.80</span>
+    <span class="version-pill">v2.81</span>
     <button type="button" id="updateBtn" class="update-btn" title="بررسی و دانلود به‌روزرسانی از گیت‌هاب"
       aria-label="بررسی به‌روزرسانی">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"
@@ -94,12 +94,8 @@
         <option value="auto">Google؛ اگر نشد MyMemory</option>
         <option value="google">فقط Google Translate</option>
         <option value="mymemory">فقط MyMemory</option>
-        <option value="ai:gemini">Google Gemini (مدل تنظیم‌شده)</option>
-        <option value="ai:openai">OpenAI (مدل تنظیم‌شده)</option>
-        <option value="ai:openrouter">OpenRouter (مدل تنظیم‌شده)</option>
-        <option value="ai:avalai">AvalAI (مدل تنظیم‌شده)</option>
       </select>
-      <p class="mode-hint">برای هوش مصنوعی، مدل و کلید سرویس را یک‌بار در «تنظیمات API هوش مصنوعی» وارد کنید.</p>
+      <p id="pageTranslationEngineHint" class="mode-hint">فقط سرویس‌های دارای کلید API در فهرست نمایش داده می‌شوند.</p>
     </div>
     <label class="check-field page-translation-consent" for="pageTranslationConsent">
       <input type="checkbox" id="pageTranslationConsent">

@@ -34,8 +34,9 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
           const entries = responseMode === 'partial'
             ? message.entries.filter((entry) => !/world/.test(entry.text))
             : message.entries;
+          const aiSelected = message.engine === 'ai:openai';
           return {
-            ok: true, provider: 'Google Translate',
+            ok: true, provider: aiSelected ? 'OpenAI' : 'Google Translate', model: aiSelected ? 'gpt-test' : '',
             translations: entries.map((entry) => ({ id: entry.id, text: `V${translationRun}(${entry.text.trim()})` }))
           };
         }
@@ -49,7 +50,8 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
   check('content script registers the translated-copy message listener', typeof listener === 'function');
 
   let result = null;
-  const keepOpen = listener({ type: 'WTPDF_PAGE_TRANSLATE_START', jobId: 'job-1' }, {}, (response) => { result = response; });
+  const keepOpen = listener({ type: 'WTPDF_PAGE_TRANSLATE_START', jobId: 'job-1',
+    availableAiEngines: [{ provider: 'openai', model: 'gpt-test' }] }, {}, (response) => { result = response; });
   await pause();
   const toolbar = window.document.querySelector('[data-wtpdf-page-translation-ui="toolbar"]');
   const pickToggle = window.document.querySelector('[data-action="pick-toggle"]');
@@ -63,10 +65,19 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
     keepOpen === false && result && result.ok && result.readyForSelection && window.__wtpdfPageTranslation.pickMode &&
     !!toolbar && !window.document.querySelector('[data-wtpdf-page-translation-ui="panel"]') &&
     !/پاراگراف‌هایی را که می‌خواهید ترجمه کنید انتخاب کنید/.test(window.document.body.textContent) && requests.length === 0);
-  check('compact toolbar gives a prompt, an engine selector, and primary controls without a version counter',
-    /۱\).*متن را انتخاب کنید/.test(toolbar.querySelector('[data-role="hint"]').textContent) && !!toolbar.querySelector('[data-role="translation-engine"]') &&
-    !!toolbar.querySelector('[data-action="translate-selected"]') && !toolbar.querySelector('[data-role="version-count"]') &&
+  check('toolbar groups engine, selection, translation, and review tools into clear steps',
+    /موتور ترجمه/.test(toolbar.querySelector('[data-role="engine-section"]').textContent) &&
+    /متن دلخواه/.test(toolbar.querySelector('[data-role="selection-section"]').textContent) &&
+    /دریافت ترجمه/.test(toolbar.querySelector('[data-role="translate-section"]').textContent) &&
+    /بازبینی و نسخه‌ها/.test(toolbar.querySelector('[data-role="review"]').textContent) &&
+    !!toolbar.querySelector('[data-role="translation-engine"]') && !!toolbar.querySelector('[data-action="translate-selected"]') &&
+    !toolbar.querySelector('[data-role="version-count"]') && !toolbar.querySelector('[data-action="restore"]') &&
     !toolbar.textContent.includes('Hello') && !toolbar.textContent.includes('This paragraph'));
+  check('only configured AI providers and their exact model names appear in the page menu',
+    [...toolbar.querySelectorAll('[data-role="translation-engine"] option')].map((option) => option.value).join(',') === 'auto,google,mymemory,ai:openai' &&
+    toolbar.querySelector('[data-role="translation-engine"] option[value="ai:openai"]').textContent.includes('gpt-test') &&
+    !toolbar.querySelector('[data-role="translation-engine"]').textContent.includes('Gemini') &&
+    !toolbar.querySelector('[data-role="translation-engine"]').textContent.includes('OpenRouter'));
   check('each paragraph shows its own saved-translation badge above the text',
     window.document.querySelectorAll('#article > .wtpdf-page-translation-version-badge, #second > .wtpdf-page-translation-version-badge').length === 2 &&
     window.document.querySelector('#article > .wtpdf-page-translation-version-badge').textContent.includes('۰ ترجمه') &&
@@ -112,7 +123,8 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
 
   check('toolbar moves versions while the paragraph-level badge shows this paragraph count',
     group('group-1').versions.length === 2 && toolbar.querySelector('[data-action="version-prev"]').disabled === false &&
-    window.document.querySelector('#article > .wtpdf-page-translation-version-badge').textContent.includes('۱ ترجمه'));
+    window.document.querySelector('#article > .wtpdf-page-translation-version-badge').textContent.includes('۱ ترجمه') &&
+    window.document.querySelector('#article > .wtpdf-page-translation-version-badge').textContent.includes('Google Translate'));
   toolbar.querySelector('[data-action="version-prev"]').click();
   check('previous-version control restores original text for the selected paragraph',
     textWithoutBadges(window.document.querySelector('#article')) === 'Hello world from this page.' &&
@@ -122,7 +134,8 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
     window.document.querySelector('#article').textContent.includes('V1(') &&
     window.document.querySelector('#article').getAttribute('dir') === 'rtl');
 
-  const sameTabResponse = listener({ type: 'WTPDF_PAGE_TRANSLATE_OPEN_SELECTION', engine: 'google' }, {}, (response) => { result = response; });
+  const sameTabResponse = listener({ type: 'WTPDF_PAGE_TRANSLATE_OPEN_SELECTION', engine: 'ai:openai',
+    availableAiEngines: [{ provider: 'openai', model: 'gpt-test' }] }, {}, (response) => { result = response; });
   await pause();
   check('reopen request reactivates direct page selection without showing a chooser',
     sameTabResponse === false && result && result.ok && result.translatedCopy &&
@@ -132,12 +145,20 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 20));
   check('retranslation creates another version in place without a panel or new tab',
     requests.length === 2 && window.document.querySelector('#article').textContent.includes('V2(') &&
+    requests[1].engine === 'ai:openai' &&
     window.document.querySelectorAll('[data-wtpdf-page-translation-ui="toolbar"]').length === 1 &&
     !window.document.querySelector('[data-wtpdf-page-translation-ui="panel"]'));
+  check('each saved translation displays its actual AI provider and model above the paragraph',
+    window.document.querySelector('#article > .wtpdf-page-translation-version-badge').textContent.includes('OpenAI') &&
+    window.document.querySelector('#article > .wtpdf-page-translation-version-badge').textContent.includes('مدل gpt-test'));
   toolbar.querySelector('[data-action="version-prev"]').click();
-  check('previous version remains selectable from the compact toolbar', window.document.querySelector('#article').textContent.includes('V1('));
+  check('previous version remains selectable and shows its own translation source',
+    window.document.querySelector('#article').textContent.includes('V1(') &&
+    window.document.querySelector('#article > .wtpdf-page-translation-version-badge').textContent.includes('Google Translate'));
   toolbar.querySelector('[data-action="version-next"]').click();
-  check('latest version can be restored after reviewing an older one', window.document.querySelector('#article').textContent.includes('V2('));
+  check('next version restores its own translated text and model label',
+    window.document.querySelector('#article').textContent.includes('V2(') &&
+    window.document.querySelector('#article > .wtpdf-page-translation-version-badge').textContent.includes('مدل gpt-test'));
 
   responseMode = 'fail';
   toolbar.querySelector('[data-action="translate-selected"]').click();
@@ -188,9 +209,6 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
   check('the five earlier saved translations remain reachable after the history limit is reached',
     window.document.querySelector('#history').textContent.includes('V9('));
   for (let index = 0; index < 5; index++) toolbar.querySelector('[data-action="version-next"]').click();
-  check('restore help explains it affects only the translated copy',
-    toolbar.querySelector('[data-action="restore"]').title.includes('صفحهٔ اصلی تغییر نمی‌کند'));
-
   toolbar.querySelector('[data-action="original"]').click();
   check('global original control restores all paragraphs and original directions',
     textWithoutBadges(window.document.querySelector('#article')) === 'Hello world from this page.' &&
@@ -201,12 +219,9 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
     window.document.querySelector('#article').textContent.includes('V5(') &&
     window.document.querySelector('#article').textContent.includes('V6(world)'), { request: requests[5], status: group('group-1').status, text: window.document.querySelector('#article').textContent });
   check('translation progress never includes paragraph text', progress.length > 0 && progress.every((item) => !Object.hasOwn(item, 'text')));
-  toolbar.querySelector('[data-action="restore"]').click();
-  check('restore removes the compact toolbar and returns original page text',
-    !window.document.querySelector('[data-wtpdf-page-translation-ui]') &&
-    !window.document.querySelector('.wtpdf-page-translation-version-badge') &&
-    textWithoutBadges(window.document.querySelector('#article')) === 'Hello world from this page.' &&
-    !window.document.querySelector('#article').hasAttribute('dir'));
+  check('there is no misleading restore button that closes the translation toolbar',
+    !!window.document.querySelector('[data-wtpdf-page-translation-ui="toolbar"]') &&
+    !window.document.querySelector('[data-action="restore"]'));
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL PAGE TRANSLATION CONTENT TESTS PASSED');
   process.exit(failures ? 1 : 0);

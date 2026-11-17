@@ -107,7 +107,8 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     !!pdoc.getElementById('translatePageBtn') && /ترجمهٔ همین صفحه/.test(pdoc.getElementById('translatePageBtn').textContent));
   check('popup exposes the translation engine and one-time privacy consent controls',
     !!pdoc.getElementById('pageTranslationEngine') && !!pdoc.getElementById('pageTranslationConsent') &&
-    pdoc.querySelectorAll('#pageTranslationEngine option').length === 7);
+    pdoc.querySelectorAll('#pageTranslationEngine option').length === 3 &&
+    !pdoc.querySelector('#pageTranslationEngine option[value="ai:gemini"]'));
   check('AI API settings are directly accessible from the popup',
     !!pdoc.getElementById('aiSettingsBtn') && /تنظیمات API هوش مصنوعی/.test(pdoc.getElementById('aiSettingsBtn').textContent) &&
     fs.readFileSync(path.join(ROOT, 'src/popup/popup.js'), 'utf8').includes("src/ai-settings/settings.html"));
@@ -259,7 +260,11 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     const translateWindow = translateDom.window;
     const storage = makeLocalStorage({
       wtpdf_page_translation_consent_v1: false,
-      wtpdf_page_translation_engine_v1: 'auto'
+      wtpdf_page_translation_engine_v1: 'ai:openai',
+      gemini_translation_settings_v1: {
+        provider: 'openai',
+        providers: { openai: { model: 'gpt-popup-test', profiles: [{ name: 'Test', apiKey: 'popup-secret' }] } }
+      }
     });
     const calls = { created: [], launched: [] };
     let closed = false;
@@ -283,6 +288,11 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     await new Promise((resolve) => setTimeout(resolve, 10));
     const translateButton = translateWindow.document.getElementById('translatePageBtn');
     const consent = translateWindow.document.getElementById('pageTranslationConsent');
+    const engineOptions = [...translateWindow.document.querySelectorAll('#pageTranslationEngine option')];
+    check('popup shows only AI providers with a saved API key and names their exact model',
+      engineOptions.length === 4 && engineOptions.some((option) => option.value === 'ai:openai' && option.textContent.includes('gpt-popup-test')) &&
+      !engineOptions.some((option) => /Gemini|OpenRouter|AvalAI/.test(option.textContent)) &&
+      !translateWindow.document.getElementById('pageTranslationEngine').textContent.includes('popup-secret'));
     check('translation stays disabled until one-time consent is given', translateButton.disabled === true);
     consent.checked = true;
     consent.dispatchEvent(new translateWindow.Event('change', { bubbles: true }));

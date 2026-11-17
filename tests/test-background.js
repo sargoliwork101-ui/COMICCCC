@@ -162,7 +162,7 @@ function bootBackground(initialStorage, translationApis = {}) {
     check('configured AI is used for webpage text with a general webpage context',
       calls.length === 1 && calls[0].provider === 'openai' && calls[0].context === 'webpage' &&
       calls[0].entries[0].text === 'Good morning.' && calls[0].profiles[0].apiKey === 'private-key' &&
-      response && response.provider === 'OpenAI');
+      response && response.provider === 'OpenAI' && response.model === 'gpt-web');
     check('AI response does not return or expose saved API keys',
       response && response.translations[0].text === 'سلام' && !JSON.stringify(response).includes('private-key'), response);
   }
@@ -258,7 +258,38 @@ function bootBackground(initialStorage, translationApis = {}) {
       calls.duplicate[0] === 19 && calls.inject[0].target.tabId === 44 &&
       calls.inject[0].files.join(',') === 'src/core/page-translation.js,src/page-translator/content.js' &&
       calls.send[0].message.type === 'WTPDF_PAGE_TRANSLATE_START' && calls.send[0].message.engine === 'google' &&
+      Array.isArray(calls.send[0].message.availableAiEngines) && calls.send[0].message.availableAiEngines.length === 0 &&
       response && response.ok && response.paragraphs === 3 && calls.update[0].patch.active === true, { calls, response });
+  }
+  {
+    const b = bootBackground({
+      wtpdf_page_translation_consent_v1: true,
+      gemini_translation_settings_v1: {
+        providers: { openai: { model: 'gpt-configured', profiles: [{ name: 'Ready', apiKey: 'must-not-leak' }] } }
+      }
+    });
+    const calls = { send: [], duplicate: 0 };
+    b.chrome.tabs.get = async (id) => ({ id, status: 'complete', url: 'https://example.test/' });
+    b.chrome.tabs.duplicate = async () => { calls.duplicate++; return { id: 46, status: 'complete', url: 'https://example.test/' }; };
+    b.chrome.tabs.sendMessage = async (_id, message) => { calls.send.push(message); return { ok: true, paragraphs: 1 }; };
+    let response = null;
+    b.listeners.message({ type: 'WTPDF_PAGE_TRANSLATE_CREATE_COPY', tabId: 19, engine: 'ai:openai' },
+      { id: 'ext', url: 'chrome-extension://ext/src/popup/popup.html' }, (result) => { response = result; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    check('translated copy receives only configured AI provider/model metadata, never API keys',
+      calls.duplicate === 1 && calls.send[0].availableAiEngines.length === 1 &&
+      calls.send[0].availableAiEngines[0].value === 'ai:openai' && calls.send[0].availableAiEngines[0].model === 'gpt-configured' &&
+      !JSON.stringify(calls.send[0]).includes('must-not-leak') && response && response.ok);
+  }
+  {
+    const b = bootBackground({ wtpdf_page_translation_consent_v1: true });
+    let duplicateCalls = 0, response = null;
+    b.chrome.tabs.duplicate = async () => { duplicateCalls++; return { id: 45, status: 'complete' }; };
+    b.listeners.message({ type: 'WTPDF_PAGE_TRANSLATE_CREATE_COPY', tabId: 19, engine: 'ai:gemini' },
+      { id: 'ext', url: 'chrome-extension://ext/src/popup/popup.html' }, (result) => { response = result; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    check('unconfigured AI providers cannot be selected or opened',
+      duplicateCalls === 0 && response && !response.ok && /کلید API/.test(response.error));
   }
   {
     const b = bootBackground({});
