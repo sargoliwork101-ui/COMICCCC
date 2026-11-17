@@ -263,7 +263,7 @@ def restore_backup(store: ProjectStore, upload: BinaryIO) -> tuple[dict[str, Any
                     raise BackupError('نام فایل‌های ZIP در سیستم مقصد یکسان است.')
                 folded_names.add(folded); names.add(name)
             if not {'manifest.json', 'project.json', 'browser-drafts.json'}.issubset(names):
-                raise BackupError('این فایل بک‌آپ پروژهٔ Comic OCR Studio نیست.')
+                raise BackupError('این فایل بک‌آپ پروژهٔ HaSaYa Studio نیست.')
             total_extracted = 0
             manifest, used = _read_json(archive, 'manifest.json', 4096, MAX_TOTAL - total_extracted)
             total_extracted += used

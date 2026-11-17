@@ -44,7 +44,7 @@ def load_preferences() -> tuple[str, str] | None:
 def save_preferences(browser: str, window: str) -> None:
     """Persist one explicit interactive choice for later launches."""
     if browser not in BROWSER_LABELS or window not in WINDOW_MODES:
-        raise ValueError("Invalid browser preferences")
+        raise ValueError("انتخاب مرورگر معتبر نیست.")
     import time
     path = data_dir() / "browser-preferences.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -126,7 +126,7 @@ def ask_preferences(
     input_fn: Callable[[str], str] = input,
     print_fn: Callable[[str], None] = print,
 ) -> tuple[str, str]:
-    print_fn("\nWhich browser should open Comic OCR Studio?")
+    print_fn("\nWhich browser should open HaSaYa Studio?")
     choices = [("1", "default"), ("2", "edge"), ("3", "chrome"), ("4", "firefox"), ("5", "none")]
     for key, browser in choices:
         print_fn(f"  {key}. {BROWSER_LABELS[browser]}")

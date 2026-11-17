@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=4.36">
-  <link rel="stylesheet" href="/rich-editor.css?v=4.36">
+  <title>HaSaYa Studio</title>
+  <link rel="stylesheet" href="/style.css?v=4.55">
+  <link rel="stylesheet" href="/rich-editor.css?v=4.55">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۴.۳۰ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>HaSaYa Studio <span class="ver">۴.۳۰ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
     <div class="topbar-actions">
       <button id="licenseTopStatusBtn" class="bt lic-top-btn hidden" type="button" title="مشاهدهٔ وضعیت لایسنس و مدت اعتبار باقی‌مانده"><span id="licenseTopDot" class="lic-top-dot" aria-hidden="true"></span><span id="licenseTopStatusText">اعتبار لایسنس</span></button>
       <button id="helpTopBtn" class="bt help-top-btn" type="button" title="راهنمای کامل و بخش‌به‌بخش برنامه با مثال (F1)"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.3"/><path d="M6.3 6.2a1.8 1.8 0 1 1 2.5 1.7c-.6.3-.8.6-.8 1.2M8 11.6h.01"/></svg><span>راهنما (Help)</span></button>
@@ -22,7 +22,7 @@
       <div class="auth-gate-head">
         <img class="auth-gate-logo" src="/assets/icon128.png" alt="">
         <div>
-          <h2 id="authGateTitle">فعال‌سازی و ورود به Comic OCR Studio</h2>
+          <h2 id="authGateTitle">فعال‌سازی و ورود به HaSaYa Studio</h2>
           <span id="authGateBadge" class="auth-gate-badge">نیازمند فعال‌سازی لایسنس</span>
         </div>
       </div>
@@ -289,7 +289,7 @@
 
   <dialog id="pendingDialog" class="dlg wide-dialog">
     <form method="dialog" class="dialog-head"><h2>نتیجه‌های منتظر بررسی</h2><button class="icon" value="cancel" aria-label="بستن">×</button></form>
-    <p class="hint">نتیجه‌های موقت روی همین دستگاه نگهداری می‌شوند و ممکن است محرمانه باشند؛ در بک‌آپ پروژه نیستند. هر تعارض را مقایسه کنید. انتخاب «حفظ ویرایش» کادر یا صفحهٔ فعلی را دست‌نخورده می‌گذارد؛ در صورت حفظ هر کادر، خلاصهٔ تازه نیز جایگزین خلاصهٔ قبلی نمی‌شود.</p>
+    <p class="hint">نتیجه‌های موقت روی همین دستگاه نگهداری می‌شوند و ممکن است محرمانه باشند؛ در بک‌آپ پروژه نیستند. بالای جزئیات هر نتیجه نوشته می‌شود چرا برای تأیید شما نگه داشته شده است. هر تعارض را مقایسه کنید. انتخاب «حفظ ویرایش» کادر یا صفحهٔ فعلی را دست‌نخورده می‌گذارد؛ در صورت حفظ هر کادر، خلاصهٔ تازه نیز جایگزین خلاصهٔ قبلی نمی‌شود. اگر نوبت ترجمه پس از آماده‌شدن نتیجه عوض شده باشد، دکمهٔ «تأیید و اعمال دستی» نتیجه را فقط روی کادرهای موجود می‌نویسد.</p>
     <div id="pendingList"></div><div id="pendingDetail" class="hidden"></div>
     <p id="pendingStatus" class="hint diagnostic-message" role="status"></p>
     <div class="dialog-actions"><button id="pendingCopy" class="bt hidden" type="button">کپی نتیجه</button><button id="pendingDiscard" class="bt danger hidden" type="button">حذف نتیجهٔ منتظر</button><button id="pendingApply" class="bt primary hidden" type="button">ثبت انتخاب‌ها</button></div>
@@ -463,7 +463,7 @@
       </div>
       <button class="icon" value="cancel" aria-label="بستن">×</button>
     </form>
-    <p class="hint">این بخش کاملاً <strong>اختیاری</strong> است. اگر فضای درایو <bdi dir="ltr">C</bdi> شما کم است، می‌توانید یک پوشه در هر درایو دلخواه (مثلاً <bdi dir="ltr">D:\ComicOCRStudio</bdi>) انتخاب کنید تا <strong>تمام دانلودهای موتورهای OCR، کش‌های نصب، پروژه‌ها و تنظیمات</strong> مستقیماً در همان پوشه قرار بگیرند.</p>
+    <p class="hint">این بخش کاملاً <strong>اختیاری</strong> است. اگر فضای درایو <bdi dir="ltr">C</bdi> شما کم است، می‌توانید یک پوشه در هر درایو دلخواه (مثلاً <bdi dir="ltr">D:\HaSaYaStudio</bdi>) انتخاب کنید تا <strong>تمام دانلودهای موتورهای OCR، کش‌های نصب، پروژه‌ها و تنظیمات</strong> مستقیماً در همان پوشه قرار بگیرند.</p>
     <div id="storageWarningBanner" class="exec-mode-banner storage-warning-banner hidden" role="status" aria-live="polite"></div>
     <div class="storage-summary-box">
       <div class="storage-summary-row"><span>پوشهٔ فعال فعلی:</span><code id="storageActivePath" dir="ltr">—</code></div>
@@ -472,7 +472,7 @@
     </div>
     <label for="storageCustomPath">پوشهٔ دلخواه جدید (اختیاری — خالی = مسیر پیش‌فرض)</label>
     <div class="storage-path-row">
-      <input id="storageCustomPath" type="text" dir="ltr" spellcheck="false" autocomplete="off" placeholder="مثال: D:\ComicOCRStudio">
+      <input id="storageCustomPath" type="text" dir="ltr" spellcheck="false" autocomplete="off" placeholder="مثال: D:\HaSaYaStudio">
       <button id="storageBrowseBtn" class="bt" type="button" title="بازکردن پنجرهٔ انتخاب پوشه در سیستم‌عامل">انتخاب پوشه…</button>
     </div>
     <div class="checks storage-checks">
@@ -719,7 +719,7 @@
       </section>
     <div class="editor-body"><div class="editor-view"><div class="editor-preview"><div id="editorStage" title="فضای خالی تصویر را بکشید تا جابه‌جا شود"><canvas id="editorCanvas"></canvas><div id="editorBoxes"></div></div></div>
 
-    </div><div class="editor-side"><details class="editor-help-details"><summary><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg><span>راهنمای کوتاه ویرایش</span></summary><div class="editor-help">روی هر کادر در تصویر (چه خودکار و چه دستی) کلیک کنید و مستقیم تایپ کنید یا فونت، اندازه، رنگ و قالب‌بندی را تغییر دهید؛ تغییرها خودکار ذخیره می‌شوند. با دستگیرهٔ دایره‌ای بالای کادر آن را بچرخانید (با Shift روی مضرب ۱۵ درجه)، از بخش «شکل و چرخش» شکل‌های بیضی، کپسولی، لوزی، شش‌ضلعی یا ابر کمیک انتخاب کنید، یا روی مستطیل نقاط گرد داخل چهار گوشه را بکشید تا گوشه‌ها گرد شوند. برای ترجمهٔ تکی همان کادر از دکمهٔ «ترجمهٔ کادر» یا آیکون 🌐 روی کادر استفاده کنید. برای کپی کادر با تمام ویژگی‌ها از آیکون ⧉، کلیدهای Ctrl+C و Ctrl+V یا Ctrl+Shift+کشیدن استفاده کنید. <button id="editorOpenFullHelpBtn" class="bt editor-open-help-btn" type="button"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg><span>بازکردن راهنمای کامل ویرایشگر (F1)</span></button></div></details><div id="blockList"></div></div></div>
+    </div><div class="editor-side"><details class="editor-help-details"><summary><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg><span>راهنمای کوتاه ویرایش</span></summary><div class="editor-help">روی هر کادر در تصویر (چه خودکار و چه دستی) کلیک کنید و مستقیم تایپ کنید یا فونت، اندازه، رنگ و قالب‌بندی را تغییر دهید؛ تغییرها خودکار ذخیره می‌شوند. با دستگیرهٔ دایره‌ای بالای کادر آن را بچرخانید (با Shift روی مضرب ۱۵ درجه)، از بخش «شکل و چرخش» شکل‌های بیضی، کپسولی، لوزی، شش‌ضلعی یا ابر کمیک انتخاب کنید، یا روی مستطیل نقاط گرد داخل چهار گوشه را بکشید تا گوشه‌ها گرد شوند. برای ترجمهٔ تکی همان کادر از دکمهٔ «ترجمهٔ کادر» یا آیکون 🌐 روی کادر استفاده کنید. برای جابه‌جاکردن دقیق کادر آن را بکشید یا با کلیدهای جهت‌دار صفحه‌کلید یک‌پیکسل‌یک‌پیکسل (با Shift ده‌پیکسل) حرکتش دهید؛ با Ctrl+Z جابه‌جایی برمی‌گردد و با Ctrl+Shift+Z یا Ctrl+Y دوباره اعمال می‌شود. برای کپی کادر با تمام ویژگی‌ها از آیکون ⧉، کلیدهای Ctrl+C و Ctrl+V یا Ctrl+Shift+کشیدن استفاده کنید. <button id="editorOpenFullHelpBtn" class="bt editor-open-help-btn" type="button"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg><span>بازکردن راهنمای کامل ویرایشگر (F1)</span></button></div></details><div id="blockList"></div></div></div>
   </dialog>
 
   <dialog id="cropDialog" class="dlg crop-dialog">
@@ -983,7 +983,7 @@
       <div class="help-head-title">
         <span class="help-head-icon" aria-hidden="true">؟</span>
         <div>
-          <h2 id="helpDialogTitle">راهنمای کامل Comic OCR Studio <span class="ver" dir="ltr">Help · F1</span></h2>
+          <h2 id="helpDialogTitle">راهنمای کامل HaSaYa Studio <span class="ver" dir="ltr">Help · F1</span></h2>
           <span id="helpSearchCount" class="muted">۱۵ بخش کامل · آموزش گام‌به‌گام + مثال عملی برای تک‌تک قسمت‌ها</span>
         </div>
       </div>
@@ -1035,12 +1035,12 @@
     </div>
   </div>
   <div id="toast" role="status" popover="manual"></div>
-<script src="/typeset.js?v=4.36"></script>
-<script src="/groups.js?v=4.36"></script>
-<script src="/rich-sanitize.js?v=4.36"></script>
-<script src="/rich-editor.js?v=4.36"></script>
-<script src="/inline-edit-session.js?v=4.36"></script>
-<script src="/help-guide.js?v=4.36"></script>
-<script src="/app.js?v=4.36"></script>
+<script src="/typeset.js?v=4.55"></script>
+<script src="/groups.js?v=4.55"></script>
+<script src="/rich-sanitize.js?v=4.55"></script>
+<script src="/rich-editor.js?v=4.55"></script>
+<script src="/inline-edit-session.js?v=4.55"></script>
+<script src="/help-guide.js?v=4.55"></script>
+<script src="/app.js?v=4.55"></script>
 </body>
 </html>
