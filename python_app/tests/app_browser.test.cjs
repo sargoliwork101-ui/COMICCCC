@@ -2274,7 +2274,9 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       card.querySelector('.card-buttons button').click();
     });
     await page.waitForSelector('#appModalDialog[open]');
-    assert.ok((await page.$eval('#appModalMessage', (el) => el.textContent)).includes('NVIDIA'));
+    assert.ok((await page.$eval('#appModalMessage', (el) => el.textContent)).includes('کد همراه آن اجازهٔ اجرا می‌دهد'), 'remote-code safety confirmation appears first');
+    await page.click('#appModalConfirm');
+    await page.waitForFunction(() => document.getElementById('appModalDialog').open && document.getElementById('appModalMessage').textContent.includes('NVIDIA'));
     await page.click('#appModalCancel');
     await page.waitForFunction(() => !document.getElementById('appModalDialog').open);
     assert.equal(await page.evaluate(() => window.__v369Calls.downloads.length), 0, 'declining GPU warning does not trigger download');
@@ -2283,9 +2285,13 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       card.querySelector('.card-buttons button').click();
     });
     await page.waitForSelector('#appModalDialog[open]');
+    assert.ok((await page.$eval('#appModalMessage', (el) => el.textContent)).includes('کد همراه آن اجازهٔ اجرا می‌دهد'));
+    await page.click('#appModalConfirm');
+    await page.waitForFunction(() => document.getElementById('appModalDialog').open && document.getElementById('appModalMessage').textContent.includes('NVIDIA'));
     await page.click('#appModalConfirm');
     await page.waitForFunction(() => window.__v369Calls.downloads.length === 1 && state.modelBusy === null);
     assert.equal(await page.evaluate(() => window.__v369Calls.downloads[0].force), true, 'confirming GPU warning passes force: true');
+    assert.equal(await page.evaluate(() => window.__v369Calls.downloads[0].accept_remote_code_risk), true, 'explicitly accepting remote code is forwarded to the server');
     await page.keyboard.press('Escape');
     await page.waitForFunction(() => !document.getElementById('modelsDialog').open);
     await page.evaluate(() => { window.fetch = window.__origFetchV369; delete window.__origFetchV369; delete window.__v369Calls; });
