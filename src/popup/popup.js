@@ -31,6 +31,19 @@ const hideStatus = () => {
   statusBox.classList.add('hidden');
 };
 
+const aiSettingsBtn = document.getElementById('aiSettingsBtn');
+if (aiSettingsBtn) {
+  aiSettingsBtn.addEventListener('click', async () => {
+    aiSettingsBtn.disabled = true;
+    try {
+      await chrome.tabs.create({ url: chrome.runtime.getURL('src/ai-settings/settings.html'), active: true });
+    } catch (error) {
+      showError('بازکردن تنظیمات هوش مصنوعی ناموفق بود: ' + (error && error.message ? error.message : error));
+      aiSettingsBtn.disabled = false;
+    }
+  });
+}
+
 const translatePageBtn = document.getElementById('translatePageBtn');
 if (translatePageBtn) {
   translatePageBtn.addEventListener('click', async () => {

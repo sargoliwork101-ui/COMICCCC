@@ -105,6 +105,9 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     !!pdoc.getElementById('pdfConvertBtn') && /تبدیل PDF به تصویر/.test(pdoc.getElementById('pdfConvertBtn').textContent));
   check('translated-copy action is available for the current HTML page',
     !!pdoc.getElementById('translatePageBtn') && /ترجمهٔ همین صفحه/.test(pdoc.getElementById('translatePageBtn').textContent));
+  check('AI API settings are directly accessible from the popup',
+    !!pdoc.getElementById('aiSettingsBtn') && /تنظیمات API هوش مصنوعی/.test(pdoc.getElementById('aiSettingsBtn').textContent) &&
+    fs.readFileSync(path.join(ROOT, 'src/popup/popup.js'), 'utf8').includes("src/ai-settings/settings.html"));
   check('file name input present', !!pdoc.getElementById('pdfName'));
   check('page limit input present', pdoc.getElementById('pageLimit') &&
     pdoc.getElementById('pageLimit').type === 'number');
@@ -213,6 +216,24 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     await new Promise((resolve) => setTimeout(resolve, 10));
     check('PDF shortcut opens a dedicated empty preview workspace',
       openedUrl === 'chrome-extension://ext/src/viewer/viewer.html?pdfWorkspace=1', openedUrl);
+  }
+
+  // AI API settings are opened as an extension-owned page and share local extension storage.
+  {
+    const settingsDom = new JSDOM(fs.readFileSync(__dirname + '/../src/popup/popup.html', 'utf8'), {
+      url: 'chrome-extension://ext/src/popup/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
+    });
+    const settingsWindow = settingsDom.window;
+    let openedUrl = '';
+    settingsWindow.chrome = {
+      runtime: { getURL: (resource) => `chrome-extension://ext/${resource}` },
+      tabs: { create: async (options) => { openedUrl = options.url; return { id: 78 }; } }
+    };
+    vm.runInContext(popupCode, settingsDom.getInternalVMContext(), { filename: 'popup.js' });
+    settingsWindow.document.getElementById('aiSettingsBtn').click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    check('AI API settings button opens the extension settings page',
+      openedUrl === 'chrome-extension://ext/src/ai-settings/settings.html', openedUrl);
   }
 
   // The page-translation action opens a consent/progress page with the selected web tab metadata.
