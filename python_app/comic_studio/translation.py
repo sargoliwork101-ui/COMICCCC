@@ -30,7 +30,7 @@ AI_PROVIDERS: dict[str, dict[str, str]] = {
     "gemini": {
         "label": "Google Gemini", "model": "gemini-2.5-flash",
         "base_url": "https://generativelanguage.googleapis.com/v1beta",
-        "key_url": "https://aistudio.google.com/apikey", "key_label": "ساخت کلید در Google AI Studio",
+        "key_url": "https://aistudio.google.com/api-keys", "key_label": "ساخت کلید در Google AI Studio",
     },
     "openai": {
         "label": "OpenAI", "model": "gpt-4o-mini", "base_url": "https://api.openai.com/v1",

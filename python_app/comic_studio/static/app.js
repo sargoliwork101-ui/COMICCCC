@@ -4734,7 +4734,7 @@ async function testEngine(engineId) {
 }
 const AI_PROVIDER_IDS = ['gemini', 'openai', 'openrouter', 'avalai'];
 const AI_FALLBACKS = {
-  gemini: { label: 'Google Gemini', model: 'gemini-2.5-flash', defaultModel: 'gemini-2.5-flash', base_url: 'https://generativelanguage.googleapis.com/v1beta', keyUrl: 'https://aistudio.google.com/apikey', keyLabel: 'ساخت کلید در Google AI Studio', profiles: [] },
+  gemini: { label: 'Google Gemini', model: 'gemini-2.5-flash', defaultModel: 'gemini-2.5-flash', base_url: 'https://generativelanguage.googleapis.com/v1beta', keyUrl: 'https://aistudio.google.com/api-keys', keyLabel: 'ساخت کلید در Google AI Studio', profiles: [] },
   openai: { label: 'OpenAI', model: 'gpt-4o-mini', defaultModel: 'gpt-4o-mini', base_url: 'https://api.openai.com/v1', keyUrl: 'https://platform.openai.com/api-keys', keyLabel: 'ساخت کلید در OpenAI', profiles: [] },
   openrouter: { label: 'OpenRouter', model: 'openai/gpt-4o-mini', defaultModel: 'openai/gpt-4o-mini', base_url: 'https://openrouter.ai/api/v1', keyUrl: 'https://openrouter.ai/settings/keys', keyLabel: 'ساخت کلید در OpenRouter', profiles: [] },
   avalai: { label: 'AvalAI', model: 'gpt-6-luna', defaultModel: 'gpt-6-luna', base_url: 'https://api.avalai.ir/v1', keyUrl: 'https://docs.avalai.ir/en/quickstart', keyLabel: 'راهنمای AvalAI', profiles: [] },

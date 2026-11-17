@@ -3,7 +3,7 @@
   const PROVIDERS = {
     gemini: {
       label: 'Google Gemini', defaultModel: 'gemini-2.5-flash',
-      keyUrl: 'https://aistudio.google.com/apikey', keyLabel: 'ساخت کلید در Google AI Studio'
+      keyUrl: 'https://aistudio.google.com/api-keys', keyLabel: 'ساخت کلید در Google AI Studio'
     },
     openai: {
       label: 'OpenAI', defaultModel: 'gpt-4o-mini',

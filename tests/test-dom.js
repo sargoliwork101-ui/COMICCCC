@@ -124,8 +124,8 @@ const $ = (id) => window.document.getElementById(id);
   check('manifest name and action title use PIC TO PDF', manifest.name === 'PIC TO PDF' &&
     manifest.action.default_title === 'PIC TO PDF');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
-  check('manifest and viewer version badge are synchronized at 2.78', manifest.version === '2.78' &&
-    window.document.querySelector('.version-pill').textContent.includes('۲.۷۸'));
+  check('manifest and viewer version badge are synchronized at 2.79', manifest.version === '2.79' &&
+    window.document.querySelector('.version-pill').textContent.includes('2.79'));
   const viewerCss = fs.readFileSync(path.join(ROOT, 'src/viewer/viewer.css'), 'utf8');
   check('topbar keeps the hamburger visible while the page scrolls',
     /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(viewerCss));
@@ -179,7 +179,7 @@ const $ = (id) => window.document.getElementById(id);
   check('editable Skill and reset action are available',
     $('aiSettings').contains($('trAiSkill')) && $('aiSettings').contains($('trAiSkillReset')));
   check('AI key help starts with the official Google AI Studio link',
-    window.document.querySelector('#aiSettings a[href="https://aistudio.google.com/apikey"][rel="noopener noreferrer"]') !== null);
+    window.document.querySelector('#aiSettings a[href="https://aistudio.google.com/api-keys"][rel="noopener noreferrer"]') !== null);
   $('trAiProvider').value = 'openrouter';
   $('trAiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
   check('switching provider updates the model and official key link',
