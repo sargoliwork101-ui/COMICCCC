@@ -71,6 +71,9 @@
       [data-wtpdf-page-translation-ui="panel"] [data-role="paragraph"] input{grid-row:1 / span 3;align-self:start;margin-top:4px;accent-color:#a5b4fc;}
       [data-wtpdf-page-translation-ui="panel"] [data-role="snippet"]{max-height:4.8em;overflow:auto;color:#e2e8f0;overflow-wrap:anywhere;}
       [data-wtpdf-page-translation-ui="panel"] [data-role="paragraph-status"]{font-size:11px;color:#cbd5e1;}
+      .wtpdf-page-translation-pickable{outline:2px dashed #fbbf24!important;outline-offset:3px;cursor:pointer!important;}
+      .wtpdf-page-translation-pickable:hover{background-color:#fbbf2430!important;}
+      .wtpdf-page-translation-picked{outline:3px solid #22c55e!important;outline-offset:3px;background-color:#22c55e24!important;}
       [data-wtpdf-page-translation-ui="panel"] [data-state="translated"]{color:#86efac;}
       [data-wtpdf-page-translation-ui="panel"] [data-state="partial"],[data-wtpdf-page-translation-ui="panel"] [data-state="failed"]{color:#fca5a5;}
       [data-wtpdf-page-translation-ui="panel"] [data-state="translating"]{color:#fde68a;}
@@ -92,15 +95,18 @@
     status.textContent = `متن صفحه آماده است؛ ${state.groups.length} پاراگراف شناسایی شد.`;
     const select = document.createElement('button');
     select.type = 'button'; select.dataset.action = 'select'; select.textContent = 'انتخاب و ترجمه';
+    const finishPick = document.createElement('button');
+    finishPick.type = 'button'; finishPick.dataset.action = 'finish-pick'; finishPick.textContent = 'پایان انتخاب';
+    finishPick.hidden = true;
     const original = document.createElement('button');
     original.type = 'button'; original.dataset.action = 'original'; original.textContent = 'متن اصلی';
     const translated = document.createElement('button');
     translated.type = 'button'; translated.dataset.action = 'translated'; translated.textContent = 'ترجمه‌ها';
     const restore = document.createElement('button');
     restore.type = 'button'; restore.dataset.action = 'restore'; restore.textContent = 'بازگردانی صفحه';
-    toolbar.append(status, select, original, translated, restore);
+    toolbar.append(status, select, finishPick, original, translated, restore);
     document.documentElement.append(style, toolbar);
-    return { style, toolbar, status, panel: null };
+    return { style, toolbar, status, panel: null, finishPick };
   }
 
   function versionTextMap(records, values, translatedIds) {
@@ -153,7 +159,95 @@
     state.ui.panel = null;
   }
 
+  function savePanelSelection(state, panel = state.ui.panel) {
+    if (!panel) return;
+    state.selectedGroups = new Set([...panel.querySelectorAll('[data-group-select]:checked')]
+      .map((input) => input.dataset.groupSelect));
+  }
+
+  function syncPageSelection(state) {
+    state.groups.forEach((group) => {
+      group.block.classList.add('wtpdf-page-translation-pickable');
+      group.block.classList.toggle('wtpdf-page-translation-picked', state.selectedGroups.has(group.id));
+    });
+  }
+
+  function exitPagePickMode(state) {
+    if (!state.pickMode) return;
+    state.pickMode = false;
+    document.removeEventListener('click', state.pickClickHandler, true);
+    document.removeEventListener('keydown', state.pickKeyHandler, true);
+    state.groups.forEach((group) => {
+      const snapshot = group.pickClassSnapshot || {};
+      group.block.classList.toggle('wtpdf-page-translation-pickable', snapshot.pickable === true);
+      group.block.classList.toggle('wtpdf-page-translation-picked', snapshot.picked === true);
+      delete group.pickClassSnapshot;
+    });
+    state.ui.finishPick.hidden = true;
+    state.ui.toolbar.querySelectorAll('[data-action="original"], [data-action="translated"]').forEach((button) => { button.disabled = false; });
+    if (state.ui.panel) state.ui.panel.hidden = false;
+    state.ui.status.textContent = `پاراگراف‌های انتخاب‌شده: ${state.selectedGroups.size}`;
+    if (state.ui.panel) {
+      const status = state.ui.panel.querySelector('[data-role="panel-status"]');
+      status.textContent = `${state.selectedGroups.size} پاراگراف انتخاب شده؛ تیک‌ها را بررسی و ترجمه را شروع کنید.`;
+    } else openPanel(state, false);
+  }
+
+  function enterPagePickMode(state) {
+    if (state.pickMode) return;
+    savePanelSelection(state);
+    state.pickMode = true;
+    state.groups.forEach((group) => {
+      group.pickClassSnapshot = {
+        pickable: group.block.classList.contains('wtpdf-page-translation-pickable'),
+        picked: group.block.classList.contains('wtpdf-page-translation-picked')
+      };
+    });
+    syncPageSelection(state);
+    if (state.ui.panel) state.ui.panel.hidden = true;
+    state.ui.finishPick.hidden = false;
+    state.ui.toolbar.querySelectorAll('[data-action="original"], [data-action="translated"]').forEach((button) => { button.disabled = true; });
+    const updateCount = () => {
+      state.ui.status.textContent = `روی پاراگراف کلیک کنید تا انتخاب شود یا از انتخاب خارج شود · ${state.selectedGroups.size} انتخاب‌شده · پایان با Escape`;
+    };
+    state.pickClickHandler = (event) => {
+      const target = event.target && (event.target.nodeType === 1 ? event.target : event.target.parentElement);
+      if (!target || target.closest('[data-wtpdf-page-translation-ui]')) return;
+      let element = target;
+      let group = null;
+      while (element && !group) {
+        group = state.groupByBlock.get(element) || null;
+        element = element.parentElement;
+      }
+      if (!group) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation();
+      if (state.selectedGroups.has(group.id)) state.selectedGroups.delete(group.id);
+      else state.selectedGroups.add(group.id);
+      group.block.classList.toggle('wtpdf-page-translation-picked', state.selectedGroups.has(group.id));
+      if (state.ui.panel) {
+        const checkbox = state.ui.panel.querySelector(`[data-group-select="${group.id}"]`);
+        if (checkbox) checkbox.checked = state.selectedGroups.has(group.id);
+      }
+      updateCount();
+    };
+    state.pickKeyHandler = (event) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault(); event.stopPropagation();
+      if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation();
+      exitPagePickMode(state);
+    };
+    document.addEventListener('click', state.pickClickHandler, true);
+    document.addEventListener('keydown', state.pickKeyHandler, true);
+    updateCount();
+  }
+
   function openPanel(state, initial = false) {
+    if (state.pickMode) {
+      exitPagePickMode(state);
+      return;
+    }
     if (state.ui.panel && state.ui.panel.isConnected) {
       state.ui.panel.hidden = false;
       return;
@@ -184,7 +278,8 @@
       row.dataset.role = 'paragraph';
       const checkbox = document.createElement('input');
       checkbox.type = 'checkbox'; checkbox.dataset.groupSelect = group.id;
-      checkbox.checked = initial ? true : state.selectedGroups.has(group.id);
+      checkbox.checked = state.selectedGroups.has(group.id);
+      checkbox.addEventListener('change', () => savePanelSelection(state, panel));
       const snippet = document.createElement('span');
       snippet.dataset.role = 'snippet'; snippet.textContent = group.sourceText || '(متن خالی)';
       const paragraphStatus = document.createElement('span');
@@ -212,8 +307,11 @@
     const panelStatus = document.createElement('p');
     panelStatus.dataset.role = 'panel-status'; panelStatus.setAttribute('role', 'status'); panelStatus.setAttribute('aria-live', 'polite');
     panelStatus.textContent = initial
-      ? 'ابتدا همه انتخاب شده‌اند؛ هر پاراگرافی را نمی‌خواهید از انتخاب خارج کنید.'
+      ? 'برای انتخاب آسان‌تر، «انتخاب روی صفحه» را بزنید و روی پاراگراف‌های دلخواه کلیک کنید؛ یا از فهرست زیر تیک بزنید.'
       : 'نسخهٔ هر پاراگراف را جداگانه عوض کنید یا برای ترجمهٔ مجدد، بندهای دلخواه را انتخاب کنید.';
+    const pickOnPage = document.createElement('button');
+    pickOnPage.type = 'button'; pickOnPage.dataset.action = 'pick-on-page'; pickOnPage.textContent = 'انتخاب روی صفحه';
+    pickOnPage.addEventListener('click', () => enterPagePickMode(state));
     const translate = document.createElement('button');
     translate.type = 'button'; translate.dataset.action = 'translate-selected'; translate.textContent = 'ترجمهٔ انتخاب‌شده‌ها';
     translate.addEventListener('click', () => translateSelected(state, panel));
@@ -221,9 +319,17 @@
     retry.type = 'button'; retry.dataset.action = 'retry-failed'; retry.textContent = 'تلاش دوباره برای ناقص/ناموفق‌ها';
     retry.title = 'فقط بخش‌هایی را می‌فرستد که در تلاش قبلی ترجمه نشدند.';
     retry.addEventListener('click', () => translateSelected(state, panel, true));
-    all.addEventListener('click', () => list.querySelectorAll('[data-group-select]').forEach((input) => { input.checked = true; }));
-    none.addEventListener('click', () => list.querySelectorAll('[data-group-select]').forEach((input) => { input.checked = false; }));
-    panel.append(head, controls, list, panelStatus, translate, retry);
+    all.addEventListener('click', () => {
+      list.querySelectorAll('[data-group-select]').forEach((input) => { input.checked = true; });
+      savePanelSelection(state, panel);
+      if (state.pickMode) syncPageSelection(state);
+    });
+    none.addEventListener('click', () => {
+      list.querySelectorAll('[data-group-select]').forEach((input) => { input.checked = false; });
+      savePanelSelection(state, panel);
+      if (state.pickMode) syncPageSelection(state);
+    });
+    panel.append(head, controls, list, panelStatus, pickOnPage, translate, retry);
     document.documentElement.appendChild(panel);
     state.ui.panel = panel;
     refreshGroupStatuses(state);
@@ -369,6 +475,7 @@
   }
 
   function restorePage(state) {
+    if (state.pickMode) exitPagePickMode(state);
     tools.restoreOriginal(state.records);
     state.records = []; state.groups = []; state.running = false;
     closePanel(state);
@@ -386,12 +493,17 @@
     const groups = buildGroups(records);
     if (!groups.length) return { ok: false, error: 'متن قابل‌انتخابی در این صفحه پیدا نشد.' };
     const state = {
-      running: false, records, groups, jobId: String(jobId || ''),
-      selectedGroups: new Set(), initialSelection: true, ui: null
+      running: false, records, groups, groupByBlock: new Map(groups.map((group) => [group.block, group])),
+      jobId: String(jobId || ''), selectedGroups: new Set(), initialSelection: true,
+      pickMode: false, pickClickHandler: null, pickKeyHandler: null, ui: null
     };
     window.__wtpdfPageTranslation = state;
     state.ui = makeToolbar(state);
-    state.ui.toolbar.querySelector('[data-action="select"]').addEventListener('click', () => openPanel(state, false));
+    state.ui.toolbar.querySelector('[data-action="select"]').addEventListener('click', () => {
+      if (state.pickMode) exitPagePickMode(state);
+      else openPanel(state, false);
+    });
+    state.ui.finishPick.addEventListener('click', () => exitPagePickMode(state));
     state.ui.toolbar.querySelector('[data-action="original"]').addEventListener('click', () => showAllOriginal(state));
     state.ui.toolbar.querySelector('[data-action="translated"]').addEventListener('click', () => showLatestTranslations(state));
     state.ui.toolbar.querySelector('[data-action="restore"]').addEventListener('click', () => restorePage(state));

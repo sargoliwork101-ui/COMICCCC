@@ -52,13 +52,44 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
   check('copy opens a paragraph chooser without translating everything immediately',
     keepOpen === false && result && result.ok && result.readyForSelection && requests.length === 0 &&
     window.document.querySelectorAll('[data-group-select]').length === 2);
-  check('all paragraphs are selected for the first run and controls are excluded',
-    [...window.document.querySelectorAll('[data-group-select]')].every((input) => input.checked) &&
+  check('paragraphs start unselected so no text is sent by accident',
+    [...window.document.querySelectorAll('[data-group-select]')].every((input) => !input.checked) &&
     !window.document.querySelector('[data-role="paragraph"]').textContent.includes('Do not translate controls'));
 
   const firstCheckbox = window.document.querySelector('[data-group-select="group-1"]');
   const secondCheckbox = window.document.querySelector('[data-group-select="group-2"]');
+  window.document.querySelector('[data-action="pick-on-page"]').click();
+  check('page-pick mode hides the list and highlights selectable paragraphs',
+    window.document.querySelector('[data-wtpdf-page-translation-ui="panel"]').hidden &&
+    window.document.getElementById('article').classList.contains('wtpdf-page-translation-pickable') &&
+    !window.document.querySelector('[data-action="finish-pick"]').hidden &&
+    window.document.querySelector('[data-action="original"]').disabled &&
+    window.document.querySelector('[data-action="translated"]').disabled);
+  const clickBlock = (element) => element.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+  clickBlock(window.document.getElementById('article'));
+  clickBlock(window.document.getElementById('second'));
+  check('clicking page paragraphs selects them and shows a selected highlight',
+    firstCheckbox.checked && secondCheckbox.checked &&
+    window.document.getElementById('article').classList.contains('wtpdf-page-translation-picked'));
+  clickBlock(window.document.getElementById('second'));
+  check('clicking a selected paragraph again removes it from the selection',
+    firstCheckbox.checked && !secondCheckbox.checked &&
+    !window.document.getElementById('second').classList.contains('wtpdf-page-translation-picked'));
+  window.document.querySelector('[data-action="finish-pick"]').click();
+  check('finishing page-pick mode returns to the chooser and removes temporary highlights',
+    !window.document.querySelector('[data-wtpdf-page-translation-ui="panel"]').hidden &&
+    !window.document.getElementById('article').classList.contains('wtpdf-page-translation-pickable') &&
+    !window.document.querySelector('[data-action="original"]').disabled &&
+    !window.document.querySelector('[data-action="translated"]').disabled);
+  window.document.querySelector('[data-action="pick-on-page"]').click();
+  clickBlock(window.document.getElementById('second'));
+  window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  check('Escape also exits page-pick mode and keeps the current choices',
+    !window.document.querySelector('[data-wtpdf-page-translation-ui="panel"]').hidden &&
+    firstCheckbox.checked && secondCheckbox.checked &&
+    !window.document.getElementById('second').classList.contains('wtpdf-page-translation-pickable'));
   secondCheckbox.checked = false;
+  secondCheckbox.dispatchEvent(new window.Event('change', { bubbles: true }));
   window.document.querySelector('[data-action="translate-selected"]').click();
   await new Promise((resolve) => setTimeout(resolve, 20));
   check('only the checked paragraph is sent to the selected engine',
