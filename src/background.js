@@ -269,7 +269,7 @@ function webpageAiConfig(settings, providerOverride = '') {
 
 function configuredWebpageAiEngines(settings) {
   const providerLabels = { gemini: 'Google Gemini', openai: 'OpenAI', openrouter: 'OpenRouter', avalai: 'AvalAI' };
-  const defaults = { gemini: 'gemini-2.5-flash', openai: 'gpt-4o-mini', openrouter: 'openai/gpt-4o-mini', avalai: 'gpt-6-luna' };
+  const defaults = { gemini: 'gemini-flash-latest', openai: 'gpt-4o-mini', openrouter: 'openai/gpt-4o-mini', avalai: 'gpt-6-luna' };
   return [...WEBPAGE_AI_PROVIDERS].flatMap((provider) => {
     const config = webpageAiConfig(settings || {}, provider);
     if (!config.profiles.length) return [];

@@ -11,6 +11,9 @@ function check(name, condition, extra) {
   check('default Skill asks for whole-context, natural comic translation',
     /همهٔ متن/.test(AiTranslateTools.DEFAULT_SKILL) && /طبیعی/.test(AiTranslateTools.DEFAULT_SKILL) &&
     /لحن/.test(AiTranslateTools.DEFAULT_SKILL) && /یکسان/.test(AiTranslateTools.DEFAULT_SKILL));
+  check('Gemini defaults to Google’s current Flash alias and migrates the previous default',
+    AiTranslateTools.DEFAULT_MODEL === 'gemini-flash-latest' &&
+    AiTranslateTools.normalizeModel('gemini-2.5-flash', 'gemini') === 'gemini-flash-latest');
 
   const entries = [
     { id: 'p0001-b001', page: 1, text: 'I trusted you.' },
@@ -27,7 +30,7 @@ function check(name, condition, extra) {
   {
     let request = null;
     await AiTranslateTools.translateBatch({
-      context: 'webpage', provider: 'gemini', apiKey: 'webpage-private-key', model: 'gemini-2.5-flash',
+      context: 'webpage', provider: 'gemini', apiKey: 'webpage-private-key', model: 'gemini-flash-latest',
       entries: [{ id: 'p000001', page: 1, text: 'A short article paragraph.' }],
       fetchFn: async (url, options) => {
         request = { url, options };

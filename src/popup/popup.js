@@ -54,7 +54,7 @@ const PAGE_FREE_TRANSLATION_ENGINES = [
   ['auto', 'Google؛ اگر نشد MyMemory'], ['google', 'فقط Google Translate'], ['mymemory', 'فقط MyMemory']
 ];
 const PAGE_AI_PROVIDERS = {
-  gemini: { label: 'Google Gemini', model: 'gemini-2.5-flash' },
+  gemini: { label: 'Google Gemini', model: 'gemini-flash-latest' },
   openai: { label: 'OpenAI', model: 'gpt-4o-mini' },
   openrouter: { label: 'OpenRouter', model: 'openai/gpt-4o-mini' },
   avalai: { label: 'AvalAI', model: 'gpt-6-luna' }
@@ -80,7 +80,10 @@ function configuredPageAiOptions(settings) {
     }
     if (!profiles.some((profile) => String(profile && profile.apiKey || '').trim())) return [];
     let model = String(data.model || (provider === 'gemini' && !settings.providers ? settings.model : '') || info.model).trim() || info.model;
-    if (provider === 'gemini') model = model.replace(/^models\//, '');
+    if (provider === 'gemini') {
+      model = model.replace(/^models\//, '');
+      if (model === 'gemini-2.5-flash') model = info.model;
+    }
     return [{ value: `ai:${provider}`, label: `${info.label} · ${model} (تنظیم‌شده)`, provider, model }];
   });
 }

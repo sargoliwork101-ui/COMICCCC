@@ -60,7 +60,7 @@ function renderProfiles() {
       const model = $('model').value.trim() || AiTranslateTools.DEFAULT_MODELS[provider];
       const apiKey = profile.apiKey.trim();
       if (!apiKey) { status.textContent = 'ابتدا کلید API را وارد کنید.'; status.className = 'profile-status bad'; key.focus(); return; }
-      test.disabled = true; test.textContent = '…'; status.textContent = 'در حال بررسی اتصال…';
+      test.disabled = true; test.textContent = '…'; status.textContent = 'در حال آزمودن ترجمهٔ نمونه…';
       try {
         const result = await AiTranslateTools.testConnection({ provider, apiKey, model });
         status.textContent = `آزمون ترجمه موفق ✓ ${result.sampleTranslation}`; status.className = 'profile-status ok';
@@ -121,8 +121,10 @@ async function loadSettings() {
         profiles = [makeProfile('کلید اصلی', settings.apiKey)];
       }
       const model = legacy ? settings.model : raw.model;
+      const savedModel = typeof model === 'string' && model.trim() ? model.trim() : AiTranslateTools.DEFAULT_MODELS[provider];
       state.providerData[provider] = {
-        model: typeof model === 'string' && model.trim() ? model.trim() : AiTranslateTools.DEFAULT_MODELS[provider],
+        model: provider === 'gemini' && savedModel === 'gemini-2.5-flash'
+          ? AiTranslateTools.DEFAULT_MODELS.gemini : savedModel,
         profiles
       };
     }

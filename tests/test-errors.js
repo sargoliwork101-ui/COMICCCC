@@ -962,7 +962,7 @@ prepare = async (it, r) => {
     h.$('trAiProvider').dispatchEvent(new h.window.Event('change', { bubbles: true }));
     await sleep(0);
     check('switching to Gemini does not reuse the OpenAI key or model',
-      h.$('trAiModel').value === 'gemini-2.5-flash' && h.ev('aiProfiles.every(p=>p.apiKey!=="openai-ui-key")'));
+      h.$('trAiModel').value === 'gemini-flash-latest' && h.ev('aiProfiles.every(p=>p.apiKey!=="openai-ui-key")'));
     h.$('trAiProvider').value = 'openai';
     h.$('trAiProvider').dispatchEvent(new h.window.Event('change', { bubbles: true }));
     await sleep(0);
@@ -1004,7 +1004,7 @@ prepare = async (it, r) => {
       h.ev('window.__connectionCalls.length') === 1 &&
       h.ev('window.__connectionCalls[0].options.method') === 'POST' &&
       h.ev('window.__connectionCalls[0].options.headers["x-goog-api-key"]') === 'connection-ui-key' &&
-      h.ev('window.__connectionCalls[0].url').includes('/v1beta/models/gemini-2.5-flash:generateContent') &&
+      h.ev('window.__connectionCalls[0].url').includes('/v1beta/models/gemini-flash-latest:generateContent') &&
       h.ev('JSON.parse(window.__connectionCalls[0].options.body).contents[0].parts[0].text.includes("Hello. This is a translation test.")') &&
       !h.ev('window.__connectionCalls[0].options.body').includes('comic.test'));
     check('successful profile test shows a clear result beside the key',
@@ -1026,7 +1026,7 @@ prepare = async (it, r) => {
     check('existing single-key settings migrate without losing key, model, Skill, or opt-in',
       h.ev('aiProfiles.length') === 1 && h.ev('aiProfiles[0].apiKey') === 'legacy-test-key' &&
       h.ev('aiProfiles[0].name') === 'کلید اصلی' && h.$('trAiEnabled').checked &&
-      h.$('trAiModel').value === 'gemini-2.5-flash' && h.$('trAiSkill').value === 'Skill قبلی');
+      h.$('trAiModel').value === 'gemini-flash-latest' && h.$('trAiSkill').value === 'Skill قبلی');
     check('migrated key appears in a private password row inside collapsed AI settings',
       h.$('aiProfileList').querySelectorAll('.ai-profile-row').length === 1 &&
       h.$('aiProfileList').querySelector('input[type="password"]').value === 'legacy-test-key' &&

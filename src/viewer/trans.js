@@ -120,8 +120,10 @@ async function loadAiSettings() {
         profiles = [makeAiProfile('کلید اصلی', settings.apiKey)];
       }
       const rawModel = legacy ? settings.model : raw.model;
+      const savedModel = typeof rawModel === 'string' && rawModel.trim() ? rawModel.trim() : AiTranslateTools.DEFAULT_MODELS[id];
       aiProviderSettings[id] = {
-        model: typeof rawModel === 'string' && rawModel.trim() ? rawModel.trim() : AiTranslateTools.DEFAULT_MODELS[id],
+        model: id === 'gemini' && savedModel === 'gemini-2.5-flash'
+          ? AiTranslateTools.DEFAULT_MODELS.gemini : savedModel,
         profiles
       };
     });

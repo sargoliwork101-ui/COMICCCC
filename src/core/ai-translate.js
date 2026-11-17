@@ -2,7 +2,7 @@
 (function (root) {
   const PROVIDERS = {
     gemini: {
-      label: 'Google Gemini', defaultModel: 'gemini-2.5-flash',
+      label: 'Google Gemini', defaultModel: 'gemini-flash-latest',
       keyUrl: 'https://aistudio.google.com/api-keys', keyLabel: 'ساخت کلید در Google AI Studio'
     },
     openai: {
@@ -39,7 +39,11 @@
   function normalizeModel(value, providerValue) {
     const provider = normalizeProvider(providerValue);
     let model = String(value || PROVIDERS[provider].defaultModel).trim();
-    if (provider === 'gemini') model = model.replace(/^models\//, '');
+    if (provider === 'gemini') {
+      model = model.replace(/^models\//, '');
+      // Settings saved by earlier builds used this retired default; keep them working via Google's latest Flash alias.
+      if (model === 'gemini-2.5-flash') model = PROVIDERS.gemini.defaultModel;
+    }
     const valid = provider === 'gemini'
       ? /^[a-z0-9][a-z0-9._-]*$/i.test(model)
       : /^[a-z0-9][a-z0-9._:/-]*$/i.test(model) && !model.includes('..') &&

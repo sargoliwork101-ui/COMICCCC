@@ -60,6 +60,7 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
   $('provider').value = 'gemini';
   $('provider').dispatchEvent(new window.Event('change', { bubbles: true }));
   await pause();
+  check('saved legacy Gemini default migrates to gemini-flash-latest', $('model').value === 'gemini-flash-latest');
   check('Gemini key help uses the current Google AI Studio API keys page',
     $('keyHelp').querySelector('a').href === 'https://aistudio.google.com/api-keys');
 
@@ -78,7 +79,7 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
   $('provider').value = 'gemini';
   $('provider').dispatchEvent(new window.Event('change', { bubbles: true }));
   await pause();
-  $('model').value = 'gemini-2.5-flash';
+  $('model').value = 'gemini-flash-latest';
   $('profiles').querySelector('input[type=password]').value = 'new-secret';
   $('profiles').querySelector('input[type=password]').dispatchEvent(new window.Event('input', { bubbles: true }));
   $('skill').value = 'ترجمهٔ رسمی';
@@ -95,7 +96,7 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
   $('profiles').querySelector('button[aria-label="تست اتصال کلید 1"]').click();
   await pause();
   check('test action verifies real Gemini translation using a fixed sample and keeps the API key private',
-    calls.fetch.length === 1 && calls.fetch[0].url === 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent' &&
+    calls.fetch.length === 1 && calls.fetch[0].url === 'https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent' &&
     calls.fetch[0].options.method === 'POST' && calls.fetch[0].options.headers['x-goog-api-key'] === 'new-secret' &&
     !calls.fetch[0].url.includes('new-secret') && JSON.parse(calls.fetch[0].options.body).contents[0].parts[0].text.includes('Hello. This is a translation test.') &&
     /آزمون ترجمه موفق/.test($('profiles').querySelector('.profile-status').textContent));
