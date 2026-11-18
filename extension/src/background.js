@@ -1,3 +1,6 @@
+/* global importScripts */
+if (typeof importScripts === 'function') importScripts('core/translate.js', 'core/ai-translate.js');
+
 // Jobهای تازه ممکن است متعلق به تب‌های بازیابی‌شدهٔ مرورگر باشند؛ فقط داده‌های بیشتر از ۷ روز پاک می‌شوند.
 const JOB_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 async function pruneOrphanJobs() {
@@ -213,8 +216,221 @@ if (chrome.tabs && chrome.tabs.onRemoved && typeof chrome.tabs.onRemoved.addList
   });
 }
 
+const WEBPAGE_TRANSLATION_SETTINGS_KEY = 'gemini_translation_settings_v1';
+const WEBPAGE_AI_PROVIDERS = new Set(['gemini', 'openai', 'openrouter', 'avalai']);
+const WEBPAGE_ENTRY_ID = /^p\d{6}(?:-s\d{3})?$/;
+const WEBPAGE_MAX_ENTRIES = 20;
+const WEBPAGE_MAX_CHARS = 5000;
+
+function validateWebpageEntries(rawEntries) {
+  if (!Array.isArray(rawEntries) || rawEntries.length < 1 || rawEntries.length > WEBPAGE_MAX_ENTRIES) {
+    throw new Error('تعداد متن‌های این بسته برای ترجمه معتبر نیست.');
+  }
+  const seen = new Set();
+  let totalChars = 0;
+  const entries = rawEntries.map((entry) => {
+    const id = String(entry && entry.id || '');
+    const text = String(entry && entry.text || '').trim();
+    if (!WEBPAGE_ENTRY_ID.test(id) || seen.has(id) || !text || text.length > 1000) {
+      throw new Error('شناسه یا متن یکی از بخش‌های صفحه برای ترجمه معتبر نیست.');
+    }
+    seen.add(id);
+    totalChars += text.length;
+    return { id, page: 1, text };
+  });
+  if (totalChars > WEBPAGE_MAX_CHARS) throw new Error('حجم این بستهٔ ترجمه بیش از حد مجاز است.');
+  return entries;
+}
+
+function webpageAiConfig(settings, providerOverride = '') {
+  const savedProvider = settings && typeof settings.provider === 'string' ? settings.provider : 'gemini';
+  const provider = WEBPAGE_AI_PROVIDERS.has(providerOverride) ? providerOverride : savedProvider;
+  const providerData = settings && settings.providers && settings.providers[provider];
+  let profiles = providerData && Array.isArray(providerData.profiles) ? providerData.profiles : [];
+  if (!profiles.length && provider === 'gemini') {
+    // تنظیمات قدیمی کلید را در سطح بالا نگه می‌داشت؛ اگر فرمت جدید پروفایل خالی دارد،
+    // کلید سطح بالا را هم بررسی کن تا Gemini از فهرست نیفتد.
+    if (Array.isArray(settings.profiles) && settings.profiles.length) profiles = settings.profiles;
+    else if (typeof settings.apiKey === 'string' && settings.apiKey.trim()) {
+      profiles = [{ name: 'کلید اصلی', apiKey: settings.apiKey }];
+    }
+  }
+  const defaultSkill = typeof AiTranslateTools !== 'undefined' ? AiTranslateTools.DEFAULT_SKILL : '';
+  return {
+    provider,
+    model: providerData && providerData.model || (provider === 'gemini' ? settings.model : '') || '',
+    profiles: profiles.map((profile, index) => ({
+      id: String(profile && profile.id || `api-${index + 1}`),
+      name: String(profile && profile.name || `API ${index + 1}`),
+      apiKey: String(profile && profile.apiKey || '')
+    })).filter((profile) => profile.apiKey.trim()),
+    skill: typeof settings.skill === 'string' && settings.skill !== defaultSkill ? settings.skill : ''
+  };
+}
+
+function configuredWebpageAiEngines(settings) {
+  const providerLabels = { gemini: 'Google Gemini', openai: 'OpenAI', openrouter: 'OpenRouter', avalai: 'AvalAI' };
+  const defaults = { gemini: 'gemini-flash-latest', openai: 'gpt-4o-mini', openrouter: 'openai/gpt-4o-mini', avalai: 'gpt-6-luna' };
+  return [...WEBPAGE_AI_PROVIDERS].flatMap((provider) => {
+    const config = webpageAiConfig(settings || {}, provider);
+    if (!config.profiles.length) return [];
+    let model = String(config.model || defaults[provider]).trim() || defaults[provider];
+    if (provider === 'gemini') model = model.replace(/^models\//, '');
+    if (typeof AiTranslateTools !== 'undefined' && typeof AiTranslateTools.normalizeModel === 'function') {
+      try { model = AiTranslateTools.normalizeModel(model, provider); } catch { /* keep the user's model visible so it can be corrected in settings */ }
+    }
+    return [{ value: `ai:${provider}`, provider, model, label: `${providerLabels[provider]} · ${model}` }];
+  });
+}
+
+async function translateWebpageBatch(rawEntries, requestedEngine = '') {
+  const entries = validateWebpageEntries(rawEntries);
+  const stored = await chrome.storage.local.get([WEBPAGE_TRANSLATION_SETTINGS_KEY]);
+  const settings = stored[WEBPAGE_TRANSLATION_SETTINGS_KEY] || {};
+  let engine, providerOverride = '';
+  if (!requestedEngine) {
+    engine = ['auto', 'google', 'mymemory', 'ai'].includes(settings.engine)
+      ? settings.engine : (settings.enabled === true ? 'ai' : 'auto');
+    if (engine === 'ai') providerOverride = settings.provider || 'gemini';
+  } else if (['auto', 'google', 'mymemory'].includes(requestedEngine)) {
+    engine = requestedEngine;
+  } else if (typeof requestedEngine === 'string' && requestedEngine.startsWith('ai:') &&
+      WEBPAGE_AI_PROVIDERS.has(requestedEngine.slice(3))) {
+    engine = 'ai';
+    providerOverride = requestedEngine.slice(3);
+  } else {
+    throw new Error('موتور انتخاب‌شده معتبر نیست؛ از فهرست موتورهای ترجمه انتخاب کنید.');
+  }
+  if (engine === 'ai') {
+    if (typeof AiTranslateTools === 'undefined') throw new Error('موتور ترجمهٔ هوش مصنوعی بارگذاری نشد.');
+    const config = webpageAiConfig(settings, providerOverride);
+    const result = await AiTranslateTools.translateWithFailover({
+      ...config, entries, sourceLang: 'auto', context: 'webpage'
+    });
+    const model = typeof AiTranslateTools.normalizeModel === 'function'
+      ? AiTranslateTools.normalizeModel(config.model, config.provider)
+      : config.model;
+    return {
+      ok: true,
+      provider: ({ gemini: 'Google Gemini', openai: 'OpenAI', openrouter: 'OpenRouter', avalai: 'AvalAI' })[config.provider] || 'هوش مصنوعی',
+      model,
+      translations: [...result.translations.entries()].map(([id, text]) => ({ id, text }))
+    };
+  }
+  if (typeof TranslateTools === 'undefined') throw new Error('موتور ترجمهٔ آنلاین بارگذاری نشد.');
+  const translations = [];
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(3, entries.length) }, async () => {
+    while (next < entries.length) {
+      const entry = entries[next++];
+      const result = await TranslateTools.translate(entry.text, 'auto', undefined, engine);
+      if (result && result.ok && result.text) translations.push({ id: entry.id, text: result.text });
+    }
+  }));
+  const provider = engine === 'mymemory' ? 'MyMemory'
+    : engine === 'google' ? 'Google Translate' : 'Google Translate / MyMemory';
+  return { ok: true, provider, engine, translations };
+}
+
+function supportedTranslationPageUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl || '');
+    const webStore = url.hostname === 'chromewebstore.google.com' ||
+      (url.hostname === 'chrome.google.com' && url.pathname.startsWith('/webstore'));
+    return ['http:', 'https:'].includes(url.protocol) && !webStore;
+  } catch { return false; }
+}
+
+function waitForTranslationTabComplete(tab) {
+  if (tab && tab.status === 'complete') return Promise.resolve(tab);
+  if (!tab || !Number.isSafeInteger(tab.id) || !chrome.tabs.onUpdated) {
+    return Promise.reject(new Error('بارگذاری کپی صفحه را نمی‌توان بررسی کرد.'));
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      if (error) reject(error); else resolve(value);
+    };
+    const timer = setTimeout(() => finish(new Error('بارگذاری کپی صفحه بیش از حد طول کشید.')), 60000);
+    const onUpdated = (tabId, changeInfo, updatedTab) => {
+      if (tabId === tab.id && changeInfo.status === 'complete') finish(null, updatedTab || tab);
+    };
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.get(tab.id).then((latest) => {
+      if (latest && latest.status === 'complete') finish(null, latest);
+    }).catch(() => {});
+  });
+}
+
+async function createTranslatedPageCopy(sourceTabId, engine) {
+  const stored = await chrome.storage.local.get([WEBPAGE_TRANSLATION_SETTINGS_KEY]);
+  if (!Number.isSafeInteger(sourceTabId) || sourceTabId < 0) throw new Error('صفحهٔ فعالی برای ترجمه پیدا نشد.');
+  const availableAiEngines = configuredWebpageAiEngines(stored[WEBPAGE_TRANSLATION_SETTINGS_KEY] || {});
+  const validEngines = ['auto', 'google', 'mymemory', ...availableAiEngines.map((item) => item.value)];
+  if (!validEngines.includes(engine)) {
+    throw new Error('برای نمایش این سرویس در فهرست، ابتدا مدل و کلید API آن را در تنظیمات وارد کنید.');
+  }
+  const sourceTab = await chrome.tabs.get(sourceTabId);
+  if (!sourceTab || !supportedTranslationPageUrl(sourceTab.url)) {
+    throw new Error('ترجمه فقط روی صفحه‌های وب معمولی انجام می‌شود؛ صفحه‌های داخلی مرورگر و فروشگاه افزونه پشتیبانی نمی‌شوند.');
+  }
+  const duplicate = await chrome.tabs.duplicate(sourceTabId);
+  if (!duplicate || !Number.isSafeInteger(duplicate.id)) throw new Error('کپی صفحه در زبانهٔ تازه باز نشد.');
+  try {
+    const loadedTab = await waitForTranslationTabComplete(duplicate);
+    const currentTab = await chrome.tabs.get(duplicate.id);
+    if (!supportedTranslationPageUrl((currentTab && currentTab.url) || (loadedTab && loadedTab.url))) {
+      throw new Error('کپی صفحه به نشانی پشتیبانی‌نشده هدایت شد و ترجمه متوقف شد.');
+    }
+    await chrome.scripting.executeScript({
+      target: { tabId: duplicate.id },
+      files: ['src/core/page-translation.js', 'src/page-translator/content.js']
+    });
+    const result = await chrome.tabs.sendMessage(duplicate.id, {
+      type: 'WTPDF_PAGE_TRANSLATE_START',
+      jobId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      engine,
+      availableAiEngines
+    });
+    if (!result || !result.ok) throw new Error(result && result.error || 'متن قابل ترجمه‌ای در صفحه پیدا نشد.');
+    try { await chrome.tabs.update(duplicate.id, { active: true }); } catch { /* duplicate may already be active */ }
+    return { ok: true, tabId: duplicate.id, paragraphs: result.paragraphs || 0 };
+  } catch (error) {
+    try { await chrome.tabs.remove(duplicate.id); } catch { /* duplicate may already be closed */ }
+    throw error;
+  }
+}
+
 // دریافت لیست تصاویر از صفحه و باز کردن تب ساخت PDF
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg && msg.type === 'WTPDF_PAGE_TRANSLATE_CREATE_COPY') {
+    if (!sender || sender.id !== chrome.runtime.id || sender.tab) {
+      sendResponse({ ok: false, error: 'درخواست ساخت کپی ترجمه معتبر نیست.' });
+      return false;
+    }
+    createTranslatedPageCopy(msg.tabId, msg.engine)
+      .then(sendResponse)
+      .catch((error) => sendResponse({ ok: false, error: error && error.message ? error.message : String(error) }));
+    return true;
+  }
+  if (msg && msg.type === 'WTPDF_TRANSLATE_PAGE_BATCH') {
+    if (!sender || !sender.tab || !/^https?:$/.test((() => { try { return new URL(sender.tab.url).protocol; } catch { return ''; } })())) {
+      sendResponse({ ok: false, error: 'ترجمه فقط در صفحه‌های وب معمولی اجرا می‌شود.' });
+      return false;
+    }
+    translateWebpageBatch(msg.entries, msg.engine)
+      .then(sendResponse)
+      .catch((error) => {
+        const message = typeof AiTranslateTools !== 'undefined' && typeof AiTranslateTools.safeError === 'function'
+          ? AiTranslateTools.safeError(error) : (error && error.message ? error.message : String(error));
+        sendResponse({ ok: false, error: message });
+      });
+    return true;
+  }
   // اسکن اختصاصی Google Books از طریق API رسمی reader (اجرا در service worker برای دورزدن CORS)
   if (msg && msg.type === 'WTPDF_GBOOKS_SCAN') {
     const tabId = sender.tab ? sender.tab.id : null;
