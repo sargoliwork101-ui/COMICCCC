@@ -21,15 +21,150 @@ const scrollModeFields = document.getElementById('scrollModeFields');
 const setStatus = (text) => {
   statusText.innerText = text;
 };
+// خطاهای فنی مرورگر را به پیام فارسی و قابل‌فهم تبدیل می‌کند تا کاربر بداند چه کند.
+const friendlyError = (text) => {
+  const message = String(text || '');
+  if (/Extension context invalidated/i.test(message)) {
+    return 'افزونه تازه‌بارگذاری شده است؛ پنجره را ببندید و دوباره باز کنید.';
+  }
+  if (/Could not establish connection|message port closed|Receiving end does not exist/i.test(message)) {
+    return 'ارتباط با افزونه برقرار نشد؛ پنجره را ببندید و دوباره باز کنید.';
+  }
+  return message;
+};
 // باکس فقط برای خطاها و هشدارهایی که کاربر باید ببیند نمایش داده می‌شود
 const showError = (text) => {
-  statusText.innerText = text;
+  statusText.innerText = friendlyError(text);
   statusBox.classList.remove('hidden');
 };
 const hideStatus = () => {
   statusText.innerText = '';
   statusBox.classList.add('hidden');
 };
+
+const aiSettingsBtn = document.getElementById('aiSettingsBtn');
+if (aiSettingsBtn) {
+  aiSettingsBtn.addEventListener('click', async () => {
+    aiSettingsBtn.disabled = true;
+    try {
+      await chrome.tabs.create({ url: chrome.runtime.getURL('src/ai-settings/settings.html'), active: true });
+    } catch (error) {
+      showError('بازکردن تنظیمات هوش مصنوعی ناموفق بود: ' + (error && error.message ? error.message : error));
+      aiSettingsBtn.disabled = false;
+    }
+  });
+}
+
+const translatePageBtn = document.getElementById('translatePageBtn');
+const PAGE_TRANSLATION_ENGINE_KEY = 'wtpdf_page_translation_engine_v1';
+const PAGE_TRANSLATION_SETTINGS_KEY = 'gemini_translation_settings_v1';
+const PAGE_FREE_TRANSLATION_ENGINES = [
+  ['auto', 'Google؛ اگر نشد MyMemory'], ['google', 'فقط Google Translate'], ['mymemory', 'فقط MyMemory']
+];
+const PAGE_AI_PROVIDERS = {
+  gemini: { label: 'Google Gemini', model: 'gemini-flash-latest' },
+  openai: { label: 'OpenAI', model: 'gpt-4o-mini' },
+  openrouter: { label: 'OpenRouter', model: 'openai/gpt-4o-mini' },
+  avalai: { label: 'AvalAI', model: 'gpt-6-luna' }
+};
+let PAGE_TRANSLATION_ENGINES = new Set(PAGE_FREE_TRANSLATION_ENGINES.map(([value]) => value));
+let configuredAiEngines = [];
+let pageTranslationEngineValue = 'auto';
+let pageTranslationPreferencesReady = false;
+let pageTranslationBusy = false;
+
+const updatePageTranslationButton = () => {
+  if (translatePageBtn) translatePageBtn.disabled = !pageTranslationPreferencesReady || pageTranslationBusy;
+};
+
+function configuredPageAiOptions(settings) {
+  const providers = settings && settings.providers && typeof settings.providers === 'object' ? settings.providers : {};
+  return Object.entries(PAGE_AI_PROVIDERS).flatMap(([provider, info]) => {
+    const data = providers[provider] || {};
+    let profiles = Array.isArray(data.profiles) ? data.profiles : [];
+    if (provider === 'gemini' && !settings.providers) {
+      if (Array.isArray(settings.profiles)) profiles = settings.profiles;
+      else if (typeof settings.apiKey === 'string' && settings.apiKey.trim()) profiles = [{ apiKey: settings.apiKey }];
+    }
+    if (!profiles.some((profile) => String(profile && profile.apiKey || '').trim())) return [];
+    let model = String(data.model || (provider === 'gemini' && !settings.providers ? settings.model : '') || info.model).trim() || info.model;
+    if (provider === 'gemini') {
+      model = model.replace(/^models\//, '');
+      if (model === 'gemini-2.5-flash') model = info.model;
+    }
+    return [{ value: `ai:${provider}`, label: `${info.label} · ${model} (تنظیم‌شده)`, provider, model }];
+  });
+}
+
+async function loadPageTranslationPreferences() {
+  if (!translatePageBtn) return;
+  if (!chrome.storage || !chrome.storage.local || typeof chrome.storage.local.get !== 'function') return;
+  const stored = await chrome.storage.local.get([
+    PAGE_TRANSLATION_ENGINE_KEY, PAGE_TRANSLATION_SETTINGS_KEY
+  ]);
+  const settings = stored[PAGE_TRANSLATION_SETTINGS_KEY] || {};
+  configuredAiEngines = configuredPageAiOptions(settings);
+  const options = [
+    ...PAGE_FREE_TRANSLATION_ENGINES.map(([value, label]) => ({ value, label })),
+    ...configuredAiEngines
+  ];
+  PAGE_TRANSLATION_ENGINES = new Set(options.map((option) => option.value));
+  const preferred = stored[PAGE_TRANSLATION_ENGINE_KEY];
+  const savedDefault = settings.engine === 'google' || settings.engine === 'mymemory' ? settings.engine
+    : settings.engine === 'ai' && settings.provider ? `ai:${settings.provider}` : 'auto';
+  const engine = PAGE_TRANSLATION_ENGINES.has(preferred) ? preferred
+    : PAGE_TRANSLATION_ENGINES.has(savedDefault) ? savedDefault : 'auto';
+  pageTranslationEngineValue = engine;
+  if (preferred && preferred !== engine) {
+    try { await chrome.storage.local.set({ [PAGE_TRANSLATION_ENGINE_KEY]: engine }); } catch { /* انتخاب امنِ پیش‌فرض در همین پنجره باقی می‌ماند */ }
+  }
+  pageTranslationPreferencesReady = true;
+  updatePageTranslationButton();
+}
+loadPageTranslationPreferences().catch((error) => {
+  showError('تنظیمات ترجمه خوانده نشد: ' + (error && error.message ? error.message : error));
+});
+
+if (translatePageBtn) {
+  translatePageBtn.disabled = true;
+  translatePageBtn.addEventListener('click', async () => {
+    if (translatePageBtn.disabled || !pageTranslationPreferencesReady) return;
+    pageTranslationBusy = true;
+    updatePageTranslationButton();
+    hideStatus();
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab || !Number.isInteger(tab.id) || !tab.url) throw new Error('صفحهٔ فعالی برای ترجمه پیدا نشد.');
+      const pageUrl = new URL(tab.url);
+      const isWebStore = pageUrl.hostname === 'chromewebstore.google.com' ||
+        (pageUrl.hostname === 'chrome.google.com' && pageUrl.pathname.startsWith('/webstore'));
+      if (!['http:', 'https:'].includes(pageUrl.protocol) || isWebStore) {
+        throw new Error('ترجمه فقط روی صفحه‌های وب معمولی انجام می‌شود؛ صفحه‌های داخلی مرورگر و فروشگاه افزونه پشتیبانی نمی‌شوند.');
+      }
+      const engine = PAGE_TRANSLATION_ENGINES.has(pageTranslationEngineValue) ? pageTranslationEngineValue : 'auto';
+      try {
+        const existingCopy = await chrome.tabs.sendMessage(tab.id, {
+          type: 'WTPDF_PAGE_TRANSLATE_OPEN_SELECTION', engine, availableAiEngines: configuredAiEngines
+        });
+        if (existingCopy && existingCopy.translatedCopy) {
+          try { window.close(); } catch { /* popup may already be closing */ }
+          return;
+        }
+      } catch { /* regular page: ask the service worker to duplicate and prepare it */ }
+      setStatus('در حال آماده‌کردن کپی صفحه...');
+      const result = await chrome.runtime.sendMessage({
+        type: 'WTPDF_PAGE_TRANSLATE_CREATE_COPY', tabId: tab.id, engine
+      });
+      if (!result || !result.ok) throw new Error(result && result.error || 'کپی صفحه برای ترجمه آماده نشد.');
+      try { window.close(); } catch { /* duplicate tab is active */ }
+    } catch (error) {
+      showError(error && error.message ? error.message : String(error));
+    } finally {
+      pageTranslationBusy = false;
+      updatePageTranslationButton();
+    }
+  });
+}
 
 // سه روش جمع‌آوری: اسکرول (کمیک تودرتو)، ورق‌زدن خودکار (کلیک روی دکمهٔ بعدی)، ورق‌زدن دستی
 let collectMode = 'scroll';

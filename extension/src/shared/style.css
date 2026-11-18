@@ -12,6 +12,8 @@
   --glow-ok: 0 10px 30px -8px rgba(16,185,129,.55);
 }
 * { box-sizing: border-box; }
+select { color-scheme: dark; background-color: var(--surface); color: var(--text); }
+select option { background-color: var(--surface2); color: var(--text); }
 html { scrollbar-color: #2a3140 transparent; }
 body {
   margin: 0; color: var(--text); font-family: 'Vazirmatn', sans-serif;
