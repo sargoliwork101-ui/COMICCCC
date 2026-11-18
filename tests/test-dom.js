@@ -1,7 +1,7 @@
 // DOM-level integration test: loads viewer.html scripts in jsdom with mocked extension APIs.
 const fs = require('fs');
 const path = require('path');
-const ROOT = path.resolve(__dirname, '..');
+const ROOT = path.resolve(__dirname, '../extension');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
 
@@ -90,7 +90,7 @@ window.scrollTo = () => {};
 window.HTMLElement.prototype.scrollIntoView = () => {};
 window.requestAnimationFrame = (cb) => setTimeout(cb, 0);
 
-const scripts = ['../vendor/jspdf.umd.min.js', '../src/core/pdfbuilder.js', '../vendor/tesseract.min.js', '../src/core/ocr.js', '../src/core/typeset.js', '../src/core/translate.js', '../src/core/ai-translate.js', '../src/core/pdf-import-store.js', '../src/viewer/viewer.js', '../src/viewer/trans.js'];
+const scripts = ['../extension/vendor/jspdf.umd.min.js', '../extension/src/core/pdfbuilder.js', '../extension/vendor/tesseract.min.js', '../extension/src/core/ocr.js', '../extension/src/core/typeset.js', '../extension/src/core/translate.js', '../extension/src/core/ai-translate.js', '../extension/src/core/pdf-import-store.js', '../extension/src/viewer/viewer.js', '../extension/src/viewer/trans.js'];
 for (const f of scripts) {
   const code = fs.readFileSync(path.join(__dirname, f), 'utf8');
   try {
@@ -117,15 +117,15 @@ const $ = (id) => window.document.getElementById(id);
   // modernized header/footer shell keeps every functional id
   check('modern topbar present', !!window.document.querySelector('.topbar .brand-logo') &&
     !!window.document.querySelector('.brand-text h1') && !!window.document.querySelector('.version-pill'));
-  // 2.24: rebranded to PIC TO PDF
-  check('viewer title uses PIC TO PDF', /PIC TO PDF/.test(window.document.title), window.document.title);
-  check('viewer brand h1 uses PIC TO PDF', window.document.querySelector('.brand-text h1').textContent.trim() === 'PIC TO PDF');
+  // 2.82: extension branding is unified as HASAYA.
+  check('viewer title uses HASAYA', /HASAYA/.test(window.document.title), window.document.title);
+  check('viewer brand h1 uses HASAYA', window.document.querySelector('.brand-text h1').textContent.trim() === 'HASAYA');
   const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
-  check('manifest name and action title use PIC TO PDF', manifest.name === 'PIC TO PDF' &&
-    manifest.action.default_title === 'PIC TO PDF');
+  check('manifest name and action title use HASAYA', manifest.name === 'HASAYA' &&
+    manifest.action.default_title === 'HASAYA');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
-  check('manifest and viewer version badge are synchronized at 2.68', manifest.version === '2.68' &&
-    window.document.querySelector('.version-pill').textContent.includes('۲.۶۸'));
+  check('manifest and viewer version badge are synchronized at 3.0', manifest.version === '3.0' &&
+    window.document.querySelector('.version-pill').textContent.includes('۳.۰'));
   const viewerCss = fs.readFileSync(path.join(ROOT, 'src/viewer/viewer.css'), 'utf8');
   check('topbar keeps the hamburger visible while the page scrolls',
     /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(viewerCss));
@@ -179,7 +179,7 @@ const $ = (id) => window.document.getElementById(id);
   check('editable Skill and reset action are available',
     $('aiSettings').contains($('trAiSkill')) && $('aiSettings').contains($('trAiSkillReset')));
   check('AI key help starts with the official Google AI Studio link',
-    window.document.querySelector('#aiSettings a[href="https://aistudio.google.com/apikey"][rel="noopener noreferrer"]') !== null);
+    window.document.querySelector('#aiSettings a[href="https://aistudio.google.com/api-keys"][rel="noopener noreferrer"]') !== null);
   $('trAiProvider').value = 'openrouter';
   $('trAiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
   check('switching provider updates the model and official key link',
