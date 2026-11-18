@@ -129,6 +129,42 @@ function check(name, condition, extra) {
       const text = JSON.stringify([{ id: entries[0].id, translation: 'رسید' }]);
       return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text }] } }] }) };
     };
+    let failoverError = null;
+    await AiTranslateTools.translateWithFailover({
+      entries: [entries[0]], timeoutMs: 10,
+      profiles: [
+        { name: 'پاسخ‌نداده', apiKey: 'hung-key' },
+        { name: 'پاسخ‌گو', apiKey: 'working-key' }
+      ], fetchFn
+    }).catch((error) => { failoverError = error; });
+    check('a stalled Gemini request times out, aborts its network request, and does not waste time on the next key',
+      firstRequestAborted && calls.join(',') === 'hung-key' && failoverError &&
+      failoverError.attempts && failoverError.attempts.length === 1 &&
+      failoverError.attempts[0].error && failoverError.attempts[0].error.name === 'TimeoutError',
+      { firstRequestAborted, calls, attempts: failoverError && failoverError.attempts });
+  }
+  {
+    let caught = null;
+    await AiTranslateTools.translateBatch({
+      entries: [entries[0]], apiKey: 'hung-key', timeoutMs: 10,
+      fetchFn: async () => new Promise(() => {})
+    }).catch((error) => { caught = error; });
+    check('a single stalled AI request returns a readable timeout error instead of hanging the UI',
+      caught && caught.name === 'TimeoutError' && /۶۰ ثانیه|پاسخ .* پس از/.test(AiTranslateTools.safeError(caught)),
+      caught && caught.message);
+  }
+  {
+    const calls = [];
+    const fetchFn = async (url, options) => {
+      const key = options.headers['x-goog-api-key'];
+      calls.push(key);
+      if (key === 'hung-key') {
+        options.signal.addEventListener('abort', () => { firstRequestAborted = true; }, { once: true });
+        return new Promise(() => {}); // Simulate an upstream/VPN request that never returns or honors abort.
+      }
+      const text = JSON.stringify([{ id: entries[0].id, translation: 'رسید' }]);
+      return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text }] } }] }) };
+    };
     let caught = null;
     await AiTranslateTools.translateWithFailover({
       entries: [entries[0]], timeoutMs: 10,
