@@ -74,7 +74,7 @@ class LocalNmtTestRequest(BaseModel):
 
 
 class ResourceBudget(BaseModel):
-    """How much of the machine Comic OCR Studio may use (v4.29)."""
+    """How much of the machine HaSaYa Studio may use (v4.29)."""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -116,10 +116,12 @@ class EngineTestRequest(BaseModel):
 class EngineDownloadRequest(BaseModel):
     language: str = "eng"
     force: bool = False
+    accept_remote_code_risk: bool = False
 
 
 class EngineUpdateRequest(BaseModel):
     language: str = "eng"
+    accept_remote_code_risk: bool = False
 
 
 class EngineUpdateCheckRequest(BaseModel):
@@ -147,6 +149,7 @@ class ExportRequest(BaseModel):
 
 class StateUpdate(BaseModel):
     state: dict[str, Any]
+    expected_updated_at: str | None = None
 
 
 class ContextPreviewRequest(BaseModel):

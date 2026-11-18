@@ -3,6 +3,8 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
+const EXT_ROOT = path.join(ROOT, 'extension');
+const packageJson = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 let checked = 0;
 let failures = 0;
 
@@ -21,24 +23,24 @@ function cleanLocalReference(reference) {
 }
 
 function checkFile(name, relativePath) {
-  check(name, fs.statSync(path.join(ROOT, relativePath), { throwIfNoEntry: false })?.isFile() === true, relativePath);
+  check(name, fs.statSync(path.join(EXT_ROOT, relativePath), { throwIfNoEntry: false })?.isFile() === true, relativePath);
 }
 
 function checkRelativeReference(sourceFile, reference) {
   const clean = cleanLocalReference(reference);
   if (!clean) return;
   const target = path.resolve(path.dirname(sourceFile), clean);
-  const relative = path.relative(ROOT, target);
-  check(`local reference in ${path.relative(ROOT, sourceFile)}`,
+  const relative = path.relative(EXT_ROOT, target);
+  check(`local reference in ${path.relative(EXT_ROOT, sourceFile)}`,
     relative && !relative.startsWith(`..${path.sep}`) && relative !== '..' && fs.existsSync(target), reference);
 }
 
 function checkRuntimeReference(sourceFile, reference) {
   const clean = cleanLocalReference(reference);
   if (!clean) return;
-  const target = path.resolve(ROOT, clean);
-  const relative = path.relative(ROOT, target);
-  check(`runtime URL in ${path.relative(ROOT, sourceFile)}`,
+  const target = path.resolve(EXT_ROOT, clean);
+  const relative = path.relative(EXT_ROOT, target);
+  check(`runtime URL in ${path.relative(EXT_ROOT, sourceFile)}`,
     relative && !relative.startsWith(`..${path.sep}`) && relative !== '..' && fs.existsSync(target), reference);
 }
 
@@ -49,7 +51,7 @@ function walk(directory) {
   });
 }
 
-const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
+const manifest = JSON.parse(fs.readFileSync(path.join(EXT_ROOT, 'manifest.json'), 'utf8'));
 check('MV3 service worker entry point', manifest.background.service_worker === 'src/background.js');
 check('popup entry point', manifest.action.default_popup === 'src/popup/popup.html');
 checkFile('service worker exists', manifest.background.service_worker);
@@ -61,7 +63,7 @@ for (const group of [manifest.icons, manifest.action.default_icon]) {
   }
 }
 
-const sourceFiles = walk(path.join(ROOT, 'src'));
+const sourceFiles = walk(path.join(EXT_ROOT, 'src'));
 for (const file of sourceFiles) {
   const source = fs.readFileSync(file, 'utf8');
   if (file.endsWith('.html')) {
@@ -93,14 +95,16 @@ for (const resource of [
   'vendor/pdfjs/standard_fonts',
   'assets/fonts/Vazirmatn.woff2'
 ]) {
-  check(`bundled runtime resource: ${resource}`, fs.existsSync(path.join(ROOT, resource)), resource);
+  check(`bundled runtime resource: ${resource}`, fs.existsSync(path.join(EXT_ROOT, resource)), resource);
 }
 
-const channel = fs.readFileSync(path.join(ROOT, 'src/popup/update-channel.js'), 'utf8');
-const updater = fs.readFileSync(path.join(ROOT, 'src/popup/update.js'), 'utf8');
+check('npm package metadata identifies the extension as HASAYA', packageJson.name === 'hasaya-chrome-extension');
+
+const channel = fs.readFileSync(path.join(EXT_ROOT, 'src/popup/update-channel.js'), 'utf8');
+const updater = fs.readFileSync(path.join(EXT_ROOT, 'src/popup/update.js'), 'utf8');
 check('updater targets this build branch', channel.includes("window.PIC_TO_PDF_UPDATE_BRANCH = 'main';"));
 check('updater targets the correct repository', updater.includes("const REPO = 'sargoliwork101-ui/COMICCCC';"));
-check('updater reads the root manifest', updater.includes('/contents/manifest.json?ref='));
+check('updater reads the extension manifest on main', updater.includes('/contents/extension/manifest.json?ref='));
 check('updater downloads from GitHub codeload', updater.includes('https://codeload.github.com/${REPO}/zip/refs/heads/'));
 
 if (failures) {
