@@ -1,7 +1,7 @@
 // DOM-level integration test: loads viewer.html scripts in jsdom with mocked extension APIs.
 const fs = require('fs');
 const path = require('path');
-const ROOT = path.resolve(__dirname, '..');
+const ROOT = path.resolve(__dirname, '../extension');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
 
@@ -90,7 +90,7 @@ window.scrollTo = () => {};
 window.HTMLElement.prototype.scrollIntoView = () => {};
 window.requestAnimationFrame = (cb) => setTimeout(cb, 0);
 
-const scripts = ['../vendor/jspdf.umd.min.js', '../src/core/pdfbuilder.js', '../vendor/tesseract.min.js', '../src/core/ocr.js', '../src/core/typeset.js', '../src/core/translate.js', '../src/core/ai-translate.js', '../src/core/pdf-import-store.js', '../src/viewer/viewer.js', '../src/viewer/trans.js'];
+const scripts = ['../extension/vendor/jspdf.umd.min.js', '../extension/src/core/pdfbuilder.js', '../extension/vendor/tesseract.min.js', '../extension/src/core/ocr.js', '../extension/src/core/typeset.js', '../extension/src/core/translate.js', '../extension/src/core/ai-translate.js', '../extension/src/core/pdf-import-store.js', '../extension/src/viewer/viewer.js', '../extension/src/viewer/trans.js'];
 for (const f of scripts) {
   const code = fs.readFileSync(path.join(__dirname, f), 'utf8');
   try {
@@ -124,8 +124,8 @@ const $ = (id) => window.document.getElementById(id);
   check('manifest name and action title use HASAYA', manifest.name === 'HASAYA' &&
     manifest.action.default_title === 'HASAYA');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
-  check('manifest and viewer version badge are synchronized at 2.88', manifest.version === '2.88' &&
-    window.document.querySelector('.version-pill').textContent.includes('۲.۸۸'));
+  check('manifest and viewer version badge are synchronized at 2.89', manifest.version === '2.89' &&
+    window.document.querySelector('.version-pill').textContent.includes('۲.۸۹'));
   const viewerCss = fs.readFileSync(path.join(ROOT, 'src/viewer/viewer.css'), 'utf8');
   check('topbar keeps the hamburger visible while the page scrolls',
     /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(viewerCss));

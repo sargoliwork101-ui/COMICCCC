@@ -12,7 +12,7 @@ function check(name, condition, extra) {
 const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 (async () => {
-  const html = fs.readFileSync(path.join(__dirname, '../src/ai-settings/settings.html'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '../extension/src/ai-settings/settings.html'), 'utf8');
   const dom = new JSDOM(html, { url: 'chrome-extension://test/src/ai-settings/settings.html', runScripts: 'outside-only', pretendToBeVisual: true });
   const { window } = dom;
   const key = 'gemini_translation_settings_v1';
@@ -43,8 +43,8 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
       ] }) } }] };
     return { ok: true, status: 200, json: async () => data };
   };
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/core/ai-translate.js'), 'utf8'), dom.getInternalVMContext(), { filename: 'ai-translate.js' });
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/ai-settings/settings.js'), 'utf8'), dom.getInternalVMContext(), { filename: 'settings.js' });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../extension/src/core/ai-translate.js'), 'utf8'), dom.getInternalVMContext(), { filename: 'ai-translate.js' });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../extension/src/ai-settings/settings.js'), 'utf8'), dom.getInternalVMContext(), { filename: 'settings.js' });
   await pause();
 
   const $ = (id) => window.document.getElementById(id);

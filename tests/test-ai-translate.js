@@ -1,5 +1,5 @@
 // Unit tests for optional, whole-context Gemini translation.
-const AiTranslateTools = require('../src/core/ai-translate.js');
+const AiTranslateTools = require('../extension/src/core/ai-translate.js');
 
 let failures = 0;
 function check(name, condition, extra) {

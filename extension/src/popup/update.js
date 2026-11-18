@@ -31,8 +31,13 @@
     return 0;
   }
 
+  function latestZipUrl() {
+    const branchPath = BRANCH.split('/').map(encodeURIComponent).join('/');
+    return `https://codeload.github.com/${REPO}/zip/refs/heads/${branchPath}`;
+  }
+
   async function fetchLatestVersion() {
-    const url = `https://api.github.com/repos/${REPO}/contents/manifest.json?ref=${encodeURIComponent(BRANCH)}&_=${Date.now()}`;
+    const url = `https://api.github.com/repos/${REPO}/contents/extension/manifest.json?ref=${encodeURIComponent(BRANCH)}&_=${Date.now()}`;
     const res = await fetch(url, { headers: { Accept: 'application/vnd.github+json' } });
     if (res.status === 403 || res.status === 429) {
       throw new Error('محدودیت درخواست گیت‌هاب؛ چند دقیقهٔ دیگر دوباره تلاش کن');
@@ -52,8 +57,7 @@
   }
 
   async function downloadLatest() {
-    const branchPath = BRANCH.split('/').map(encodeURIComponent).join('/');
-    const zipUrl = `https://codeload.github.com/${REPO}/zip/refs/heads/${branchPath}`;
+    const zipUrl = latestZipUrl();
     if (chrome.downloads && typeof chrome.downloads.download === 'function') {
       await chrome.downloads.download({ url: zipUrl, filename: 'HASAYA-latest.zip', saveAs: false });
     } else {
@@ -127,9 +131,12 @@
         return;
       }
 
+      const zipUrl = latestZipUrl();
       const approved = await confirmUpdateModal(
         `نسخهٔ جدید v${latest} پیدا شد. مایل به دانلود به‌روزرسانی هستید؟\n\n` +
-        'پس از دانلود باید فایل‌ها را دستی جایگزین و افزونه را Reload کنید.'
+        `لینک دانلود: ${zipUrl}\n\n` +
+        'پس از دانلود، فایل ZIP را استخراج کن و پوشهٔ extension داخل آن را جایگزین پوشهٔ فعلی افزونه کن، ' +
+        'بعد در chrome://extensions دکمهٔ Reload را بزن.'
       );
       if (!approved) {
         setStatus('به‌روزرسانی به درخواست شما لغو شد؛ فایلی دانلود نشد.', 'warn');
@@ -138,11 +145,12 @@
 
       setStatus(`تأیید شد؛ در حال دانلود نسخهٔ v${latest}...`, 'warn');
       await downloadLatest();
-      setStatus(
-        `نسخهٔ v${latest} دانلود شد. فایل ZIP را روی پوشهٔ فعلی اکستنشن استخراج (جایگزین) کن، ` +
-        'بعد در chrome://extensions دکمهٔ Reload را بزن.',
-        'ok'
-      );
+      statusEl.classList.remove('hidden', 'ok', 'warn', 'err');
+      statusEl.classList.add('ok');
+      statusEl.innerHTML =
+        `نسخهٔ v${latest} دانلود شد. فایل ZIP را استخراج کن و پوشهٔ <bdi dir="ltr">extension</bdi> داخل آن را ` +
+        'جایگزین پوشهٔ فعلی افزونه کن، بعد در <bdi dir="ltr">chrome://extensions</bdi> دکمهٔ Reload را بزن. ' +
+        `اگر دانلود شروع نشد، از این لینک بگیر: <a href="${zipUrl}" target="_blank" rel="noopener noreferrer" dir="ltr">${zipUrl}</a>`;
     } catch (error) {
       setStatus('بررسی به‌روزرسانی ناموفق بود: ' + (error && error.message ? error.message : 'خطای شبکه'), 'err');
     } finally {

@@ -1,6 +1,6 @@
 // Regression tests for extracting visible webpage text and applying translations without replacing page markup.
 const { JSDOM } = require('jsdom');
-const PageTranslationTools = require('../src/core/page-translation.js');
+const PageTranslationTools = require('../extension/src/core/page-translation.js');
 
 let failures = 0;
 function check(name, condition, extra) {

@@ -11,7 +11,7 @@ const PNG = Buffer.from(
 );
 
 function makeHarness({ fetchImpl, jobUrls, aiSettings } = {}) {
-  const html = fs.readFileSync(__dirname + '/../src/viewer/viewer.html', 'utf8').replace(/<script[\s\S]*?<\/script>/g, '');
+  const html = fs.readFileSync(__dirname + '/../extension/src/viewer/viewer.html', 'utf8').replace(/<script[\s\S]*?<\/script>/g, '');
   const dom = new JSDOM(html, { url: 'https://example.com/viewer.html?job=testjob', pretendToBeVisual: true, runScripts: 'dangerously' });
   const { window } = dom;
   const ctx = dom.getInternalVMContext();
@@ -59,7 +59,7 @@ function makeHarness({ fetchImpl, jobUrls, aiSettings } = {}) {
   window.scrollTo = () => {};
   window.HTMLElement.prototype.scrollIntoView = () => {};
   window.requestAnimationFrame = (cb) => setTimeout(cb, 0);
-  for (const f of ['../vendor/jspdf.umd.min.js', '../src/core/pdfbuilder.js', '../vendor/tesseract.min.js', '../src/core/ocr.js', '../src/core/typeset.js', '../src/core/translate.js', '../src/core/ai-translate.js', '../src/viewer/viewer.js', '../src/viewer/trans.js']) {
+  for (const f of ['../extension/vendor/jspdf.umd.min.js', '../extension/src/core/pdfbuilder.js', '../extension/vendor/tesseract.min.js', '../extension/src/core/ocr.js', '../extension/src/core/typeset.js', '../extension/src/core/translate.js', '../extension/src/core/ai-translate.js', '../extension/src/viewer/viewer.js', '../extension/src/viewer/trans.js']) {
     vm.runInContext(fs.readFileSync(__dirname + '/' + f, 'utf8'), ctx, { filename: f });
   }
   return { dom, window, ctx, ev, storageMap, get scriptingCalls() { return scriptingCalls; }, $: (id) => window.document.getElementById(id) };

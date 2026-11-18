@@ -20,7 +20,7 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
   const { window } = dom;
   const requests = [], progress = [];
   let listener = null, translationRun = 0, responseMode = 'full';
-  const coreSource = fs.readFileSync(path.join(__dirname, '../src/core/page-translation.js'), 'utf8');
+  const coreSource = fs.readFileSync(path.join(__dirname, '../extension/src/core/page-translation.js'), 'utf8');
   vm.runInContext(coreSource, dom.getInternalVMContext(), { filename: 'page-translation.js' });
   window.chrome = {
     runtime: {
@@ -45,7 +45,7 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
       }
     }
   };
-  const source = fs.readFileSync(path.join(__dirname, '../src/page-translator/content.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '../extension/src/page-translator/content.js'), 'utf8');
   vm.runInContext(source, dom.getInternalVMContext(), { filename: 'content.js' });
   check('content script registers the translated-copy message listener', typeof listener === 'function');
 

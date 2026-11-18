@@ -11,7 +11,7 @@ function check(name, condition, extra) {
 }
 
 async function bootPage(url, sourceTab) {
-  const html = fs.readFileSync(path.join(__dirname, '../src/page-translator/page.html'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '../extension/src/page-translator/page.html'), 'utf8');
   const dom = new JSDOM(html, { url, runScripts: 'outside-only', pretendToBeVisual: true });
   const { window } = dom;
   const calls = { duplicate: [], inject: [], send: [] };
@@ -31,7 +31,7 @@ async function bootPage(url, sourceTab) {
     scripting: { executeScript: async (details) => { calls.inject.push(details); return []; } },
     storage: { local: { get: async () => ({}) } }
   };
-  const code = fs.readFileSync(path.join(__dirname, '../src/page-translator/page.js'), 'utf8');
+  const code = fs.readFileSync(path.join(__dirname, '../extension/src/page-translator/page.js'), 'utf8');
   vm.runInContext(code, dom.getInternalVMContext(), { filename: 'page.js' });
   return { dom, window, calls, listeners };
 }
