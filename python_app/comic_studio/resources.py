@@ -1,4 +1,4 @@
-"""User-defined CPU & RAM budget for Comic OCR Studio (v4.29).
+"""User-defined CPU & RAM budget for HaSaYa Studio (v4.29).
 
 Why this exists: on weaker computers the studio used every core and as much
 memory as it could, which made the whole system (and the app itself) feel

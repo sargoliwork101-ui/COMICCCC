@@ -99,7 +99,7 @@ if __name__ == "__main__":
                 except OSError:
                     pass
         print(
-            f"Comic OCR Studio dependency is missing: {error.name}.\n\n"
+            f"HaSaYa Studio dependency is missing: {error.name}.\n\n"
             "Recommended on Windows: run start_windows.bat from the python_app folder.\n"
             "It installs dependencies into the app's local .venv; normal later launches reuse it.\n\n"
             "Manual setup from python_app (PowerShell):\n"
