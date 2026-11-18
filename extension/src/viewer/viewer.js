@@ -129,7 +129,7 @@ const ICON_DELETE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" 
 const ICON_RETRY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>';
 const CONCURRENCY = 4;
 const MAX_CANVAS_H = 16000;
-const APP_TITLE = 'PIC TO PDF';
+const APP_TITLE = 'HASAYA';
 function setTaskTitle(message = '') {
   document.title = message ? `${message} · ${APP_TITLE}` : APP_TITLE;
 }
