@@ -1,7 +1,7 @@
 export default [
   {
     files: ['**/*.js'],
-    ignores: ['node_modules/**', 'tests/**', 'debug*.js', 'vendor/**', 'python_app/**'],
+    ignores: ['node_modules/**', 'tests/**', 'debug*.js', '**/vendor/**', 'python_app/**'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'script',
