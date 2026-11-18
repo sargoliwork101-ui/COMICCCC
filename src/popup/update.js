@@ -55,7 +55,7 @@
     const branchPath = BRANCH.split('/').map(encodeURIComponent).join('/');
     const zipUrl = `https://codeload.github.com/${REPO}/zip/refs/heads/${branchPath}`;
     if (chrome.downloads && typeof chrome.downloads.download === 'function') {
-      await chrome.downloads.download({ url: zipUrl, filename: 'PIC-TO-PDF-latest.zip', saveAs: false });
+      await chrome.downloads.download({ url: zipUrl, filename: 'HASAYA-latest.zip', saveAs: false });
     } else {
       window.open(zipUrl, '_blank', 'noopener');
     }
