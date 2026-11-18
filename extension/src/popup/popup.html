@@ -2,7 +2,7 @@
 <html lang="fa" dir="rtl">
 <head>
   <meta charset="UTF-8">
-  <title>PIC TO PDF</title>
+  <title>HASAYA</title>
   <link rel="stylesheet" href="../shared/style.css">
   <link rel="stylesheet" href="popup.css">
 </head>
@@ -10,10 +10,18 @@
   <div class="brand">
     <span class="brand-logo"><img src="../../assets/icons/icon128.png" alt=""></span>
     <div class="brand-text">
-      <h1>PIC TO PDF</h1>
+      <h1>HASAYA</h1>
       <p>کمیک را به PDF یا تصویر تبدیل کن</p>
     </div>
-    <span class="version-pill">v2.68</span>
+    <span class="version-pill">v2.99</span>
+    <button type="button" id="aiSettingsBtn" class="settings-btn" title="تنظیم سرویس، مدل و کلید API برای ترجمه"
+      aria-label="تنظیمات API هوش مصنوعی">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+        stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="3" />
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+      </svg>
+    </button>
     <button type="button" id="updateBtn" class="update-btn" title="بررسی و دانلود به‌روزرسانی از گیت‌هاب"
       aria-label="بررسی به‌روزرسانی">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"
@@ -83,6 +91,9 @@
   <button id="pdfConvertBtn" class="btn ghost" type="button" title="انتخاب PDF و تبدیل صفحه‌های آن به تصویر در زبانهٔ جدا">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 14h8M8 17h6"/></svg>
     <span>تبدیل PDF به تصویر</span>
+  </button>
+  <button id="translatePageBtn" class="btn ghost" type="button" title="کپی صفحه را باز می‌کند؛ پاراگراف‌ها و موتور ترجمه را خودتان انتخاب می‌کنید">
+    <span>ترجمهٔ همین صفحه</span>
   </button>
 
   <div id="extModal" class="ext-modal hidden" role="dialog" aria-modal="true" aria-labelledby="extModalTitle" aria-describedby="extModalMsg">

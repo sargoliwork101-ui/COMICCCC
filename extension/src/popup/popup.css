@@ -18,6 +18,12 @@ body { width: 360px; padding: 18px; display: flex; flex-direction: column; gap: 
 .update-btn:disabled { opacity: .6; cursor: default; }
 .update-btn svg { width: 17px; height: 17px; }
 .update-btn.spinning svg { animation: wtpdf-spin .8s linear infinite; }
+.settings-btn { flex: none; width: 32px; height: 32px; display: grid; place-items: center; border-radius: 10px;
+  border: 1px solid var(--line2); background: rgba(255,255,255,.05); color: var(--muted); cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s; }
+.settings-btn:hover { color: var(--text); border-color: var(--a1); }
+.settings-btn:disabled { opacity: .6; cursor: default; }
+.settings-btn svg { width: 17px; height: 17px; }
 .update-status { font: 600 11px/1.8 'Vazirmatn', sans-serif; padding: 8px 11px; border-radius: 10px;
   background: rgba(255,255,255,.05); border: 1px solid var(--line2); }
 .update-status.ok { color: #6ee7b7; border-color: rgba(52,211,153,.45); }
