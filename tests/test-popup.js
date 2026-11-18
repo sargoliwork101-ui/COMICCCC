@@ -1,7 +1,7 @@
 // Test for popup.js scrapeAndSend() running inside a simulated web page.
 const fs = require('fs');
 const path = require('path');
-const ROOT = path.resolve(__dirname, '..');
+const ROOT = path.resolve(__dirname, '../extension');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
 
@@ -85,7 +85,7 @@ Object.defineProperty(window.document.body, 'scrollHeight', { value: 1600, confi
 // run timers immediately so the scroll settle loop finishes fast
 window.setTimeout = (cb) => global.setTimeout(cb, 0);
 
-const code = fs.readFileSync(__dirname + '/../src/popup/popup.js', 'utf8');
+const code = fs.readFileSync(__dirname + '/../extension/src/popup/popup.js', 'utf8');
 // extract only scrapeAndSend (the top-level click listener needs extension chrome.tabs which is absent here)
 const fnCode = code.slice(code.indexOf('async function scrapeAndSend'));
 vm.runInContext(fnCode, ctx, { filename: 'popup.js' });
@@ -95,14 +95,23 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
 
 // popup.html shell: chips removed, modern brand kept, single start button
 {
-  const popupDom = new JSDOM(fs.readFileSync(__dirname + '/../src/popup/popup.html', 'utf8'));
+  const popupDom = new JSDOM(fs.readFileSync(__dirname + '/../extension/src/popup/popup.html', 'utf8'));
   const pdoc = popupDom.window.document;
   check('chips block removed from popup', !pdoc.querySelector('.chips, .chip'));
   check('modern brand logo in popup', !!pdoc.querySelector('.brand .brand-logo img'));
-  check('version pill present and matches extension version', pdoc.querySelector('.version-pill') && pdoc.querySelector('.version-pill').textContent === `v${require('../manifest.json').version}`);
+  check('version pill present and matches extension version', pdoc.querySelector('.version-pill') && pdoc.querySelector('.version-pill').textContent === `v${require('../extension/manifest.json').version}`);
   check('start button present', !!pdoc.getElementById('startBtn'));
   check('PDF-to-image action is clearly visible in popup',
     !!pdoc.getElementById('pdfConvertBtn') && /تبدیل PDF به تصویر/.test(pdoc.getElementById('pdfConvertBtn').textContent));
+  check('translated-copy action is available directly from the popup',
+    !!pdoc.getElementById('translatePageBtn') && /ترجمهٔ همین صفحه/.test(pdoc.getElementById('translatePageBtn').textContent));
+  check('popup exposes the translation engine and one-time privacy consent controls',
+    !!pdoc.getElementById('pageTranslationEngine') && !!pdoc.getElementById('pageTranslationConsent') &&
+    pdoc.querySelectorAll('#pageTranslationEngine option').length === 3 &&
+    !pdoc.querySelector('#pageTranslationEngine option[value="ai:gemini"]'));
+  check('AI API settings are directly accessible from the popup',
+    !!pdoc.getElementById('aiSettingsBtn') && /تنظیمات API هوش مصنوعی/.test(pdoc.getElementById('aiSettingsBtn').textContent) &&
+    fs.readFileSync(path.join(ROOT, 'src/popup/popup.js'), 'utf8').includes("src/ai-settings/settings.html"));
   check('file name input present', !!pdoc.getElementById('pdfName'));
   check('page limit input present', pdoc.getElementById('pageLimit') &&
     pdoc.getElementById('pageLimit').type === 'number');
@@ -125,7 +134,19 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     pdoc.getElementById('statusText').textContent.trim() === '');
 }
 // popup.js keeps the status box hidden unless an error/warning actually happens
-const popupCode = fs.readFileSync(__dirname + '/../src/popup/popup.js', 'utf8');
+const popupCode = fs.readFileSync(__dirname + '/../extension/src/popup/popup.js', 'utf8');
+function makeLocalStorage(initial = {}) {
+  const data = { ...initial };
+  return {
+    data,
+    get: async (keys) => {
+      if (typeof keys === 'string') return { [keys]: data[keys] };
+      if (Array.isArray(keys)) return Object.fromEntries(keys.map((key) => [key, data[key]]));
+      return { ...data };
+    },
+    set: async (values) => { Object.assign(data, values); }
+  };
+}
 check('popup has setStatus helper (text only)', /const setStatus = \(text\)/.test(popupCode));
 check('popup reveals the box only via showError', /const showError = \(text\)/.test(popupCode) &&
   /statusBox\.classList\.remove\('hidden'\)/.test(popupCode));
@@ -155,7 +176,7 @@ check('popup reveals the box only via showError', /const showError = \(text\)/.t
 
 // interactive behavior: run the real popup.html + popup.js with a mocked chrome API
 async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
-  const dom2 = new JSDOM(fs.readFileSync(__dirname + '/../src/popup/popup.html', 'utf8'), {
+  const dom2 = new JSDOM(fs.readFileSync(__dirname + '/../extension/src/popup/popup.html', 'utf8'), {
     url: 'chrome-extension://ext/src/popup/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
   });
   const w = dom2.window;
@@ -197,7 +218,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
 (async () => {
   // The popup shortcut opens a fresh preview workspace; that workspace then opens the PDF picker tab.
   {
-    const pdfDom = new JSDOM(fs.readFileSync(__dirname + '/../src/popup/popup.html', 'utf8'), {
+    const pdfDom = new JSDOM(fs.readFileSync(__dirname + '/../extension/src/popup/popup.html', 'utf8'), {
       url: 'chrome-extension://ext/src/popup/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
     });
     const pdfWindow = pdfDom.window;
@@ -211,6 +232,136 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     await new Promise((resolve) => setTimeout(resolve, 10));
     check('PDF shortcut opens a dedicated empty preview workspace',
       openedUrl === 'chrome-extension://ext/src/viewer/viewer.html?pdfWorkspace=1', openedUrl);
+  }
+
+  // AI API settings are opened as an extension-owned page and share local extension storage.
+  {
+    const settingsDom = new JSDOM(fs.readFileSync(__dirname + '/../extension/src/popup/popup.html', 'utf8'), {
+      url: 'chrome-extension://ext/src/popup/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
+    });
+    const settingsWindow = settingsDom.window;
+    let openedUrl = '';
+    settingsWindow.chrome = {
+      runtime: { getURL: (resource) => `chrome-extension://ext/${resource}` },
+      tabs: { create: async (options) => { openedUrl = options.url; return { id: 78 }; } }
+    };
+    vm.runInContext(popupCode, settingsDom.getInternalVMContext(), { filename: 'popup.js' });
+    settingsWindow.document.getElementById('aiSettingsBtn').click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    check('AI API settings button opens the extension settings page',
+      openedUrl === 'chrome-extension://ext/src/ai-settings/settings.html', openedUrl);
+  }
+
+  // One saved consent and a direct provider choice launch translation without an intermediary tab.
+  {
+    const translateDom = new JSDOM(fs.readFileSync(__dirname + '/../extension/src/popup/popup.html', 'utf8'), {
+      url: 'chrome-extension://ext/src/popup/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
+    });
+    const translateWindow = translateDom.window;
+    const storage = makeLocalStorage({
+      wtpdf_page_translation_consent_v1: false,
+      wtpdf_page_translation_engine_v1: 'ai:openai',
+      gemini_translation_settings_v1: {
+        provider: 'openai',
+        providers: { openai: { model: 'gpt-popup-test', profiles: [{ name: 'Test', apiKey: 'popup-secret' }] } }
+      }
+    });
+    const calls = { created: [], launched: [] };
+    let closed = false;
+    translateWindow.close = () => { closed = true; };
+    translateWindow.chrome = {
+      runtime: {
+        getURL: (resource) => `chrome-extension://ext/${resource}`,
+        sendMessage: async (message) => {
+          calls.launched.push(message);
+          return { ok: true, tabId: 44, paragraphs: 4 };
+        }
+      },
+      storage: { local: storage },
+      tabs: {
+        query: async () => [{ id: 33, url: 'https://news.example.test/story/1' }],
+        sendMessage: async () => { throw new Error('no content listener on ordinary page'); },
+        create: async (options) => { calls.created.push(options); return { id: 77 }; }
+      }
+    };
+    vm.runInContext(popupCode, translateDom.getInternalVMContext(), { filename: 'popup.js' });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const translateButton = translateWindow.document.getElementById('translatePageBtn');
+    const consent = translateWindow.document.getElementById('pageTranslationConsent');
+    const engineOptions = [...translateWindow.document.querySelectorAll('#pageTranslationEngine option')];
+    check('popup shows only AI providers with a saved API key and names their exact model',
+      engineOptions.length === 4 && engineOptions.some((option) => option.value === 'ai:openai' && option.textContent.includes('gpt-popup-test')) &&
+      !engineOptions.some((option) => /Gemini|OpenRouter|AvalAI/.test(option.textContent)) &&
+      !translateWindow.document.getElementById('pageTranslationEngine').textContent.includes('popup-secret'));
+    check('translation stays disabled until one-time consent is given', translateButton.disabled === true);
+    consent.checked = true;
+    consent.dispatchEvent(new translateWindow.Event('change', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    translateWindow.document.getElementById('pageTranslationEngine').value = 'ai:openai';
+    translateWindow.document.getElementById('pageTranslationEngine').dispatchEvent(new translateWindow.Event('change', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    check('consent and the chosen engine are saved for future popup opens',
+      storage.data.wtpdf_page_translation_consent_v1 === true && storage.data.wtpdf_page_translation_engine_v1 === 'ai:openai');
+    translateButton.click();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    check('page translation launches a direct copy request with the selected engine, not a consent tab',
+      calls.launched.length === 1 && calls.launched[0].type === 'WTPDF_PAGE_TRANSLATE_CREATE_COPY' &&
+      calls.launched[0].tabId === 33 && calls.launched[0].engine === 'ai:openai' &&
+      calls.created.length === 0 && closed, calls);
+    consent.checked = false;
+    consent.dispatchEvent(new translateWindow.Event('change', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    check('unchecking consent revokes it and disables future translation',
+      storage.data.wtpdf_page_translation_consent_v1 === false && translateButton.disabled === true);
+  }
+  {
+    const sameTabDom = new JSDOM(fs.readFileSync(__dirname + '/../extension/src/popup/popup.html', 'utf8'), {
+      url: 'chrome-extension://ext/src/popup/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
+    });
+    const sameTabWindow = sameTabDom.window;
+    let created = 0, requested = null;
+    sameTabWindow.chrome = {
+      runtime: { getURL: (resource) => `chrome-extension://ext/${resource}` },
+      storage: { local: makeLocalStorage({ wtpdf_page_translation_consent_v1: true }) },
+      tabs: {
+        query: async () => [{ id: 37, url: 'https://news.example.test/translated-copy' }],
+        sendMessage: async (_id, message) => { requested = message; return { ok: true, translatedCopy: true }; },
+        create: async () => { created++; }
+      }
+    };
+    vm.runInContext(popupCode, sameTabDom.getInternalVMContext(), { filename: 'popup.js' });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    sameTabWindow.document.getElementById('translatePageBtn').click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    check('retranslate from the popup opens paragraph selection in the existing copy tab',
+      requested && requested.type === 'WTPDF_PAGE_TRANSLATE_OPEN_SELECTION' && created === 0, { requested, created });
+  }
+  {
+    const blockedDom = new JSDOM(fs.readFileSync(__dirname + '/../extension/src/popup/popup.html', 'utf8'), {
+      url: 'chrome-extension://ext/src/popup/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
+    });
+    const blockedWindow = blockedDom.window;
+    Object.defineProperty(blockedWindow.Element.prototype, 'innerText', {
+      get() { return this.textContent; }, set(value) { this.textContent = value; }, configurable: true
+    });
+    let created = 0;
+    blockedWindow.chrome = {
+      runtime: { getURL: (resource) => `chrome-extension://ext/${resource}` },
+      storage: { local: makeLocalStorage({ wtpdf_page_translation_consent_v1: true }) },
+      tabs: {
+        query: async () => [{ id: 34, url: 'chrome://settings/' }],
+        create: async () => { created++; }
+      }
+    };
+    vm.runInContext(popupCode, blockedDom.getInternalVMContext(), { filename: 'popup.js' });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const translateButton = blockedWindow.document.getElementById('translatePageBtn');
+    if (translateButton) translateButton.click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    check('page translation refuses browser-internal pages with a clear error',
+      created === 0 && !blockedWindow.document.getElementById('statusBox').classList.contains('hidden') &&
+      /صفحه‌های داخلی/.test(blockedWindow.document.getElementById('statusText').textContent),
+      blockedWindow.document.getElementById('statusText').textContent);
   }
 
   // start scraping without awaiting: the overlay is created synchronously before the first await,
@@ -320,7 +471,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
   // two-stage injection: a reader frame reported by the probe must become the scrape target
   {
     const calls = [];
-    const dom3 = new JSDOM(fs.readFileSync(__dirname + '/../src/popup/popup.html', 'utf8'), {
+    const dom3 = new JSDOM(fs.readFileSync(__dirname + '/../extension/src/popup/popup.html', 'utf8'), {
       url: 'chrome-extension://ext/src/popup/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
     });
     const w3 = dom3.window;
@@ -352,7 +503,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
 
   // v2.68: missing active tab shows a clean Persian error instead of throwing TypeError
   {
-    const dom4 = new JSDOM(fs.readFileSync(__dirname + '/../src/popup/popup.html', 'utf8'), {
+    const dom4 = new JSDOM(fs.readFileSync(__dirname + '/../extension/src/popup/popup.html', 'utf8'), {
       url: 'chrome-extension://ext/src/popup/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
     });
     const w4 = dom4.window;

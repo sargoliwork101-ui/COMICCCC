@@ -2,7 +2,7 @@
 <html lang="fa" dir="rtl">
 <head>
   <meta charset="UTF-8">
-  <title>PIC TO PDF</title>
+  <title>HASAYA</title>
   <link rel="stylesheet" href="../shared/style.css">
   <link rel="stylesheet" href="popup.css">
 </head>
@@ -10,10 +10,10 @@
   <div class="brand">
     <span class="brand-logo"><img src="../../assets/icons/icon128.png" alt=""></span>
     <div class="brand-text">
-      <h1>PIC TO PDF</h1>
+      <h1>HASAYA</h1>
       <p>کمیک را به PDF یا تصویر تبدیل کن</p>
     </div>
-    <span class="version-pill">v2.68</span>
+    <span class="version-pill">v2.89</span>
     <button type="button" id="updateBtn" class="update-btn" title="بررسی و دانلود به‌روزرسانی از گیت‌هاب"
       aria-label="بررسی به‌روزرسانی">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"
@@ -83,6 +83,27 @@
   <button id="pdfConvertBtn" class="btn ghost" type="button" title="انتخاب PDF و تبدیل صفحه‌های آن به تصویر در زبانهٔ جدا">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 14h8M8 17h6"/></svg>
     <span>تبدیل PDF به تصویر</span>
+  </button>
+  <button id="aiSettingsBtn" class="btn ghost" type="button" title="تنظیم سرویس، مدل و کلید API برای ترجمه">
+    <span>تنظیمات API هوش مصنوعی</span>
+  </button>
+  <section id="pageTranslationOptions" class="page-translation-options" aria-label="تنظیم ترجمهٔ صفحه">
+    <div class="field">
+      <label for="pageTranslationEngine">موتور ترجمهٔ این صفحه</label>
+      <select id="pageTranslationEngine" class="sel">
+        <option value="auto">Google؛ اگر نشد MyMemory</option>
+        <option value="google">فقط Google Translate</option>
+        <option value="mymemory">فقط MyMemory</option>
+      </select>
+      <p id="pageTranslationEngineHint" class="mode-hint">فقط سرویس‌های دارای کلید API در فهرست نمایش داده می‌شوند.</p>
+    </div>
+    <label class="check-field page-translation-consent" for="pageTranslationConsent">
+      <input type="checkbox" id="pageTranslationConsent">
+      <span>موافقم متن پاراگراف‌های انتخابی به موتور بالا فرستاده شود. این اجازه در همین مرورگر ذخیره می‌شود؛ با برداشتن تیک لغو خواهد شد.</span>
+    </label>
+  </section>
+  <button id="translatePageBtn" class="btn ghost" type="button" title="کپی صفحه را باز می‌کند؛ پاراگراف‌ها و موتور ترجمه را خودتان انتخاب می‌کنید">
+    <span>ترجمهٔ همین صفحه</span>
   </button>
 
   <div id="extModal" class="ext-modal hidden" role="dialog" aria-modal="true" aria-labelledby="extModalTitle" aria-describedby="extModalMsg">
