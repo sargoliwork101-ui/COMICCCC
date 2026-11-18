@@ -27,7 +27,7 @@ function boot(fetchImpl, downloadsImpl, currentVersion = '2.46', confirmImpl = (
   window.confirm = (message) => { confirmCalls.push(message); return confirmImpl(message); };
   window.fetch = fetchImpl;
   window.PIC_TO_PDF_UPDATE_BRANCH = 'arena/test-updater';
-  vm.runInContext(fs.readFileSync(__dirname + '/../src/popup/update.js', 'utf8'), ctx, { filename: 'update.js' });
+  vm.runInContext(fs.readFileSync(__dirname + '/../extension/src/popup/update.js', 'utf8'), ctx, { filename: 'update.js' });
   return {
     window, downloads, confirmCalls,
     btn: window.document.getElementById('updateBtn'),
@@ -58,11 +58,14 @@ const jsonResponse = (manifest) => ({
     const h = boot(async () => jsonResponse({ version: '2.47.1' }));
     h.btn.click();
     await sleep(10);
-    check('new version: download requested from the configured codeload branch',
-      h.downloads.length === 1 && /codeload\.github\.com/.test(h.downloads[0].url) && /arena\/test-updater/.test(h.downloads[0].url), h.downloads);
+    check('new version: download requested from the configured codeload branch with the HASAYA filename',
+      h.downloads.length === 1 && /codeload\.github\.com/.test(h.downloads[0].url) && /arena\/test-updater/.test(h.downloads[0].url) &&
+      h.downloads[0].filename === 'HASAYA-latest.zip', h.downloads);
     check('new version: asks for approval before downloading', h.confirmCalls.length === 1 && /دانلود/.test(h.confirmCalls[0]));
     check('new version: instruction message mentions Reload',
       h.status.classList.contains('ok') && /Reload/.test(h.status.textContent) && /2\.47\.1/.test(h.status.textContent), h.status.textContent);
+    check('new version: status shows the codeload download link and the extension folder step',
+      h.status.querySelector('a[href*="codeload.github.com"]') !== null && /extension/.test(h.status.textContent), h.status.innerHTML);
   }
 
   // Declining confirmation cancels the update without downloading anything.

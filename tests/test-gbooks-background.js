@@ -1,7 +1,7 @@
 // Tests for the Google Books jscmd=click3 walker in background.js (mocked chrome.* + fetch).
 const fs = require('fs');
 const path = require('path');
-const ROOT = path.resolve(__dirname, '..');
+const ROOT = path.resolve(__dirname, '../extension');
 const vm = require('vm');
 
 let failures = 0;

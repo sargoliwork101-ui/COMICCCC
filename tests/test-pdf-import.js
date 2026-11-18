@@ -35,7 +35,7 @@ const context = {
   PDFImportStore: {}
 };
 vm.createContext(context);
-vm.runInContext(fs.readFileSync(__dirname + '/../src/pdf-import/pdf-import.js', 'utf8'), context,
+vm.runInContext(fs.readFileSync(__dirname + '/../extension/src/pdf-import/pdf-import.js', 'utf8'), context,
   { filename: 'pdf-import.js' });
 
 function page(width, height) {

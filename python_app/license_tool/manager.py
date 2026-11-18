@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
+import ctypes.wintypes
 import csv
 import datetime as dt
 import hashlib
@@ -27,32 +29,32 @@ import math
 import os
 import re
 import secrets
-import socket
 import sys
 import tempfile
 import threading
 import time
 import webbrowser
+
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-APP_DIR = Path(__file__).resolve().parent
+APP_DIR = Path(__file__).resolve().parent.parent  # python_app/
+_LICENSE_TOOL_DIR = Path(__file__).resolve().parent  # python_app/license_tool/
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
+
 
 from comic_studio.license_guard import (  # noqa: E402
     LICENSE_MODULES,
     MODULE_LABELS_FA,
-    SUPPORT_PHONE,
     VENDOR_CONTACT_KEYS,
     LicenseError,
     SECURITY_GATE,
     compute_hardware_id,
     ed25519_public_key,
-    get_support_phone,
     get_vendor_contact_info,
     issue_license_token,
     normalize_hardware_id,
@@ -61,6 +63,9 @@ from comic_studio.license_guard import (  # noqa: E402
     verify_license_token,
 )
 
+APP_VERSION = "4.53"
+
+
 PUBLIC_KEY_MODULE_PATH = APP_DIR / "comic_studio" / "_public_key.py"
 VENDOR_CONFIG_PY_PATH = APP_DIR / "comic_studio" / "_vendor_config.py"
 VENDOR_CONTACT_JSON_PATH = APP_DIR / "vendor_contact.json"
@@ -68,6 +73,7 @@ MASTER_SECRET_BYTES = 256  # 256 bytes = 2048 bits (512 hex chars)
 CUSTOM_MASTER_PBKDF2_ITERS = 600_000
 
 _DIGIT_TRANS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+_FA_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
 
 
 def default_seller_dir() -> Path:
@@ -212,7 +218,7 @@ class SellerKeyLostError(RuntimeError):
 # be swapped by anyone to forge licenses), so instead of hoping the file is never damaged
 # we rewrite it in this canonical, validated and atomic form whenever the seller's vault
 # is used (panel start-up, or `.exe` build).
-_PUBLIC_KEY_MODULE_TEMPLATE = '''"""Embedded Ed25519 public verification key for Comic OCR Studio licenses.
+_PUBLIC_KEY_MODULE_TEMPLATE = '''"""Embedded Ed25519 public verification key for HaSaYa Studio licenses.
 
 IMPORTANT SECURITY NOTE:
 - Only the 32-byte PUBLIC verification key lives in the client application.
@@ -348,11 +354,25 @@ class SellerVault:
             _atomic_write_json(self.master_key_backup_path, record)
 
     def _vault_looks_lost(self) -> bool:
-        """True when the vault is empty but the app already carries a real key / issued licenses."""
+        """True when the vault is missing but real history or an embedded key proves it existed.
+
+        v4.43: a completely empty seller dir (no history files, no backup, no
+        customers) is the *brand-new-seller* case and must NOT be treated as a
+        lost vault, otherwise the very first run of the manufacturer always gets
+        stuck on the recovery page instead of starting cleanly.
+        """
+        if not self.seller_dir.is_dir():
+            return False
+        try:
+            has_any_file = any(p.is_file() for p in self.seller_dir.rglob("*"))
+        except Exception:
+            has_any_file = False
+        if not has_any_file:
+            return False
         issued = len(self.list_history()) or len(self._load_raw_customers())
         embedded = self.embedded_public_key_hex()
         real_embedded = bool(embedded) and set(embedded) != {"0"}
-        return bool(issued) or (real_embedded and self.seller_dir.exists())
+        return bool(issued) or (real_embedded and bool(embedded))
 
     def _ensure_master_key_unlocked(
         self,
@@ -504,7 +524,7 @@ class SellerVault:
         """Write customer-facing contact channels into `comic_studio/_vendor_config.py` for `.exe` bundling."""
         norm = normalize_vendor_contact_dict(info)
         lines = [
-            '"""Embedded customer-facing vendor contact & support channels for Comic OCR Studio.',
+            '"""Embedded customer-facing vendor contact & support channels for HaSaYa Studio.',
             "",
             "HOW TO CUSTOMIZE BEFORE BUILDING `.exe`:",
             "1. Visual method (recommended): Run `start_license_manager.bat` and open the tab",
@@ -512,7 +532,7 @@ class SellerVault:
             "   and click «ذخیره و همگام‌سازی برای ساخت EXE».",
             "2. Direct file method: Edit `python_app/vendor_contact.json` with Notepad; running",
             "   `build_windows_offline.bat` automatically syncs `vendor_contact.json` into this module",
-            "   before compiling `ComicOCRStudio.exe`.",
+            "   before compiling `HaSaYaStudio.exe`.",
             '"""',
             "",
             "from __future__ import annotations",
@@ -1075,7 +1095,7 @@ _PANEL_HTML = """<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>Comic OCR Studio — پنل مدیریت مشتریان و صدور لایسنس</title>
+  <title>HaSaYa Studio — پنل مدیریت مشتریان و صدور لایسنس</title>
   <link rel="icon" type="image/png" href="/assets/icon128.png">
   <style>
     @font-face{font-family:Vazirmatn;src:url('/assets/Vazirmatn.woff2') format('woff2');font-weight:100 900;font-display:swap}
@@ -1100,7 +1120,7 @@ _PANEL_HTML = """<!doctype html>
     input,textarea{user-select:text;-webkit-user-select:text}
     code{font:700 11.5px/1.5 Consolas,"Courier New",monospace;padding:1px 6px;border-radius:6px;background:color-mix(in srgb,var(--a2) 13%,var(--bg));border:1px solid color-mix(in srgb,var(--a2) 34%,var(--line));color:var(--a2)}
 
-    /* Sticky Topbar — exact match with Comic OCR Studio main window */
+    /* Sticky Topbar — exact match with HaSaYa Studio main window */
     .topbar{position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 18px;border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--surface) 88%,transparent);backdrop-filter:blur(14px);flex-wrap:wrap}
     .topbar-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
     .brand{display:flex;align-items:center;gap:10px}
@@ -1109,7 +1129,7 @@ _PANEL_HTML = """<!doctype html>
     .brand-sub{display:block;font-size:11px;color:var(--muted)}
     .ver{font-size:11px;padding:1px 8px;border-radius:999px;background:var(--surface-2);border:1px solid var(--line-2);color:var(--a1);font-weight:700}
 
-    /* Buttons & Icons — exact match with Comic OCR Studio (.bt / .btn-ico) */
+    /* Buttons & Icons — exact match with HaSaYa Studio (.bt / .btn-ico) */
     .btn-ico{width:15px;height:15px;flex:0 0 auto;stroke:currentColor;fill:none;stroke-width:1.85;stroke-linecap:round;stroke-linejoin:round}
     button,.bt{border:1px solid var(--line-2);background:var(--surface-2);color:var(--text);border-radius:9px;padding:7px 12px;cursor:pointer;transition:.16s;display:inline-flex;align-items:center;justify-content:center;gap:6px;text-decoration:none;font-weight:600;font-size:12.5px}
     button:hover:not(:disabled),.bt:hover:not(:disabled){border-color:var(--a1);transform:translateY(-1px)}
@@ -1235,7 +1255,7 @@ _PANEL_HTML = """<!doctype html>
     <div class="brand">
       <img class="logo" src="/assets/icon128.png" alt="">
       <div>
-        <h1>Comic OCR Studio <span class="ver">۴.۳۰ · پنل فروشنده</span></h1>
+        <h1>HaSaYa Studio <span class="ver">__APP_VERSION_FA__ · پنل فروشنده</span></h1>
         <span class="brand-sub">مدیریت کلید مادر ۲۵۶ بایتی، بانک مشتریان و صدور لایسنس ماژولار آفلاین</span>
       </div>
     </div>
@@ -1774,7 +1794,7 @@ _PANEL_HTML = """<!doctype html>
       if (vendorContact.website) contactTail.push(`🌐 وب‌سایت: ${vendorContact.website}`);
       return [
         `سلام ${item.holder || ''} عزیز، وقت بخیر 🌸`,
-        `لایسنس رسمی برنامهٔ Comic OCR Studio برای سیستم شما صادر شد:`,
+        `لایسنس رسمی برنامهٔ HaSaYa Studio برای سیستم شما صادر شد:`,
         `👤 نام خریدار: ${item.holder}`,
         item.phone ? `📱 شماره تماس ثبت‌شده: ${item.phone}` : null,
         `🖥 کد سیستم: ${item.hardwareId}`,
@@ -1967,7 +1987,7 @@ _PANEL_HTML = """<!doctype html>
         const blobUrl = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = blobUrl;
-        a.download = `ComicOCRStudio-Customers-${new Date().toISOString().slice(0,10)}.csv`;
+        a.download = `HaSaYaStudio-Customers-${new Date().toISOString().slice(0,10)}.csv`;
         a.click();
         setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
         notify('فایل اکسل (CSV) لیست مشتریان دانلود شد.');
@@ -2231,7 +2251,7 @@ _PANEL_HTML = """<!doctype html>
         const blobUrl = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = blobUrl;
-        a.download = `ComicOCRStudio-SellerVault-${data.backup.fingerprint}.seller-key.json`;
+        a.download = `HaSaYaStudio-SellerVault-${data.backup.fingerprint}.seller-key.json`;
         a.click();
         setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
         notify('پشتیبان کامل کلید مادر ۲۵۶ بایتی + لیست مشتریان دانلود شد.');
@@ -2328,7 +2348,10 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
                 if not given_q or not hmac.compare_digest(given_q, panel_secret):
                     self._send_json({"detail": "دسترسی غیرمجاز به پنل فروشنده."}, HTTPStatus.FORBIDDEN)
                     return
-                body = _PANEL_HTML.encode("utf-8")
+                # v4.46: render the version badge from APP_VERSION instead of a
+                # hardcoded Persian string that silently went stale (e.g. it
+                # still said ۴.۳۰/۴.۴۳ long after the studio moved on).
+                body = _PANEL_HTML.replace("__APP_VERSION_FA__", APP_VERSION.translate(_FA_DIGITS)).encode("utf-8")
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
@@ -2540,23 +2563,123 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
     return Handler
 
 
+def _start_parent_watcher(server: ThreadingHTTPServer, shutdown_holder: dict[str, bool]) -> None:
+    """Stop the seller panel when the process that launched it exits on Windows."""
+    if os.name != "nt":
+        return
+    try:
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        ntdll = ctypes.windll.ntdll  # type: ignore[attr-defined]
+    except Exception as exc:
+        raise RuntimeError("پایش پنجرهٔ فروشنده در ویندوز در دسترس نیست؛ برای جلوگیری از باقی‌ماندن پنل، اجرا متوقف شد.") from exc
+
+    SYNCHRONIZE = 0x00100000
+    PROC_Q_LIMITED = 0x1000
+
+    class _PROCESS_BASIC_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("Reserved1", ctypes.c_void_p),
+            ("PebBaseAddress", ctypes.c_void_p),
+            ("Reserved2", ctypes.c_void_p * 2),
+            ("UniqueProcessId", ctypes.c_void_p),
+            ("InheritedFromUniqueProcessId", ctypes.c_void_p),
+        ]
+
+    def _set_signature(function: Any, argtypes: list[Any], restype: Any) -> None:
+        # ctypes DLL function pointers accept prototypes; Python fakes used by
+        # tests do not, so leave those callables untouched.
+        with contextlib.suppress(AttributeError, TypeError):
+            function.argtypes = argtypes
+            function.restype = restype
+
+    wintypes = ctypes.wintypes
+    open_process = kernel32.OpenProcess
+    close_handle = kernel32.CloseHandle
+    query_process = ntdll.NtQueryInformationProcess
+    wait_for_single_object = kernel32.WaitForSingleObject
+    _set_signature(open_process, [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], wintypes.HANDLE)
+    _set_signature(close_handle, [wintypes.HANDLE], wintypes.BOOL)
+    _set_signature(
+        query_process,
+        [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.ULONG, ctypes.POINTER(wintypes.ULONG)],
+        wintypes.LONG,
+    )
+    _set_signature(wait_for_single_object, [wintypes.HANDLE, wintypes.DWORD], wintypes.DWORD)
+
+    def _parent_pid(pid: int) -> int:
+        handle = open_process(PROC_Q_LIMITED, False, pid)
+        if not handle:
+            return -1
+        try:
+            info = _PROCESS_BASIC_INFORMATION()
+            out_len = wintypes.ULONG(0)
+            status = query_process(
+                handle, 0, ctypes.byref(info), ctypes.sizeof(info), ctypes.byref(out_len)
+            )
+            if status == 0 and info.InheritedFromUniqueProcessId:
+                return int(info.InheritedFromUniqueProcessId)
+        finally:
+            close_handle(handle)
+        return -1
+
+    # Watch the direct launcher (usually cmd.exe / PowerShell), not the root
+    # ancestor chain. Walking until the chain ends returns from this function
+    # before the watcher thread is created, which leaves the HTTP server alive.
+    parent_pid = _parent_pid(os.getpid())
+    if parent_pid <= 0 or parent_pid == os.getpid():
+        raise RuntimeError("فرایند اجراکنندهٔ پنل فروشنده پیدا نشد؛ برای جلوگیری از باقی‌ماندن پنل، اجرا متوقف شد.")
+    parent_handle = open_process(SYNCHRONIZE, False, parent_pid)
+    if not parent_handle:
+        raise RuntimeError("دسترسی پایش فرایند اجراکنندهٔ پنل فروشنده ممکن نیست؛ اجرا متوقف شد.")
+
+    def _watch_loop() -> None:
+        try:
+            while True:
+                wait_result = wait_for_single_object(parent_handle, 1000)
+                if wait_result == 0x00000102:  # WAIT_TIMEOUT: launcher still exists
+                    continue
+                shutdown_holder["requested"] = True
+                with contextlib.suppress(Exception):
+                    server.shutdown()
+                return
+        finally:
+            with contextlib.suppress(Exception):
+                kernel32.CloseHandle(parent_handle)
+
+    try:
+        watcher = threading.Thread(target=_watch_loop, name="seller-panel-parent-watch", daemon=True)
+        watcher.start()
+    except Exception:
+        with contextlib.suppress(Exception):
+            kernel32.CloseHandle(parent_handle)
+        raise
+
+
 def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
     try:
         key_info = vault.ensure_master_key(sync_source=True, allow_create=True)
     except SellerKeyLostError as exc:
-        print("=" * 72)
-        print("  Comic OCR Studio — پنل فروشنده")
-        print(f"  ⚠ {exc}")
-        print("  پنل باز می‌شود تا بتوانید از بخش «بازیابی کلید» فایل پشتیبان را برگردانید.")
-        print("=" * 72)
-        key_info = {"fingerprint": "—"}
+        # v4.43: a brand-new seller has NO master key yet and no issued history,
+        # so there is nothing to lose; start the panel with a fresh key instead
+        # of leaving it empty.  (The warning path remains for the *lost-key* case
+        # where the vault previously existed but the backup was removed.)
+        try:
+            vault.ensure_master_key(sync_source=True, allow_create=True)
+            key_info = {"fingerprint": vault.fingerprint}
+        except SellerKeyLostError:
+            print("=" * 72)
+            print("  HaSaYa Studio — پنل فروشنده")
+            print(f"  ⚠ {exc}")
+            print("  پنل باز می‌شود تا بتوانید از بخش «بازیابی کلید» فایل پشتیبان را برگردانید.")
+            print("=" * 72)
+            key_info = {"fingerprint": "—"}
     panel_secret = secrets.token_urlsafe(24)
     handler_cls = build_seller_panel_handler(vault, panel_secret)
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
     port = int(server.server_address[1])
     url = f"http://127.0.0.1:{port}/?secret={panel_secret}"
     print("=" * 72)
-    print("  Comic OCR Studio — پنل مدرن مدیریت مشتریان و صدور لایسنس (فروشنده)")
+    print("  HaSaYa Studio — پنل مدرن مدیریت مشتریان و صدور لایسنس (فروشنده)")
     print(f"  شناسهٔ کلید مادر ۲۵۶ بایتی + Ed25519 شما: {key_info['fingerprint']}")
     print(f"  مسیر خصوصی گاوصندوق فروشنده: {vault.seller_dir}")
     print(f"  نسخهٔ پشتیبان کلید مادر: {vault.master_key_backup_path}")
@@ -2566,16 +2689,28 @@ def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
     if open_browser:
         with contextlib.suppress(Exception):
             webbrowser.open(url)
+
+    shutdown_holder: dict[str, bool] = {"requested": False}
+    try:
+        _start_parent_watcher(server, shutdown_holder)
+    except Exception:
+        # If the Windows parent watcher cannot be installed, do not leave a
+        # local server running that could outlive its seller console.
+        server.server_close()
+        raise
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nپنل فروشنده بسته شد.")
     finally:
         server.server_close()
+        if shutdown_holder.get("requested"):
+            print("\n[notice] پنجرهٔ پنل توسط کاربر بسته شد؛ برنامهٔ زمینهٔ لایسنس هم پایان یافت.")
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Comic OCR Studio Seller Modular License Generator & CRM")
+    parser = argparse.ArgumentParser(description="HaSaYa Studio Seller Modular License Generator & CRM")
     parser.add_argument("--seller-dir", default="", help="Optional custom seller key vault directory")
     parser.add_argument("--init-seller", action="store_true", help="Create/sync seller master key and exit")
     parser.add_argument("--set-master-key", default="", help="Set your own custom Master Key (passphrase or 512-char hex)")
