@@ -838,7 +838,7 @@ prepare = async (it, r) => {
       OcrTools.ocrBitmap=async()=>[{text:'Hello',conf:90,x0:10,x1:90,y0:10,y1:30}];
       OcrTools.groupLines=()=>[{id:1,enabled:true,bg:'auto',tr:'',text:'Hello',x0:10,x1:90,y0:10,y1:30,lineH:16}];
       window.__aiIds=(options)=>{const body=JSON.parse(options.body);const text=body.contents?body.contents[0].parts[0].text:body.messages[1].content;
-        return [...text.matchAll(/^\\[(p[0-9]+-b[0-9]+)\\]/gm)].map(m=>m[1]);};
+        const start=text.indexOf('[',text.indexOf('Expected entry count:'));try{return JSON.parse(text.slice(start)).map(entry=>entry.id);}catch{return [];}};
       window.__aiOk=(translations)=>({ok:true,status:200,json:async()=>({candidates:[{content:{parts:[{text:JSON.stringify(translations)}]}}]})});
       window.__openAiOk=(translations)=>({ok:true,status:200,json:async()=>({choices:[{message:{content:JSON.stringify({translations})}}]})});`);
     h.$('trOnlySel').checked = false;
@@ -962,7 +962,7 @@ prepare = async (it, r) => {
     h.$('trAiProvider').dispatchEvent(new h.window.Event('change', { bubbles: true }));
     await sleep(0);
     check('switching to Gemini does not reuse the OpenAI key or model',
-      h.$('trAiModel').value === 'gemini-2.5-flash' && h.ev('aiProfiles.every(p=>p.apiKey!=="openai-ui-key")'));
+      h.$('trAiModel').value === 'gemini-flash-latest' && h.ev('aiProfiles.every(p=>p.apiKey!=="openai-ui-key")'));
     h.$('trAiProvider').value = 'openai';
     h.$('trAiProvider').dispatchEvent(new h.window.Event('change', { bubbles: true }));
     await sleep(0);
@@ -995,20 +995,20 @@ prepare = async (it, r) => {
     h.ev(`aiProfiles=[makeAiProfile('تست من','connection-ui-key')];renderAiProfiles();
       window.__connectionCalls=[];
       window.fetch=async(url,options)=>{window.__connectionCalls.push({url,options});
-        return {ok:true,status:200,json:async()=>({name:'models/gemini-2.5-flash'})};};`);
+        return window.__aiOk([{id:'connection-test',translation:'سلام. این یک آزمون ترجمه است.'}]);};`);
     const testButton = h.$('aiProfileList').querySelector('.ai-profile-test');
     testButton.click();
     for (let i = 0; i < 60 && testButton.disabled; i++) await sleep(10);
     const status = h.$('aiProfileList').querySelector('.ai-profile-status');
-    check('profile test button checks only that key with a lightweight model GET',
+    check('profile test performs a real fixed-sample generation request with the selected key',
       h.ev('window.__connectionCalls.length') === 1 &&
-      h.ev('window.__connectionCalls[0].options.method') === 'GET' &&
+      h.ev('window.__connectionCalls[0].options.method') === 'POST' &&
       h.ev('window.__connectionCalls[0].options.headers["x-goog-api-key"]') === 'connection-ui-key' &&
-      h.ev('window.__connectionCalls[0].url').includes('/v1beta/models/gemini-2.5-flash') &&
-      !h.ev('window.__connectionCalls[0].url').includes('generateContent') &&
-      h.ev('window.__connectionCalls[0].options.body') === undefined);
+      h.ev('window.__connectionCalls[0].url').includes('/v1beta/models/gemini-flash-latest:generateContent') &&
+      h.ev('JSON.parse(window.__connectionCalls[0].options.body).contents[0].parts[0].text.includes("Hello. This is a translation test.")') &&
+      !h.ev('window.__connectionCalls[0].options.body').includes('comic.test'));
     check('successful profile test shows a clear result beside the key',
-      /اتصال برقرار است/.test(status.textContent) && status.classList.contains('ok') && !testButton.disabled,
+      /آزمون ترجمه موفق/.test(status.textContent) && /سلام/.test(status.textContent) && status.classList.contains('ok') && !testButton.disabled,
       status.textContent);
     h.ev(`window.fetch=async()=>({ok:false,status:401,json:async()=>({})});`);
     testButton.click();
@@ -1026,7 +1026,7 @@ prepare = async (it, r) => {
     check('existing single-key settings migrate without losing key, model, Skill, or opt-in',
       h.ev('aiProfiles.length') === 1 && h.ev('aiProfiles[0].apiKey') === 'legacy-test-key' &&
       h.ev('aiProfiles[0].name') === 'کلید اصلی' && h.$('trAiEnabled').checked &&
-      h.$('trAiModel').value === 'gemini-2.5-flash' && h.$('trAiSkill').value === 'Skill قبلی');
+      h.$('trAiModel').value === 'gemini-flash-latest' && h.$('trAiSkill').value === 'Skill قبلی');
     check('migrated key appears in a private password row inside collapsed AI settings',
       h.$('aiProfileList').querySelectorAll('.ai-profile-row').length === 1 &&
       h.$('aiProfileList').querySelector('input[type="password"]').value === 'legacy-test-key' &&
