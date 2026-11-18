@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
+const packageJson = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 let checked = 0;
 let failures = 0;
 
@@ -95,6 +96,8 @@ for (const resource of [
 ]) {
   check(`bundled runtime resource: ${resource}`, fs.existsSync(path.join(ROOT, resource)), resource);
 }
+
+check('npm package metadata identifies the extension as HASAYA', packageJson.name === 'hasaya-chrome-extension');
 
 const channel = fs.readFileSync(path.join(ROOT, 'src/popup/update-channel.js'), 'utf8');
 const updater = fs.readFileSync(path.join(ROOT, 'src/popup/update.js'), 'utf8');

@@ -50,7 +50,7 @@ def _format_browser_url(host: str, port: int) -> str:
 
 
 def _probe_port_state(host: str, port: int) -> str:
-    """Return 'free', 'studio' (a live Comic OCR Studio), 'studio-dying' or 'other'.
+    """Return 'free', 'studio' (a live HaSaYa Studio), 'studio-dying' or 'other'.
 
     Root cause of the "the app does not come up on the first launch" report:
     a Studio instance that is shutting down (its last browser tab was closed)
@@ -98,7 +98,7 @@ def _show_startup_error(message: str) -> None:
     with contextlib.suppress(Exception):
         import ctypes
 
-        ctypes.windll.user32.MessageBoxW(None, str(message), "Comic OCR Studio", 0x10)
+        ctypes.windll.user32.MessageBoxW(None, str(message), "HaSaYa Studio", 0x10)
 
 
 def _prepare_listen_socket(sock: socket.socket) -> None:
@@ -211,13 +211,13 @@ def _open_browser_when_listening(host: str, port: int, callback, timeout: float 
             return
         time.sleep(0.05)
     print(
-        "Comic OCR Studio did not start listening on the expected port; the browser was not opened.",
+        "HaSaYa Studio did not start listening on the expected port; the browser was not opened.",
         file=sys.stderr,
         flush=True,
     )
     _show_startup_error(
-        "Comic OCR Studio could not start listening on its local port, so the browser was not opened.\n"
-        "Close other Comic OCR Studio windows and start the app again."
+        "HaSaYa Studio could not start listening on its local port, so the browser was not opened.\n"
+        "Close other HaSaYa Studio windows and start the app again."
     )
 
 
@@ -231,7 +231,7 @@ def run_server(host: str, port: int, listening_socket: socket.socket | None = No
         # A failure here used to kill the process silently in the consoleless
         # Windows build, so the user only saw "nothing happens".
         _show_startup_error(
-            "Comic OCR Studio could not start because of an internal error.\n"
+            "HaSaYa Studio could not start because of an internal error.\n"
             f"{type(exc).__name__}: {exc}"
         )
         raise SystemExit(1)
@@ -256,7 +256,7 @@ def run_server(host: str, port: int, listening_socket: socket.socket | None = No
         raise
     except Exception as exc:
         _show_startup_error(
-            "Comic OCR Studio stopped while starting its local server.\n"
+            "HaSaYa Studio stopped while starting its local server.\n"
             f"{type(exc).__name__}: {exc}"
         )
         raise
@@ -266,7 +266,7 @@ def run_server(host: str, port: int, listening_socket: socket.socket | None = No
 
 def main() -> None:
     _ensure_std_streams()
-    parser = argparse.ArgumentParser(description="Comic OCR Studio")
+    parser = argparse.ArgumentParser(description="HaSaYa Studio")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-browser", action="store_true")
@@ -305,7 +305,7 @@ def main() -> None:
             # Wait for it instead of handing the browser over to a dying
             # server (that showed an empty page) or colliding with it
             # ("address already in use" made the new instance quit at once).
-            print("Waiting for the previous Comic OCR Studio instance to release the port...", flush=True)
+            print("Waiting for the previous HaSaYa Studio instance to release the port...", flush=True)
             if not _wait_for_port_release(args.host, port, timeout=25.0):
                 with contextlib.suppress(OSError):
                     port = _pick_free_port(args.host)
@@ -320,7 +320,7 @@ def main() -> None:
     if listening_socket is None:
         if explicit_port:
             _show_startup_error(
-                f"Port {port} is still in use by another program. Close it and start Comic OCR Studio again."
+                f"Port {port} is still in use by another program. Close it and start HaSaYa Studio again."
             )
             raise SystemExit(1)
         with contextlib.suppress(OSError):
