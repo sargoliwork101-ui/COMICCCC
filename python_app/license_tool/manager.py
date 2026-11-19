@@ -47,6 +47,7 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 
+from comic_studio.sessions import SessionManager  # noqa: E402
 from comic_studio.license_guard import (  # noqa: E402
     LICENSE_MODULES,
     MODULE_LABELS_FA,
@@ -63,7 +64,7 @@ from comic_studio.license_guard import (  # noqa: E402
     verify_license_token,
 )
 
-APP_VERSION = "4.53"
+APP_VERSION = "4.58"
 
 
 PUBLIC_KEY_MODULE_PATH = APP_DIR / "comic_studio" / "_public_key.py"
@@ -1153,6 +1154,9 @@ _PANEL_HTML = """<!doctype html>
     .key-alert.danger{border-color:#fb718555;background:color-mix(in srgb,#e11d48 12%,transparent);color:#fb7185}
     .key-alert ul{margin:6px 0 0;padding-right:18px}
     .key-alert li{margin:3px 0}
+    .server-alert{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:11px 15px;border-radius:11px;border:1px solid #fb718566;background:color-mix(in srgb,#e11d48 13%,var(--surface-2));color:var(--text);font-size:12.5px;font-weight:700}
+    .server-alert[hidden]{display:none}
+    .server-alert-detail{font-size:11.5px;color:var(--muted);font-weight:500;margin-top:2px}
 
     /* Pills & Badges — exact match with Studio .summary-pill / .lic-pill */
     .pill{display:inline-flex;align-items:center;gap:6px;padding:3.5px 11px;border-radius:999px;font-size:11.5px;font-weight:700;border:1px solid var(--line-2);background:var(--surface-2);color:var(--text);white-space:nowrap}
@@ -1285,6 +1289,13 @@ _PANEL_HTML = """<!doctype html>
   </header>
 
   <div class="shell">
+    <div id="sellerServerAlert" class="server-alert" role="alert" hidden>
+      <div>
+        <div id="sellerServerAlertText">ارتباط با سرور پنل لایسنس قطع شد. اگر پنجرهٔ پنل را بسته‌اید دوباره باز کنید؛ در غیر این صورت روی «تلاش دوباره» بزنید.</div>
+        <div id="sellerServerAlertDetail" class="server-alert-detail" hidden></div>
+      </div>
+      <button type="button" class="bt sm primary" id="sellerServerRetryBtn">تلاش دوباره</button>
+    </div>
     <section class="panel status-strip">
       <div>
         <div class="status-strip-pills">
@@ -1668,7 +1679,102 @@ _PANEL_HTML = """<!doctype html>
     let custFilter = 'all';
     let lastIssued = null;
     let confirmResolver = null;
+    let sessionTimer = null;
+    let sessionCloseSent = false;
+    let heartbeatInFlight = false;
+    let sessionVisibilityBound = false;
+    let serverUnreachableShown = false;
     const $ = (id) => document.getElementById(id);
+
+    function sellerTabId() {
+      try {
+        const existing = sessionStorage.getItem('comic-seller-tab-id');
+        if (existing) return existing;
+      } catch {}
+      const id = globalThis.crypto?.randomUUID?.() || `seller-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      try { sessionStorage.setItem('comic-seller-tab-id', id); } catch {}
+      return id;
+    }
+    const TAB_ID = sellerTabId();
+
+    function showSellerServerUnreachable(detail = '') {
+      const box = $('sellerServerAlert');
+      if (!box) return;
+      const d = $('sellerServerAlertDetail');
+      if (d) {
+        const txt = String(detail || '').trim();
+        d.textContent = txt;
+        d.hidden = !txt;
+      }
+      box.hidden = false;
+      serverUnreachableShown = true;
+    }
+    function hideSellerServerUnreachable() {
+      const box = $('sellerServerAlert');
+      if (box) box.hidden = true;
+      serverUnreachableShown = false;
+    }
+    async function heartbeat() {
+      if (sessionCloseSent || heartbeatInFlight) return;
+      heartbeatInFlight = true;
+      try {
+        const res = await fetch('/api/session/heartbeat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Seller-Secret': SECRET },
+          body: JSON.stringify({ client_id: TAB_ID, secret: SECRET }),
+          cache: 'no-store',
+        });
+        if (res && res.ok) hideSellerServerUnreachable();
+        else showSellerServerUnreachable(`پاسخ سرور برای ضربان نشست: ${res ? res.status : 'بدون پاسخ'}`);
+      } catch (err) {
+        showSellerServerUnreachable(err?.message || 'بدون پاسخ');
+      } finally {
+        heartbeatInFlight = false;
+      }
+    }
+    function startSession() {
+      sessionCloseSent = false;
+      heartbeat();
+      if (!sessionTimer) {
+        sessionTimer = setInterval(heartbeat, 45000);
+        sessionTimer.unref?.();
+      }
+      if (!sessionVisibilityBound) {
+        document.addEventListener('visibilitychange', () => { if (!document.hidden) heartbeat(); });
+        sessionVisibilityBound = true;
+      }
+    }
+    function closeSession() {
+      if (sessionCloseSent) return;
+      sessionCloseSent = true;
+      if (sessionTimer) { clearInterval(sessionTimer); sessionTimer = null; }
+      const body = JSON.stringify({ client_id: TAB_ID, secret: SECRET });
+      try {
+        if (navigator.sendBeacon?.('/api/session/close', new Blob([body], { type: 'application/json' }))) return;
+      } catch {}
+      fetch('/api/session/close', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Seller-Secret': SECRET },
+        body,
+        keepalive: true,
+      }).catch(() => {});
+    }
+    window.addEventListener('beforeunload', closeSession);
+    window.addEventListener('pagehide', closeSession);
+    $('sellerServerRetryBtn')?.addEventListener('click', async () => {
+      const btn = $('sellerServerRetryBtn');
+      if (btn) { btn.disabled = true; btn.textContent = 'در حال تلاش…'; }
+      try {
+        await callApi('/api/health');
+        hideSellerServerUnreachable();
+        await heartbeat();
+        await refreshInfo();
+      } catch (err) {
+        showSellerServerUnreachable(err?.message || '');
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'تلاش دوباره'; }
+      }
+    });
 
     function applyTheme(mode) {
       const isLight = mode === 'light';
@@ -1728,11 +1834,19 @@ _PANEL_HTML = """<!doctype html>
     }
 
     async function callApi(path, method = 'GET', body = null) {
-      const res = await fetch(path, {
-        method,
-        headers: { 'Content-Type': 'application/json', 'X-Seller-Secret': SECRET },
-        body: body ? JSON.stringify(body) : null,
-      });
+      let res;
+      try {
+        res = await fetch(path, {
+          method,
+          headers: { 'Content-Type': 'application/json', 'X-Seller-Secret': SECRET },
+          body: body ? JSON.stringify(body) : null,
+          cache: 'no-store',
+        });
+      } catch (err) {
+        showSellerServerUnreachable(err?.message || 'قطع ارتباط با سرور پنل');
+        throw new Error('ارتباط با سرور پنل لایسنس قطع شد (Failed to fetch).');
+      }
+      if (serverUnreachableShown) hideSellerServerUnreachable();
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'خطا در عملیات');
       return data;
@@ -2269,6 +2383,7 @@ _PANEL_HTML = """<!doctype html>
       ev.target.value = '';
     };
 
+    startSession();
     refreshInfo().catch((e) => notify(e.message, true));
   </script>
 </body>
@@ -2276,7 +2391,12 @@ _PANEL_HTML = """<!doctype html>
 """
 
 
-def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[BaseHTTPRequestHandler]:
+def build_seller_panel_handler(
+    vault: SellerVault,
+    panel_secret: str,
+    *,
+    sessions: SessionManager | None = None,
+) -> type[BaseHTTPRequestHandler]:
     """Create the HTTP handler class for the Seller Panel (reusable in unit tests)."""
     allowed_static: dict[str, tuple[Path, str]] = {
         "/assets/Vazirmatn.woff2": (_STATIC_ASSETS_DIR / "Vazirmatn.woff2", "font/woff2"),
@@ -2285,8 +2405,20 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
 
     max_post_bytes = 16 * 1024 * 1024
     loopback_hosts = {"127.0.0.1", "localhost", "[::1]", "::1"}
+    active_lock = threading.Lock()
+    active_requests = 0
+
+    def _is_busy() -> bool:
+        with active_lock:
+            return active_requests > 0
+
+    session_mgr = sessions if sessions is not None else SessionManager(is_busy=_is_busy)
+    if session_mgr.is_busy is None:
+        session_mgr.is_busy = _is_busy
 
     class Handler(BaseHTTPRequestHandler):
+        sessions = session_mgr
+
         def log_message(self, fmt: str, *args: Any) -> None:
             return
 
@@ -2364,6 +2496,12 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
             if not self._authorized():
                 self._send_json({"detail": "توکن امنیتی پنل فروشنده نامعتبر است."}, HTTPStatus.FORBIDDEN)
                 return
+
+            if parsed.path == "/api/health":
+                self._send_json({"ok": True, "name": "HaSaYa Seller Panel", "version": APP_VERSION})
+                return
+
+            session_mgr.touch_activity()
 
             if parsed.path == "/api/info":
                 try:
@@ -2463,10 +2601,13 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
             self._send_json({"detail": "مسیر پیدا نشد."}, HTTPStatus.NOT_FOUND)
 
         def do_POST(self) -> None:  # noqa: N802
+            nonlocal active_requests
             if not self._is_loopback_request():
                 self._send_json({"detail": "دسترسی فقط از آدرس محلی مجاز است."}, HTTPStatus.FORBIDDEN)
                 return
-            if not self._authorized():
+            parsed = urlsplit(self.path)
+            is_session_route = parsed.path in {"/api/session/heartbeat", "/api/session/close"}
+            if not is_session_route and not self._authorized():
                 self._send_json({"detail": "توکن امنیتی پنل فروشنده نامعتبر است."}, HTTPStatus.FORBIDDEN)
                 return
             try:
@@ -2485,7 +2626,24 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
             except Exception:
                 self._send_json({"detail": "فرمت JSON نامعتبر است."}, HTTPStatus.BAD_REQUEST)
                 return
-            parsed = urlsplit(self.path)
+            if is_session_route:
+                body_secret = str(data.get("secret") or "")
+                if not (self._authorized() or (body_secret and hmac.compare_digest(body_secret, panel_secret))):
+                    self._send_json({"detail": "توکن امنیتی پنل فروشنده نامعتبر است."}, HTTPStatus.FORBIDDEN)
+                    return
+                client_id = str(data.get("client_id") or "").strip()[:128]
+                if parsed.path == "/api/session/heartbeat":
+                    if not client_id:
+                        self._send_json({"detail": "شناسهٔ زبانهٔ مرورگر لازم است."}, HTTPStatus.BAD_REQUEST)
+                        return
+                    self._send_json({"ok": True, "active": session_mgr.heartbeat(client_id)})
+                    return
+                remaining, known = session_mgr.close(client_id)
+                self._send_json({"ok": True, "remaining": remaining, "known": known})
+                return
+            session_mgr.touch_activity()
+            with active_lock:
+                active_requests += 1
             try:
                 if parsed.path == "/api/issue":
                     raw_mods = data.get("modules")
@@ -2559,6 +2717,9 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
                 self._send_json({"detail": "مسیر پیدا نشد."}, HTTPStatus.NOT_FOUND)
             except (LicenseError, ValueError, RuntimeError) as exc:
                 self._send_json({"detail": str(exc)}, HTTPStatus.BAD_REQUEST)
+            finally:
+                with active_lock:
+                    active_requests = max(0, active_requests - 1)
 
     return Handler
 
@@ -2674,7 +2835,8 @@ def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
             print("=" * 72)
             key_info = {"fingerprint": "—"}
     panel_secret = secrets.token_urlsafe(24)
-    handler_cls = build_seller_panel_handler(vault, panel_secret)
+    sessions = SessionManager(close_grace=2.0, stale_after=180.0, abandon_after=900.0)
+    handler_cls = build_seller_panel_handler(vault, panel_secret, sessions=sessions)
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
     port = int(server.server_address[1])
     url = f"http://127.0.0.1:{port}/?secret={panel_secret}"
@@ -2684,18 +2846,28 @@ def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
     print(f"  مسیر خصوصی گاوصندوق فروشنده: {vault.seller_dir}")
     print(f"  نسخهٔ پشتیبان کلید مادر: {vault.master_key_backup_path}")
     print(f"  آدرس پنل محلی: {url}")
-    print("  برای بستن پنل، کلیدهای Ctrl+C را بزنید یا این پنجره را ببندید.")
+    print("  برای بستن پنل، مرورگر را ببندید، Ctrl+C را بزنید یا این پنجره را ببندید.")
     print("=" * 72)
+
+    shutdown_holder: dict[str, bool] = {"requested": False, "browser_closed": False}
+
+    def _shutdown_on_browser_close() -> None:
+        shutdown_holder["browser_closed"] = True
+        with contextlib.suppress(Exception):
+            server.shutdown()
+
+    sessions.on_empty = _shutdown_on_browser_close
+
     if open_browser:
         with contextlib.suppress(Exception):
             webbrowser.open(url)
 
-    shutdown_holder: dict[str, bool] = {"requested": False}
     try:
         _start_parent_watcher(server, shutdown_holder)
     except Exception:
         # If the Windows parent watcher cannot be installed, do not leave a
         # local server running that could outlive its seller console.
+        sessions.stop()
         server.server_close()
         raise
 
@@ -2704,8 +2876,11 @@ def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
     except KeyboardInterrupt:
         print("\nپنل فروشنده بسته شد.")
     finally:
+        sessions.stop()
         server.server_close()
-        if shutdown_holder.get("requested"):
+        if shutdown_holder.get("browser_closed"):
+            print("\n[notice] مرورگر بسته شد؛ سرور پنل فروشنده هم به‌طور تمیز متوقف گردید.")
+        elif shutdown_holder.get("requested"):
             print("\n[notice] پنجرهٔ پنل توسط کاربر بسته شد؛ برنامهٔ زمینهٔ لایسنس هم پایان یافت.")
 
 

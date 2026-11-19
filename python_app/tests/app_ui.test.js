@@ -4629,7 +4629,7 @@ function check(name, condition) {
       const detail = document.getElementById('serverAlertDetail').textContent || '';
       window.fetch = async (url, opts = {}) => {
         const parsed = new URL(url, 'http://127.0.0.1:8765');
-        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.57' });
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.58' });
         return origFetch(url, opts);
       };
       document.getElementById('serverAlertRetry').click();
@@ -4841,7 +4841,7 @@ function check(name, condition) {
             const u = String(url);
             if (u.endsWith('/api/health')) {
               healthProbesDuringRetry += 1;
-              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ name: 'HaSaYa Studio', version: '4.57' }) };
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ name: 'HaSaYa Studio', version: '4.58' }) };
             }
             if (u.endsWith('/state') && options.method === 'PUT') {
               return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => state.project, text: async () => JSON.stringify(state.project) };

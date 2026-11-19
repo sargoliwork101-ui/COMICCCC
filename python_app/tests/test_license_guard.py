@@ -1268,3 +1268,96 @@ def test_seller_parent_watcher_stops_server_when_direct_launcher_exits(monkeypat
     assert kernel32.closed == [1001, 2002]
     assert server.shutdown_calls == 1
     assert state["requested"] is True
+
+
+def test_v458_seller_panel_has_browser_heartbeat_and_immediate_close_shutdown(tmp_path: Path) -> None:
+    """v4.58: Seller license panel shares the Studio SessionManager heartbeat & close-to-shutdown lifecycle."""
+    import json
+    import threading
+    import time
+    from http.server import ThreadingHTTPServer
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    import license_tool.manager as lm
+    from comic_studio.sessions import SessionManager
+
+    vault = lm.SellerVault(tmp_path / "seller_vault")
+    vault.ensure_master_key(sync_source=False, allow_create=True)
+    secret = "seller-secret-test-v458"
+    sessions = SessionManager(close_grace=0.04, stale_after=0.10, abandon_after=0.20)
+    handler_cls = lm.build_seller_panel_handler(vault, secret, sessions=sessions)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    port = int(server.server_address[1])
+    shutdown_events: list[str] = []
+
+    def _on_empty() -> None:
+        shutdown_events.append("browser_closed")
+        server.shutdown()
+
+    sessions.on_empty = _on_empty
+    srv_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    srv_thread.start()
+    try:
+        # 1. HTML includes heartbeat, closeSession (beforeunload/pagehide), and server unreachable alert
+        with urlopen(f"http://127.0.0.1:{port}/?secret={secret}", timeout=5) as resp:
+            html = resp.read().decode("utf-8")
+        assert "/api/session/heartbeat" in html
+        assert "/api/session/close" in html
+        assert "beforeunload" in html and "pagehide" in html
+        assert "sellerServerAlert" in html
+
+        # 2. Heartbeat rejects missing/wrong secret
+        bad_req = Request(
+            f"http://127.0.0.1:{port}/api/session/heartbeat",
+            data=json.dumps({"client_id": "tab-a", "secret": "wrong"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            urlopen(bad_req, timeout=5)
+            raise AssertionError("Expected 403 for invalid secret")
+        except HTTPError as exc:
+            assert exc.code == 403
+
+        # 3. Valid heartbeat & /api/health
+        hb_req = Request(
+            f"http://127.0.0.1:{port}/api/session/heartbeat",
+            data=json.dumps({"client_id": "tab-a"}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-Seller-Secret": secret},
+            method="POST",
+        )
+        with urlopen(hb_req, timeout=5) as resp:
+            hb_data = json.loads(resp.read().decode("utf-8"))
+        assert hb_data == {"ok": True, "active": 1}
+
+        health_req = Request(
+            f"http://127.0.0.1:{port}/api/health",
+            headers={"X-Seller-Secret": secret},
+            method="GET",
+        )
+        with urlopen(health_req, timeout=5) as resp:
+            health_data = json.loads(resp.read().decode("utf-8"))
+        assert health_data["ok"] is True and health_data["version"] == lm.APP_VERSION
+
+        # 4. sendBeacon-style close (secret in JSON body, no X-Seller-Secret header) shuts server down cleanly
+        close_req = Request(
+            f"http://127.0.0.1:{port}/api/session/close",
+            data=json.dumps({"client_id": "tab-a", "secret": secret}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(close_req, timeout=5) as resp:
+            close_data = json.loads(resp.read().decode("utf-8"))
+        assert close_data == {"ok": True, "remaining": 0, "known": True}
+
+        deadline = time.monotonic() + 2.0
+        while srv_thread.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not srv_thread.is_alive()
+        assert shutdown_events == ["browser_closed"]
+    finally:
+        sessions.stop()
+        with lm.contextlib.suppress(Exception):
+            server.shutdown()
+        server.server_close()

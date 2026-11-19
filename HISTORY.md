@@ -1,5 +1,21 @@
 # تاریخچهٔ تغییرات
 
+## HaSaYa Studio 4.58 — 2026-11-19
+
+- **افزودن چرخهٔ کامل ضربان مرورگر و خاموش‌شدن فوری به پنل مدیریت لایسنس (`python_app/license_tool/manager.py`)**:
+  - **ضربان نشست مرورگر و سرور (`SessionManager`)**: پنل فروشندهٔ لایسنس اکنون از همان سامانهٔ `SessionManager` استودیو برای نگهداری نشست استفاده می‌کند؛ رابط وب پنل بلافاصله هنگام باز شدن ضربان را شروع (`startSession()` با بازهٔ ۴۵ ثانیه و رویداد `visibilitychange`) و مسیرهای `GET /api/health`، `POST /api/session/heartbeat` و `POST /api/session/close` روی سرور پنل افزوده شدند (با تأیید loopback و بررسی توکن امنیتی از هدر یا بدنهٔ `sendBeacon`).
+  - **خاموش‌شدن فوری سرور پنل با بستن مرورگر**: بستن زبانه یا پنجرهٔ مرورگر (`beforeunload` و `pagehide`) درخواست `closeSession()` را می‌فرستد تا سرور محلی پنل (`ThreadingHTTPServer`) به‌طور تمیز و خودکار بسته شود و در پس‌زمینه باز نماند؛ هم‌زمان با نگهبان فرایند ترمینال (`_start_parent_watcher`) و تمدید فعالیت روی درخواست‌های API (`touch_activity`) کار می‌کند تا تبِ باز در پس‌زمینه وسط کار بسته نشود.
+  - **اعلان قطع ارتباط در رابط پنل (`#sellerServerAlert`)**: اگر ارتباط مرورگر با سرور پنل قطع شود، به‌جای باقی‌ماندن صفحهٔ بی‌جان، نوار هشدار واضح همراه با دکمهٔ «تلاش دوباره» نمایش داده می‌شود.
+- **به‌روزرسانی راهنمای داخل برنامه (`help-guide.js`)**: در فصل ۱۵ («لایسنس و رمز ورود محلی») پشتیبانی پنل لایسنس از ضربان مرورگر-سرور و خاموش‌شدن خودکار با بستن زبانهٔ مرورگر ثبت شد.
+- **افزودن تست بازگشت (`test_license_guard.py`)**: تست `test_v458_seller_panel_has_browser_heartbeat_and_immediate_close_shutdown` برای بررسی وجود کد ضربان و اعلان قطع سرور در HTML پنل، رد توکن نامعتبر در `/api/session/heartbeat`، بررسی `/api/health`، و خاموش‌شدن تمیز `ThreadingHTTPServer` با `POST /api/session/close` (حتی در حالت `sendBeacon` بدون هدر سفارشی) اضافه شد.
+- **افزایش نسخه**: نسخهٔ HaSaYa Studio (و پنل فروشنده در `manager.py` / `license_tool/start_license_manager.bat`) به `4.58` (`4.5.8`) افزایش یافت (افزونهٔ کروم بدون تغییر در `3.4.0` ماند).
+- **نتیجهٔ بررسی‌ها**:
+  - `npm test` (۱۷ مجموعه تست افزونه و مبدل‌ها): کامل موفق شدند.
+  - `node python_app/tests/app_ui.test.js`: کامل موفق شد.
+  - `eslint` روی فایل‌های JS تغییریافته (`app.js`، `help-guide.js`، `app_ui.test.js`): بدون خطا موفق شد.
+  - `pytest` روی تست‌های لایسنس، نشست، هستهٔ استودیو، برندینگ و لانچر (`test_license_guard.py`، `test_sessions.py`، `test_app.py`، `test_branding.py`، `test_launcher_startup.py`، `test_windows_launcher.py`): ۲۰۳ تست موفق (۰ خطا).
+  - `git diff --check`: موفق و بدون خطای پایانه یا فاصلهٔ اضافی.
+
 ## HaSaYa Studio 4.57 — 2026-11-19
 
 - **رفع محدودیت بسته‌شدن سرور در حین کار فعال و تضمین عملکرد ضربان نشست (`sessions.py`، `main.py`، `__main__.py`)**:
