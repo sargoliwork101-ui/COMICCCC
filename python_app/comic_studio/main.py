@@ -490,6 +490,8 @@ def create_app() -> FastAPI:
                 disconnect_task.cancel()
                 with contextlib.suppress(Exception, asyncio.CancelledError):
                     await disconnect_task
+            if hasattr(resources, "release_memory"):
+                resources.release_memory()
             if pulse:
                 pulse.join(timeout=0.1)
             with active_jobs_lock:
