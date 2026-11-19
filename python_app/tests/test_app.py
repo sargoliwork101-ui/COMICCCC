@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.61"
+    assert health.json()["version"] == "4.62"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -3344,7 +3344,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.61"
+    assert APP_VERSION == "4.62"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "HaSaYaStudio"
@@ -6073,5 +6073,135 @@ def test_v461_builtin_worker_end_to_end_via_ocr_jobs_and_run_py(client, monkeypa
         assert final_payload["status"] == "done", final_payload
         assert final_payload["result"]["images"][0]["ocrCompleted"] is True
         assert final_payload["result"]["images"][0]["blocks"][0]["text"] == "E2E WORKER OK"
+    finally:
+        bw.stop()
+
+
+def test_v462_preflight_hashes_only_target_page_and_builtin_worker_recycles_and_prunes_jobs(client, monkeypatch, tmp_path):
+    """v4.62: _validate_ocr_request hashes only requested pages, worker receives direct image_path without eager cv2, recycles after max pages, and background job results are pruned."""
+    import json as _json
+    import sys as _sys
+    import time as _time
+    import comic_studio.main as main_mod
+    import comic_studio.ocr_builtin_worker as bw_mod
+    import comic_studio.pending_results as pending_mod
+
+    project, first_item = make_project(client)
+    pid = project["id"]
+    extra_ids = [first_item["id"]]
+    for idx in range(3):
+        from io import BytesIO
+        from PIL import Image
+
+        buf = BytesIO()
+        Image.new("RGB", (64, 64), (240, 240, 240)).save(buf, "PNG")
+        up = client.post(
+            f"/api/projects/{pid}/files",
+            files=[("files", (f"extra-{idx}.png", buf.getvalue(), "image/png"))],
+        )
+        assert up.status_code == 200
+        extra_ids = [im["id"] for im in up.json()["images"]]
+    assert len(extra_ids) == 4
+    target_id = extra_ids[2]
+
+    hashed_ids = []
+    orig_sig = pending_mod.ocr_signature
+
+    def _spy_sig(store, state, image_id):
+        hashed_ids.append(image_id)
+        return orig_sig(store, state, image_id)
+
+    eager_flags = []
+    orig_cfg = main_mod.configure_native_runtime
+
+    def _spy_cfg(eager_cv2=False):
+        eager_flags.append(bool(eager_cv2))
+        return orig_cfg(eager_cv2=eager_cv2)
+
+    seen_calls = []
+
+    fake_worker = tmp_path / "recycle_worker.py"
+    fake_worker.write_text(
+        "import json, os, sys\n"
+        "sys.stdout.write(json.dumps({'type': 'ready', 'pid': os.getpid()}) + '\\n')\n"
+        "sys.stdout.flush()\n"
+        "while True:\n"
+        "    line = sys.stdin.readline()\n"
+        "    if not line:\n"
+        "        break\n"
+        "    req = json.loads(line)\n"
+        "    if req.get('cmd') == 'shutdown':\n"
+        "        sys.stdout.write(json.dumps({'type': 'bye'}) + '\\n')\n"
+        "        sys.stdout.flush()\n"
+        "        break\n"
+        "    sys.stdout.write(json.dumps({'type': 'result', 'ok': True, 'blocks': [{'text': 'P:' + str(os.getpid()), 'confidence': 0.99, 'polygon': [[2, 2], [40, 2], [40, 22], [2, 22]]}]}) + '\\n')\n"
+        "    sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(pending_mod, "ocr_signature", _spy_sig)
+    monkeypatch.setattr(main_mod, "configure_native_runtime", _spy_cfg)
+    monkeypatch.setenv("COMIC_STUDIO_BUILTIN_WORKER", "1")
+    monkeypatch.setattr(bw_mod, "BUILTIN_WORKER_MAX_PAGES", 2)
+
+    bw = client.app.state.registry._builtin_worker
+    orig_recognize = bw.recognize
+
+    def _spy_recognize(*args, **kwargs):
+        seen_calls.append({"image_arg": args[1] if len(args) > 1 else None, "image_path": kwargs.get("image_path")})
+        return orig_recognize(*args, **kwargs)
+
+    monkeypatch.setattr(bw, "_build_command", lambda: ([_sys.executable, str(fake_worker)], str(tmp_path)))
+    monkeypatch.setattr(bw, "recognize", _spy_recognize)
+
+    try:
+        pids_seen = []
+        created_jids = []
+        # Run 8 single-page OCR jobs -> worker must recycle after 2 pages (new worker PID on 3rd)
+        # and completed job result snapshots beyond the newest 6 are pruned.
+        for run_idx in range(8):
+            page_id = extra_ids[run_idx % len(extra_ids)]
+            resp = client.post(
+                f"/api/projects/{pid}/ocr/jobs",
+                json={"image_ids": [page_id], "engine": "rapidocr-v6", "language": "eng", "keep_engine_loaded": True},
+            )
+            assert resp.status_code == 202
+            jid = resp.json()["jobId"]
+            created_jids.append(jid)
+            done_data = None
+            for _ in range(80):
+                poll = client.get(f"/api/jobs/{jid}")
+                assert poll.status_code == 200
+                payload = poll.json()
+                if payload["status"] != "running":
+                    done_data = payload
+                    break
+                _time.sleep(0.02)
+            assert done_data is not None and done_data["status"] == "done", done_data
+            matched_img = next(im for im in done_data["result"]["images"] if im["id"] == page_id)
+            pids_seen.append(matched_img["blocks"][0]["text"])
+
+        # Each of the 8 single-page requests hashed ONLY its 1 requested image (preflight + stage + resolve = 3 calls per job, never the other 3 pages)
+        assert len(hashed_ids) == 24
+        for run_idx in range(8):
+            expected_id = extra_ids[run_idx % len(extra_ids)]
+            assert hashed_ids[run_idx * 3 : (run_idx + 1) * 3] == [expected_id] * 3
+        # Main process did NOT import cv2 eagerly when delegating to the isolated worker
+        assert eager_flags and all(flag is False for flag in eager_flags)
+        # Main process passed image=None and direct image_path instead of copying full pixel buffers + temp PNGs
+        assert len(seen_calls) == 8
+        assert all(call["image_arg"] is None and call["image_path"] is not None for call in seen_calls)
+        # Worker recycled after BUILTIN_WORKER_MAX_PAGES=2: pages 0,1 share PID1; pages 2,3 share PID2 != PID1
+        assert pids_seen[0] == pids_seen[1]
+        assert pids_seen[2] != pids_seen[1]
+        assert pids_seen[2] == pids_seen[3]
+
+        # Oldest completed job result snapshot was pruned while newest remains accessible
+        oldest_poll = client.get(f"/api/jobs/{created_jids[0]}")
+        assert oldest_poll.status_code == 200
+        assert oldest_poll.json().get("result") is None
+        newest_poll = client.get(f"/api/jobs/{created_jids[-1]}")
+        assert newest_poll.status_code == 200
+        assert newest_poll.json().get("result") is not None
     finally:
         bw.stop()

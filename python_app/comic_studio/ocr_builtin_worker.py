@@ -29,6 +29,8 @@ from typing import Any
 
 _SUBPROCESS_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 BUILTIN_ISOLATABLE_ENGINES = frozenset({"rapidocr-v6", "rapidocr-v5", "easyocr"})
+BUILTIN_WORKER_MAX_PAGES = 16
+BUILTIN_WORKER_MAX_RSS_MB = 2200.0
 
 
 def _kill_proc_tree(proc: subprocess.Popen[str] | None) -> None:
@@ -71,8 +73,18 @@ def _start_parent_watchdog(parent_pid: int) -> None:
         if os.name == "nt":
             try:
                 import ctypes
+                from ctypes import wintypes
 
                 kernel32 = ctypes.windll.kernel32
+                for fn, at, rt in (
+                    (kernel32.OpenProcess, [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], ctypes.c_void_p),
+                    (kernel32.WaitForSingleObject, [ctypes.c_void_p, wintypes.DWORD], wintypes.DWORD),
+                    (kernel32.CloseHandle, [ctypes.c_void_p], wintypes.BOOL),
+                ):
+                    with contextlib.suppress(AttributeError, TypeError):
+                        fn.argtypes = at
+                        fn.restype = rt
+
                 handle = kernel32.OpenProcess(0x00100000, False, int(parent_pid))
                 if handle:
                     try:
@@ -229,6 +241,7 @@ class BuiltinOcrWorkerClient:
         self._proc_lock = threading.Lock()
         self._proc: subprocess.Popen[str] | None = None
         self._loaded_engine_id: str | None = None
+        self._pages_served: int = 0
         self._force_cpu: bool = False
         self._cancelled = threading.Event()
         self._stderr_tail: deque[str] = deque(maxlen=60)
@@ -305,6 +318,7 @@ class BuiltinOcrWorkerClient:
         )
         with self._proc_lock:
             self._proc = proc
+            self._pages_served = 0
 
         stderr_tail = self._stderr_tail
 
@@ -361,6 +375,7 @@ class BuiltinOcrWorkerClient:
             proc = self._proc
             self._proc = None
             self._loaded_engine_id = None
+            self._pages_served = 0
         if proc is not None:
             _kill_proc_tree(proc)
             self._close_streams_locked(proc)
@@ -370,6 +385,7 @@ class BuiltinOcrWorkerClient:
             proc = self._proc
             self._proc = None
             self._loaded_engine_id = None
+            self._pages_served = 0
         if proc is None:
             return
         with contextlib.suppress(Exception):
@@ -379,6 +395,22 @@ class BuiltinOcrWorkerClient:
                 proc.wait(timeout=2.0)
         _kill_proc_tree(proc)
         self._close_streams_locked(proc)
+
+    def _maybe_recycle_locked(self) -> None:
+        with self._proc_lock:
+            proc = self._proc
+            served = self._pages_served
+        if proc is None or proc.poll() is not None:
+            return
+        should_recycle = served >= BUILTIN_WORKER_MAX_PAGES
+        if not should_recycle:
+            from .ocr_managed import process_rss_mb
+
+            rss = process_rss_mb(int(proc.pid))
+            if rss > 0 and rss >= BUILTIN_WORKER_MAX_RSS_MB:
+                should_recycle = True
+        if should_recycle:
+            self.stop()
 
     def recognize(
         self,
@@ -391,6 +423,7 @@ class BuiltinOcrWorkerClient:
         *,
         page_mode: str = "auto",
         persian_preprocess: bool = False,
+        image_path: Path | str | None = None,
         emit_fn: Callable[[str, str, float | None], None] | None = None,
         is_cancelled_fn: Callable[[], bool] | None = None,
     ) -> list[dict[str, Any]]:
@@ -405,18 +438,27 @@ class BuiltinOcrWorkerClient:
                 raise JobCancelledError("عملیات OCR به درخواست شما متوقف شد.")
 
         _check_abort()
-        with tempfile.NamedTemporaryFile(prefix=f"comic-builtin-{engine_id}-", suffix=".png", delete=False) as tmp:
-            tmp_path = Path(tmp.name)
-        try:
+        direct_path = Path(image_path) if image_path else None
+        owns_tmp = False
+        if direct_path is not None and direct_path.is_file():
+            target_path = direct_path
+        else:
+            if image is None:
+                raise OcrError("تصویر ورودی برای خواندن متن موجود نیست.")
+            with tempfile.NamedTemporaryFile(prefix=f"comic-builtin-{engine_id}-", suffix=".png", delete=False) as tmp:
+                target_path = Path(tmp.name)
+            owns_tmp = True
             rgb_img = image if getattr(image, "mode", "RGB") == "RGB" else image.convert("RGB")
             try:
-                rgb_img.save(tmp_path, "PNG", compress_level=1)
+                rgb_img.save(target_path, "PNG", compress_level=1)
             finally:
                 if rgb_img is not image:
                     rgb_img.close()
 
+        try:
             with self._lock:
                 self._cancelled.clear()
+                self._maybe_recycle_locked()
                 last_crash_hint = ""
                 for attempt in range(2):
                     _check_abort()
@@ -427,7 +469,7 @@ class BuiltinOcrWorkerClient:
                     req = {
                         "cmd": "recognize",
                         "engineId": engine_id,
-                        "imagePath": str(tmp_path),
+                        "imagePath": str(target_path),
                         "language": language,
                         "contrast": bool(contrast),
                         "precise": bool(precise),
@@ -465,6 +507,9 @@ class BuiltinOcrWorkerClient:
 
                     _check_abort()
                     if result_payload is not None:
+                        with self._proc_lock:
+                            if self._proc is proc:
+                                self._pages_served += 1
                         if result_payload.get("ok"):
                             return list(result_payload.get("blocks") or [])
                         if result_payload.get("cancelled"):
@@ -484,6 +529,7 @@ class BuiltinOcrWorkerClient:
                         if self._proc is proc:
                             self._proc = None
                             self._loaded_engine_id = None
+                            self._pages_served = 0
                     _kill_proc_tree(proc)
                     self._close_streams_locked(proc)
                     last_crash_hint = ("\n".join(self._stderr_tail))[-400:]
@@ -498,7 +544,8 @@ class BuiltinOcrWorkerClient:
                 suffix = f": {last_crash_hint}" if last_crash_hint else ""
                 raise OcrError(f"پردازشگر مدل {engine_id} به شکل غیرمنتظره‌ای بسته شد{suffix}")
         finally:
-            tmp_path.unlink(missing_ok=True)
+            if owns_tmp:
+                target_path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,18 @@
 # تاریخچهٔ تغییرات
 
+## HaSaYa Studio 4.62 — 2026-11-19
+
+- **رفع پایدار خطای `Failed to fetch` در دسته‌های طولانی OCR (۲۵+ صفحه)**:
+  - **رفع قفل شدن event loop هنگام اعتبارسنجی OCR (`main.py`)**: `_validate_ocr_request` اکنون ابتدا `ids` را مشخص می‌کند و هش SHA-256 امضای فایل (`pending_results.ocr_signature`) را تنها برای صفحات درخواستی (به‌جای تمام صفحات ویرایش‌شدهٔ پروژه در هر صفحهٔ دسته) محاسبه می‌کند و از طریق `run_in_threadpool` اجرا می‌شود تا روی دسته‌های ۲۵ تا ۱۰۰+ صفحه‌ای، سرور محلی برای ثانیه‌های طولانی قفل نشود.
+  - **کاهش شدید مصرف رم و جلوگیری از بارگذاری `cv2` در فرایند اصلی (`main.py` و `ocr_builtin_worker.py`)**: هنگام ارسال به پردازشگر ایزوله (`use_worker` یا `IsolatedOcrEngine`)، دیگر `cv2` در فرایند اصلی وب‌سرور بارگذاری نمی‌شود (`eager_cv2=False`)، تصویر کامل در فرایند اصلی decode/re-encode نمی‌شود و مسیر مستقیم فایل (`image_path`) همراه با فقط ابعاد صفحه به worker داده می‌شود؛ همچنین `_prune_background_jobs_locked` اسنپ‌شات‌های سنگین `result` را فقط روی ۶ کار پایان‌یافتهٔ اخیر (تا ۱۲۰ ثانیه) نگه می‌دارد.
+  - **بازیافت خودکار پردازشگر ایزوله بین صفحات (`ocr_builtin_worker.py`)**: `BuiltinOcrWorkerClient` به‌طور خودکار پس از `16` صفحه (`BUILTIN_WORKER_MAX_PAGES`) یا عبور از `2200` مگابایت حافظه (`BUILTIN_WORKER_MAX_RSS_MB`) بین دو صفحه ریست تمیز می‌شود تا رشد تدریجی حافظهٔ ONNX/DirectML/PyTorch در دسته‌های طولانی کنترل شود.
+  - **اصلاح نوع `HANDLE` در ویندوز ۶۴بیتی (`ocr_builtin_worker.py` و `ocr_managed.py`)**: `argtypes` و `restype` (`ctypes.c_void_p`) برای `OpenProcess`، `GetCurrentProcess`، `WaitForSingleObject`، `CloseHandle`، `GetProcessMemoryInfo` و `EmptyWorkingSet` تنظیم شد تا از برش اشاره‌گر ۶۴بیتی جلوگیری شود.
+  - **بهینه‌سازی رندر مرورگر حین اجرای دسته‌ای OCR (`app.js`)**: `renderImagesText` از گزینهٔ `skipGrid` پشتیبانی می‌کند؛ در حلقهٔ `runOcr()` بازسازی کامل شبکه و درخواست‌های مکرر تصاویر بندانگشتی در هر صفحه متوقف شد و شبکه یک‌بار در پایان دسته به‌روزرسانی می‌شود، تأخیرهای retry رندر/آپلود به `[600, 1400, 2600, 4200]` افزایش یافت و در پنجرهٔ خطا جزئیات فنی نیز نمایش داده می‌شود.
+- **افزودن تست‌های بازگشت (`test_app.py` و `app_ui.test.js`)**:
+  - `test_v462_preflight_hashes_only_target_page_and_builtin_worker_recycles_and_prunes_jobs` در `test_app.py`.
+  - بررسی یک‌بار رندر شدن شبکه در پایان دستهٔ چندصفحه‌ای `runOcr()` در `app_ui.test.js`.
+- **افزایش نسخه**: نسخه به `4.62` (`4.6.2`) افزایش یافت.
+
 ## HaSaYa Studio 4.61 — 2026-11-19
 
 - **رفع فوری دو خطای واقعی در مسیر پردازشگر ایزولهٔ داخلی (`main.py` و `ocr_builtin_worker.py`)**:

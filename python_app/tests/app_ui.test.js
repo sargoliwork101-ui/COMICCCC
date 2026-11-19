@@ -4649,7 +4649,7 @@ function check(name, condition, detail = '') {
       const detail = document.getElementById('serverAlertDetail').textContent || '';
       window.fetch = async (url, opts = {}) => {
         const parsed = new URL(url, 'http://127.0.0.1:8765');
-        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.61' });
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.62' });
         return origFetch(url, opts);
       };
       document.getElementById('serverAlertRetry').click();
@@ -4861,7 +4861,7 @@ function check(name, condition, detail = '') {
             const u = String(url);
             if (u.endsWith('/api/health')) {
               healthProbesDuringRetry += 1;
-              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ name: 'HaSaYa Studio', version: '4.61' }) };
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ name: 'HaSaYa Studio', version: '4.62' }) };
             }
             if (u.endsWith('/state') && options.method === 'PUT') {
               return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => state.project, text: async () => JSON.stringify(state.project) };
@@ -4964,7 +4964,7 @@ function check(name, condition, detail = '') {
           window.fetch = async (url, options = {}) => {
             const u = String(url);
             if (u.endsWith('/api/health')) {
-              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ name: 'HaSaYa Studio', version: '4.61' }) };
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ name: 'HaSaYa Studio', version: '4.62' }) };
             }
             if (u.endsWith('/state') && options.method === 'PUT') {
               return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => state.project };
@@ -5064,6 +5064,86 @@ function check(name, condition, detail = '') {
   window.dispatchEvent(new window.Event('pagehide'));
   check('browser close sends exactly one close beacon', beacons.filter((entry) => entry.url === '/api/session/close').length === closeBeaconsBefore + 1);
   check('closing the tab stops its heartbeat timer', await vm.runInContext('sessionTimer === null && sessionCloseSent', context));
+
+  {
+    const v462GridCheck = await vm.runInContext(`
+      (async () => {
+        const prevProject = JSON.parse(JSON.stringify(state.project));
+        const multiProj = JSON.parse(JSON.stringify(state.project));
+        const baseImg = JSON.parse(JSON.stringify(multiProj.images[0]));
+        multiProj.images = [0, 1, 2].map((i) => ({
+          ...JSON.parse(JSON.stringify(baseImg)),
+          id: 'p' + i,
+          name: 'p' + i + '.png',
+          order: i,
+          selected: true,
+          edited: false,
+          ocrCompleted: false,
+          blocks: [],
+        }));
+        adoptProject(multiProj);
+
+        const origFetch = window.fetch;
+        const origRenderGrid = renderGrid;
+        const origOverlay = currentOverlayMode();
+        let gridCalls = 0;
+        let jobSeq = 0;
+        const jobPageMap = new Map();
+        renderGrid = () => { gridCalls += 1; };
+        window.fetch = async (url, options = {}) => {
+          const u = String(url);
+          if (u.endsWith('/state') && options.method === 'PUT') {
+            return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => state.project };
+          }
+          if (u.endsWith('/ocr/jobs') && options.method === 'POST') {
+            const body = JSON.parse(options.body || '{}');
+            const jid = 'job-v462-' + (++jobSeq);
+            jobPageMap.set(jid, body.image_ids?.[0]);
+            return { ok: true, status: 202, headers: { get: () => 'application/json' }, json: async () => ({ jobId: jid, status: 'running' }) };
+          }
+          const jobMatch = u.match(/\\/api\\/jobs\\/(job-v462-\\d+)$/);
+          if (jobMatch) {
+            const targetId = jobPageMap.get(jobMatch[1]);
+            const doneProj = JSON.parse(JSON.stringify(state.project));
+            const target = doneProj.images.find((im) => im.id === targetId);
+            if (target) {
+              target.ocrCompleted = true;
+              target.blocks = [{ id: 1, text: 'PAGE ' + targetId, tr: '', enabled: true, bg: 'white', x0: 10, y0: 10, x1: 120, y1: 40, lineH: 22, dir: 'ltr', align: 'center' }];
+            }
+            return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ jobId: jobMatch[1], status: 'done', result: doneProj }) };
+          }
+          if (u.includes('/content')) {
+            return { ok: true, status: 200, headers: { get: () => 'image/png' }, blob: async () => new window.Blob() };
+          }
+          if (u.endsWith('/rendered')) {
+            return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ ok: true }) };
+          }
+          if (u.endsWith('/api/engines/unload') || u.endsWith('/api/engines/memory')) {
+            return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ ok: true, totalRamMb: 80, loadedCount: 0, loadedEngines: [] }) };
+          }
+          return origFetch(url, options);
+        };
+        try {
+          setOverlayMode('ocr', false);
+          gridCalls = 0;
+          $('ocrOnlySelected').checked = true;
+          await runOcr();
+          const allDone = state.project.images.every((im) => im.ocrCompleted);
+          return { gridCalls, allDone };
+        } finally {
+          renderGrid = origRenderGrid;
+          window.fetch = origFetch;
+          setOverlayMode(origOverlay, false);
+          adoptProject(prevProject);
+        }
+      })()
+    `, context);
+    check(
+      'v4.62 runOcr skips per-page renderGrid rebuilds during batch loop and renders grid once at end',
+      v462GridCheck.allDone === true && v462GridCheck.gridCalls === 1,
+      JSON.stringify(v462GridCheck),
+    );
+  }
   window.close();
   if (failures) process.exitCode = 1;
 })().catch((error) => { console.error(error); window.close(); process.exitCode = 1; });

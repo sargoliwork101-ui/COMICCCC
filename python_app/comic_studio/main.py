@@ -35,6 +35,7 @@ from .watermark_render import has_active_watermark
 from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, _INSTALL_LOCK, recognize_image
 from .ocr_grouping import organize_ocr_blocks
 from .ocr_managed import (
+    IsolatedOcrEngine,
     _stop_lingering_surya_server,
     configure_native_runtime,
     invalidate_engine_runtime_caches,
@@ -170,6 +171,15 @@ def create_app() -> FastAPI:
         ]
         for jid in stale:
             background_jobs.pop(jid, None)
+        completed_with_result = [
+            (float(entry.get("updatedAt") or entry.get("createdAt") or now), jid)
+            for jid, entry in background_jobs.items()
+            if entry.get("status") != "running" and entry.get("result") is not None
+        ]
+        completed_with_result.sort(reverse=True)
+        for idx, (ts, jid) in enumerate(completed_with_result):
+            if idx >= 6 or (now - ts) > 120.0:
+                background_jobs[jid]["result"] = None
         while len(background_jobs) > 120:
             victim = next(
                 (jid for jid, entry in background_jobs.items() if entry.get("status") != "running"),
@@ -1214,6 +1224,7 @@ def create_app() -> FastAPI:
         min_confidence: float,
         page_mode: str = "auto",
         persian_preprocess: bool = False,
+        image_path: Path | str | None = None,
     ) -> list[dict[str, Any]]:
         engine_id = str(getattr(engine, "id", "") or "")
         should_worker = getattr(registry, "should_use_builtin_worker", None)
@@ -1227,6 +1238,7 @@ def create_app() -> FastAPI:
                 min_confidence,
                 page_mode=page_mode,
                 persian_preprocess=persian_preprocess,
+                image_path=image_path,
                 emit_fn=activity.add,
                 is_cancelled_fn=is_job_cancelled,
             )
@@ -1254,18 +1266,25 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "تصویر موردنظر پیدا نشد.") from exc
         from PIL import Image
         registry.reset_ocr_cancel()
-        await run_in_threadpool(configure_native_runtime, True)
+        should_worker = getattr(registry, "should_use_builtin_worker", None)
+        use_worker = callable(should_worker) and should_worker(engine_id, recognize_image)
+        await run_in_threadpool(configure_native_runtime, (not use_worker) and not isinstance(engine, IsolatedOcrEngine))
         await run_in_threadpool(registry.unload_all, engine_id)
-        with Image.open(path) as im:
-            image = im.copy()
-            page_size = image.size
+        image = None
+        if use_worker:
+            with Image.open(path) as im:
+                page_size = im.size
+        else:
+            with Image.open(path) as im:
+                image = im.copy()
+                page_size = image.size
         use_persian_prep = bool(
             values.language == "fas" if values.persian_preprocess is None else values.persian_preprocess
         )
         activity.add(f"آزمایش {ENGINE_INFO[engine_id]['name']} روی {path.name} آغاز شد")
         try:
             raw_blocks = await run_reported(
-                _invoke_recognize, engine, image, values.language, True, True, 0.2, values.page_mode, use_persian_prep,
+                _invoke_recognize, engine, image, values.language, True, True, 0.2, values.page_mode, use_persian_prep, path,
                 pulse_label=f"آزمایش {ENGINE_INFO[engine_id]['name']}",
                 job_kind="ocr",
                 http_request=http_request,
@@ -1284,30 +1303,40 @@ def create_app() -> FastAPI:
             activity.add(f"آزمایش موتور ناموفق بود: {exc}", "error")
             raise
         finally:
-            image.close()
+            if image is not None:
+                image.close()
             await run_in_threadpool(registry.unload_all)
         activity.add(f"آزمایش تمام شد؛ {len(blocks)} تکه متن تشخیص داده شد", "success", 1.0)
         return {"engine": engine_id, "imageId": values.image_id, "blocks": blocks, "memory": registry.memory_status()}
 
     def _validate_ocr_request(project_id: str, values: OcrRequest) -> tuple[dict[str, Any], dict[str, str | None], dict[str, str], Any, list[str]]:
         require_module_license("ocr")
-        with store._lock:
-            state = project(project_id)
-            baseline = {item['id']: pending_results.ocr_signature(store, state, item['id']) for item in state['images']}
-            original_ocr = {item['id']: '\n'.join(str(b.get('text') or '') for b in item.get('blocks', [])) for item in state['images']}
         engine = registry.get(values.engine)
         if not ENGINE_INFO[values.engine].get("selectable", False):
             raise HTTPException(400, "این مدل به محیط اجرای جداگانه (external runtime) نیاز دارد و موتور مستقیم OCR نیست.")
         if values.language not in LANGUAGES or values.language not in ENGINE_INFO[values.engine]["languages"]:
             raise HTTPException(400, "این موتور از زبان انتخاب‌شده پشتیبانی نمی‌کند.")
-        ids = image_ids(state, values.image_ids)
-        if not ids:
-            raise HTTPException(400, "حداقل یک تصویر را انتخاب کنید.")
-        for pending in pending_results.list_pending(store, project_id):
-            if pending['kind'] == 'ocr':
-                entry = pending_results.load(store, project_id, pending['id'])
-                if set(ids).intersection(output['id'] for output in entry['outputs']):
-                    raise PendingResultConflict(pending['id'], 'ocr')
+        with store._lock:
+            state = project(project_id)
+            ids = image_ids(state, values.image_ids)
+            if not ids:
+                raise HTTPException(400, "حداقل یک تصویر را انتخاب کنید.")
+            target_set = set(ids)
+            baseline = {
+                item['id']: pending_results.ocr_signature(store, state, item['id'])
+                for item in state['images']
+                if item['id'] in target_set
+            }
+            original_ocr = {
+                item['id']: '\n'.join(str(b.get('text') or '') for b in item.get('blocks', []))
+                for item in state['images']
+                if item['id'] in target_set
+            }
+            for pending in pending_results.list_pending(store, project_id):
+                if pending['kind'] == 'ocr':
+                    entry = pending_results.load(store, project_id, pending['id'])
+                    if target_set.intersection(output['id'] for output in entry['outputs']):
+                        raise PendingResultConflict(pending['id'], 'ocr')
         return state, baseline, original_ocr, engine, ids
 
     async def _execute_ocr(
@@ -1320,7 +1349,9 @@ def create_app() -> FastAPI:
     ) -> dict[str, Any]:
         state, baseline, original_ocr, engine, ids = preflight
         registry.reset_ocr_cancel()
-        await run_in_threadpool(configure_native_runtime, True)
+        should_worker = getattr(registry, "should_use_builtin_worker", None)
+        use_worker = callable(should_worker) and should_worker(values.engine, recognize_image)
+        await run_in_threadpool(configure_native_runtime, (not use_worker) and not isinstance(engine, IsolatedOcrEngine))
         await run_in_threadpool(registry.unload_all, values.engine)
         target_items = [item for item in state["images"] if item["id"] in ids]
         total_targets = len(target_items)
@@ -1408,8 +1439,6 @@ def create_app() -> FastAPI:
             else:
                 activity.add(f"در «{item['name']}» متنی پیدا نشد", "warning")
 
-        should_worker = getattr(registry, "should_use_builtin_worker", None)
-        use_worker = callable(should_worker) and should_worker(values.engine, recognize_image)
         batch_ctx = (
             engine.configure_batch(total_targets)
             if (not use_worker) and hasattr(engine, "configure_batch") and total_targets > 1
@@ -1441,13 +1470,13 @@ def create_app() -> FastAPI:
                             progress=start_page_p,
                         )
                         path = store.image_path(project_id, item["id"])
-                        with Image.open(path) as im:
-                            image = im.copy()
-                        try:
+                        if use_worker:
+                            with Image.open(path) as im:
+                                page_size = im.size
                             blocks = await run_reported(
-                                _invoke_recognize, engine, image, values.language,
+                                _invoke_recognize, engine, None, values.language,
                                 values.contrast, values.precise, values.min_confidence, values.page_mode,
-                                use_persian_prep,
+                                use_persian_prep, path,
                                 pulse_label=f"در حال خواندن {item['name']}",
                                 progress_span=(start_page_p, round(p_lo + (p_hi - p_lo) * 0.92, 4)),
                                 job_kind="ocr",
@@ -1455,9 +1484,24 @@ def create_app() -> FastAPI:
                                 on_cancel=lambda: registry.cancel_ocr(values.engine),
                                 cancel_event=ocr_cancel_ev,
                             )
-                            page_size = image.size
-                        finally:
-                            image.close()
+                        else:
+                            with Image.open(path) as im:
+                                image = im.copy()
+                            try:
+                                blocks = await run_reported(
+                                    _invoke_recognize, engine, image, values.language,
+                                    values.contrast, values.precise, values.min_confidence, values.page_mode,
+                                    use_persian_prep, path,
+                                    pulse_label=f"در حال خواندن {item['name']}",
+                                    progress_span=(start_page_p, round(p_lo + (p_hi - p_lo) * 0.92, 4)),
+                                    job_kind="ocr",
+                                    http_request=http_request,
+                                    on_cancel=lambda: registry.cancel_ocr(values.engine),
+                                    cancel_event=ocr_cancel_ev,
+                                )
+                                page_size = image.size
+                            finally:
+                                image.close()
                         if ocr_cancel_ev.is_set() or await _http_disconnected():
                             activity.add("فرایند OCR به درخواست شما متوقف شد.", "warning")
                             if external_cancel_ev is not None and ocr_cancel_ev.is_set():
@@ -1552,14 +1596,14 @@ def create_app() -> FastAPI:
 
     @app.post("/api/projects/{project_id}/ocr")
     async def run_ocr(project_id: str, values: OcrRequest, http_request: Request) -> dict[str, Any]:
-        preflight = _validate_ocr_request(project_id, values)
+        preflight = await run_in_threadpool(_validate_ocr_request, project_id, values)
         return await _execute_ocr(project_id, values, preflight, http_request=http_request)
 
     background_task_refs: set[asyncio.Task[Any]] = set()
 
     @app.post("/api/projects/{project_id}/ocr/jobs", status_code=202)
     async def start_ocr_job(project_id: str, values: OcrRequest) -> JSONResponse:
-        preflight = _validate_ocr_request(project_id, values)
+        preflight = await run_in_threadpool(_validate_ocr_request, project_id, values)
         job_id = uuid.uuid4().hex
         cancel_ev = threading.Event()
         with background_jobs_lock:

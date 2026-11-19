@@ -602,25 +602,39 @@ def process_rss_mb(pid: int | None = None) -> float:
                     ("PeakPagefileUsage", ctypes.c_size_t),
                 ]
 
+            from ctypes import wintypes
+
+            kernel32 = ctypes.windll.kernel32
+            psapi = ctypes.windll.psapi
+            for fn, at, rt in (
+                (kernel32.GetCurrentProcess, [], ctypes.c_void_p),
+                (kernel32.OpenProcess, [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], ctypes.c_void_p),
+                (kernel32.CloseHandle, [ctypes.c_void_p], wintypes.BOOL),
+                (psapi.GetProcessMemoryInfo, [ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD], wintypes.BOOL),
+            ):
+                with contextlib.suppress(AttributeError, TypeError):
+                    fn.argtypes = at
+                    fn.restype = rt
+
             counters = _PROCESS_MEMORY_COUNTERS()
             counters.cb = ctypes.sizeof(_PROCESS_MEMORY_COUNTERS)
             if target_pid == os.getpid():
-                handle = ctypes.windll.kernel32.GetCurrentProcess()
+                handle = kernel32.GetCurrentProcess()
                 close_after = False
             else:
                 # PROCESS_QUERY_LIMITED_INFORMATION (0x1000) | PROCESS_VM_READ (0x0010)
-                handle = ctypes.windll.kernel32.OpenProcess(0x1010, False, target_pid)
+                handle = kernel32.OpenProcess(0x1010, False, target_pid)
                 close_after = bool(handle)
             if handle:
                 try:
-                    ok = ctypes.windll.psapi.GetProcessMemoryInfo(
+                    ok = psapi.GetProcessMemoryInfo(
                         handle, ctypes.byref(counters), counters.cb
                     )
                     if ok:
                         return round(counters.WorkingSetSize / (1024 * 1024), 1)
                 finally:
                     if close_after:
-                        ctypes.windll.kernel32.CloseHandle(handle)
+                        kernel32.CloseHandle(handle)
         else:
             status_file = Path(f"/proc/{target_pid}/status")
             if status_file.is_file():
@@ -675,11 +689,24 @@ def trim_process_memory(*, aggressive: bool = False) -> None:
                     msvcrt.msvcrt._heapmin()
             except Exception:
                 pass
-            handle = ctypes.windll.kernel32.GetCurrentProcess()
+            from ctypes import wintypes
+
+            kernel32 = ctypes.windll.kernel32
+            psapi = ctypes.windll.psapi
+            for fn, at, rt in (
+                (kernel32.GetCurrentProcess, [], ctypes.c_void_p),
+                (psapi.EmptyWorkingSet, [ctypes.c_void_p], wintypes.BOOL),
+                (kernel32.SetProcessWorkingSetSize, [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t], wintypes.BOOL),
+            ):
+                with contextlib.suppress(AttributeError, TypeError):
+                    fn.argtypes = at
+                    fn.restype = rt
+
+            handle = kernel32.GetCurrentProcess()
             try:
-                ctypes.windll.psapi.EmptyWorkingSet(handle)
+                psapi.EmptyWorkingSet(handle)
             except Exception:
-                ctypes.windll.kernel32.SetProcessWorkingSetSize(
+                kernel32.SetProcessWorkingSetSize(
                     handle, ctypes.c_size_t(-1), ctypes.c_size_t(-1)
                 )
         elif sys.platform.startswith("linux"):

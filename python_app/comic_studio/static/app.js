@@ -2810,17 +2810,18 @@ async function runOcr() {
         verifyPendingOcrState();
         adoptProject(result, { skipGrid: true });
         completedOcrPages += 1;
-        setOverlayMode('ocr', false);
+        if (currentOverlayMode() !== 'ocr') setOverlayMode('ocr', false);
         applyActiveJobProgress((idx + 0.80) / totalPages);
         await renderImagesText(
           [pageId],
           (done, tot) => applyActiveJobProgress((idx + 0.80 + 0.20 * (done / Math.max(1, tot))) / totalPages),
           checkOcrNotCancelled,
-          { signal: controller.signal },
+          { signal: controller.signal, skipGrid: true },
         );
         applyActiveJobProgress(completedOcrPages / totalPages);
       }
     }, 'ocrProgress');
+    if (completedOcrPages > 0 && state.project) renderGrid();
     ocrReviewFinished = true;
     await reviewOcrReplacements(ocrReviewSnapshot, ids);
     ocrSucceeded = true; ocrClosingNormally = true;
@@ -2859,6 +2860,7 @@ async function runOcr() {
       : rawMsg;
     showReportDialog('خطا در OCR', [
       friendlyMsg,
+      ...(isConnectionLostError(error) && rawMsg && rawMsg !== friendlyMsg ? [`جزئیات فنی: ${rawMsg}`] : []),
       completedOcrPages ? `صفحه‌های تکمیل‌شده تا قبل از خطا: ${completedOcrPages}` : 'هیچ صفحه‌ای تکمیل نشد.',
     ]);
     if (error.pendingId) openPendingResults(error.pendingId); throw error;
@@ -3952,7 +3954,7 @@ async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false
         throw cause;
       }
     },
-    { checkCancel, signal },
+    { checkCancel, signal, delays: [600, 1400, 2600, 4200] },
   );
   let bitmap = null;
   try {
@@ -3989,7 +3991,7 @@ async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false
         ...(signal ? { signal } : {}),
         suppressServerAlert: !isLastAttempt,
       }),
-      { checkCancel, signal },
+      { checkCancel, signal, delays: [600, 1400, 2600, 4200] },
     );
   } finally {
     pngBlob = null;
@@ -4023,7 +4025,7 @@ function browserRenderConcurrency(totalCount = 1) {
 async function renderImagesText(ids = null, onStep = null, checkCancel = null, options = {}) {
   const wanted = ids ? new Set(ids) : null;
   const targets = sortedImages().filter((item) => (!wanted || wanted.has(item.id)) && (hasOverlayText(item) || item.edited));
-  if (!targets.length) { renderGrid(); return; }
+  if (!targets.length) { if (!options?.skipGrid) renderGrid(); return; }
   const concurrency = browserRenderConcurrency(targets.length);
   let nextIdx = 0;
   let completed = 0;
@@ -4038,7 +4040,7 @@ async function renderImagesText(ids = null, onStep = null, checkCancel = null, o
     }
   };
   await Promise.all(Array.from({ length: concurrency }, () => runWorker()));
-  renderGrid();
+  if (!options?.skipGrid) renderGrid();
 }
 function updateExportFields() {
   const kind = $('exportKind').value;
