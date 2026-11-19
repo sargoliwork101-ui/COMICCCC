@@ -634,54 +634,19 @@ def process_rss_mb(pid: int | None = None) -> float:
 
 
 def trim_process_memory() -> None:
-    """Run Python GC, flush optional GPU caches if already loaded, and return unused heap/working-set pages to OS."""
+    """Collect unreachable Python objects without forcing native allocator cleanup.
+
+    Called between OCR pages, after rendering, and by engine unloaders. A warm
+    ONNX/DirectML session (or another job) may still own native allocations here.
+    Do not minimize CRT heaps, evict the process working set, or flush global
+    GPU caches from this shared helper. Native failures can terminate the server
+    outright; wrapping those calls in ``except Exception`` is not protection.
+    Images are closed by their owners and model references are dropped by the
+    engine unloaders. Let each runtime and the OS manage their live allocations.
+    """
     import gc
+
     gc.collect()
-    gc.collect()
-    torch_mod = sys.modules.get("torch")
-    if torch_mod is not None:
-        try:
-            if hasattr(torch_mod, "cuda") and torch_mod.cuda.is_available():
-                torch_mod.cuda.empty_cache()
-                if hasattr(torch_mod.cuda, "ipc_collect"):
-                    torch_mod.cuda.ipc_collect()
-        except Exception:
-            pass
-        try:
-            if hasattr(torch_mod, "mps") and hasattr(torch_mod.mps, "empty_cache"):
-                if hasattr(torch_mod, "backends") and hasattr(torch_mod.backends, "mps") and torch_mod.backends.mps.is_available():
-                    torch_mod.mps.empty_cache()
-        except Exception:
-            pass
-    paddle_mod = sys.modules.get("paddle")
-    if paddle_mod is not None:
-        try:
-            if hasattr(paddle_mod, "device") and hasattr(paddle_mod.device, "cuda"):
-                if paddle_mod.device.is_compiled_with_cuda() and paddle_mod.device.cuda.device_count() > 0:
-                    paddle_mod.device.cuda.empty_cache()
-        except Exception:
-            pass
-    try:
-        if os.name == "nt":
-            try:
-                msvcrt = getattr(ctypes, "cdll", None)
-                if msvcrt is not None and hasattr(msvcrt, "msvcrt") and hasattr(msvcrt.msvcrt, "_heapmin"):
-                    msvcrt.msvcrt._heapmin()
-            except Exception:
-                pass
-            handle = ctypes.windll.kernel32.GetCurrentProcess()
-            try:
-                ctypes.windll.psapi.EmptyWorkingSet(handle)
-            except Exception:
-                ctypes.windll.kernel32.SetProcessWorkingSetSize(
-                    handle, ctypes.c_size_t(-1), ctypes.c_size_t(-1)
-                )
-        elif sys.platform.startswith("linux"):
-            libc = ctypes.CDLL("libc.so.6")
-            if hasattr(libc, "malloc_trim"):
-                libc.malloc_trim(0)
-    except Exception:
-        pass
 
 
 _TItem = TypeVar("_TItem")

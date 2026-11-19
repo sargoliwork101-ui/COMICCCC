@@ -2113,10 +2113,12 @@ function check(name, condition) {
         const prevProject = JSON.parse(JSON.stringify(state.project));
         const sequence = [];
         try {
-          state.project.images = [
-            { id: 'pg-1', name: 'page-1.png', file: 'pg-1.png', width: 200, height: 120, format: 'PNG', bytes: 100, order: 0, selected: true, approved: false, groupId: null, crop: null, edited: false, blocks: [] },
-            { id: 'pg-2', name: 'page-2.png', file: 'pg-2.png', width: 200, height: 120, format: 'PNG', bytes: 100, order: 1, selected: true, approved: false, groupId: null, crop: null, edited: false, blocks: [] },
-          ];
+          // Exceed the reported 25-page failure and all three former ten-page recycle boundaries.
+          state.project.images = Array.from({length: 32}, (_, i) => ({
+            id: 'pg-' + (i + 1), name: 'page-' + (i + 1) + '.png', file: 'pg-' + (i + 1) + '.png',
+            width: 200, height: 120, format: 'PNG', bytes: 100, order: i, selected: true,
+            approved: false, groupId: null, crop: null, edited: false, blocks: [],
+          }));
           renderGrid();
           const img1Before = document.querySelector('#grid .item[data-id="pg-1"] .tw > img');
           const img2Before = document.querySelector('#grid .item[data-id="pg-2"] .tw > img');
@@ -2142,12 +2144,12 @@ function check(name, condition) {
               }
               return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => nextProj, text: async () => JSON.stringify(nextProj) };
             }
-            if (u.endsWith('/pg-1/rendered') || u.endsWith('/pg-2/rendered')) {
-              const pid = u.includes('/pg-1/') ? 'pg-1' : 'pg-2';
+            if (u.includes('/images/pg-') && u.endsWith('/rendered')) {
+              const pid = u.split('/images/')[1].split('/')[0];
               sequence.push('placed:' + pid);
               return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ ok: true }), text: async () => '{"ok":true}' };
             }
-            if (u.includes('/images/pg-1/content') || u.includes('/images/pg-2/content')) {
+            if (u.includes('/images/pg-') && u.includes('/content')) {
               return origFetch('/api/projects/project-ui/images/image-ui/content');
             }
             return origFetch(url, options);
@@ -2175,9 +2177,9 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v3.99 processes multi-page OCR strictly page-by-page (placing text & freeing RAM after page 1 before starting page 2), reuses unchanged grid <img> nodes, and clears dialog bitmaps on close',
+      'v4.56 processes 32 OCR pages in order without mid-batch engine recycling, places each page before the next, reuses grid images, and clears preview bitmaps',
       v399PerPageCheck.img1Reused === true
-        && v399PerPageCheck.sequence === 'ocr:pg-1:keep=true -> placed:pg-1 -> ocr:pg-2:keep=false -> placed:pg-2'
+        && v399PerPageCheck.sequence === Array.from({length: 32}, (_, i) => `ocr:pg-${i + 1}:keep=${i < 31} -> placed:pg-${i + 1}`).join(' -> ')
         && v399PerPageCheck.hadPreviewSrc === true
         && v399PerPageCheck.clearedPreviewSrc === true,
       JSON.stringify(v399PerPageCheck),
@@ -2271,7 +2273,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas426: verText.includes('۴.۳۰'),
+            verHas426: verText.includes('۴.۵۶'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2290,7 +2292,7 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.30 displays version 4.30 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      'v4.00/v4.30 displays version 4.56 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
       v400StorageCheck.verHas426 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
@@ -4512,7 +4514,7 @@ function check(name, condition) {
           && helpModes.features.some((f) => f.includes('دانلود خودکار فایل زبان فارسی') && f.includes('fas'))
         );
         const verText = document.querySelector('.brand .ver')?.textContent || '';
-        return { helpHasV427Table, helpHasV428AutoLang, verHas428: verText.includes('۴.۳۰') };
+        return { helpHasV427Table, helpHasV428AutoLang, verHas428: verText.includes('۴.۵۶') };
       })()
     `, context);
     check(
@@ -4629,7 +4631,7 @@ function check(name, condition) {
       const detail = document.getElementById('serverAlertDetail').textContent || '';
       window.fetch = async (url, opts = {}) => {
         const parsed = new URL(url, 'http://127.0.0.1:8765');
-        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.55' });
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.56' });
         return origFetch(url, opts);
       };
       document.getElementById('serverAlertRetry').click();

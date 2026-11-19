@@ -2584,7 +2584,6 @@ async function runOcr() {
   ocrRunning = true; setProgress('ocrProgress', null, true); $('startOcrBtn').disabled = true; $('cancelOcrBtn')?.classList.remove('hidden');
   $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden');
   let ocrSucceeded = false;
-  let usedKeepEngineLoaded = false;
   let completedOcrPages = 0;
   let ocrReviewSnapshot = null;
   let ocrReviewIds = [];
@@ -2644,13 +2643,12 @@ async function runOcr() {
         checkOcrNotCancelled();
         const pageId = ids[idx];
         const isLastPage = idx + 1 >= totalPages;
-        const shouldRecycle = !isLastPage && ((idx + 1) % 10 === 0);
-        if (!isLastPage && !shouldRecycle) usedKeepEngineLoaded = true;
+        // Keep the same session for the batch; do not churn native model allocations every ten pages.
         if (idx > 0) applyActiveJobProgress(idx / totalPages);
         const ocrBody = {
           ...basePayload,
           image_ids: [pageId],
-          keep_engine_loaded: !isLastPage && !shouldRecycle,
+          keep_engine_loaded: !isLastPage,
           batch_index: idx + 1,
           batch_total: totalPages,
         };
@@ -2669,7 +2667,6 @@ async function runOcr() {
             signal: controller.signal,
           });
         }
-        if (isLastPage || shouldRecycle) usedKeepEngineLoaded = false;
         checkOcrNotCancelled();
         verifyPendingOcrState();
         adoptProject(result, { skipGrid: true });
@@ -2730,7 +2727,6 @@ async function runOcr() {
     if (ocrAbortController === controller) ocrAbortController = null;
     ocrClosingNormally = false; ocrRunning = false; $('startOcrBtn').disabled = false; $('cancelOcrBtn')?.classList.add('hidden');
     dismissJobCancelModal('ocr');
-    usedKeepEngineLoaded = false;
     api('/api/engines/unload', { method: 'POST' })
       .then(() => refreshEngineMemory().catch(() => {}))
       .catch(() => { refreshEngineMemory().catch(() => {}); });
