@@ -9,10 +9,11 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 import pytest
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from comic_studio.ocr import (
     ENGINE_INFO, EasyEngine, OcrError, OcrLine, RapidEngine, TesseractEngine,
@@ -131,6 +132,31 @@ def test_install_permission_error_points_to_admin_launcher(monkeypatch):
         install_packages(["torch>=2.2,<3"])
 
 
+def test_easyocr_update_requests_transactional_refresh_for_each_ready_language(tmp_path, monkeypatch):
+    from comic_studio import ocr as ocr_mod
+
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    engine = EasyEngine()
+    monkeypatch.setattr(EasyEngine, "runtime_installed", property(lambda self: True))
+    for name in engine._expected_models("eng"):
+        (tmp_path / "models" / "easyocr" / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "models" / "easyocr" / name).write_bytes(b"valid-model" * 20_000)
+    monkeypatch.setattr(ocr_mod, "detect_builtin_installed_version", lambda *_: "1.7.2")
+    monkeypatch.setattr(ocr_mod, "read_update_cache", lambda: {"engines": {"easyocr": {"latestVersion": "1.7.2"}}})
+    monkeypatch.setattr(ocr_mod, "cleanup_superseded_engine_files", lambda *_: 0)
+    monkeypatch.setattr(ocr_mod, "acknowledge_engine_update", lambda *a, **kw: None)
+    monkeypatch.setattr(engine, "_reader", lambda *a, **kw: object())
+    refresh_calls = []
+    monkeypatch.setattr(
+        engine,
+        "_download_easyocr_models_from_mirrors",
+        lambda language, *, force_refresh=False: refresh_calls.append((language, force_refresh)),
+    )
+
+    engine.update("eng")
+    assert refresh_calls == [("eng", True)]
+
+
 def test_easyocr_runtime_is_installed_on_explicit_preparation(monkeypatch):
     engine = EasyEngine()
     checks = iter([False, True])
@@ -139,6 +165,189 @@ def test_easyocr_runtime_is_installed_on_explicit_preparation(monkeypatch):
     monkeypatch.setattr("comic_studio.ocr.install_packages", lambda packages: installed.extend(packages))
     engine._ensure_runtime()
     assert installed == ["easyocr>=1.7,<2", "torch>=2.2,<3"]
+
+
+def test_huggingface_repo_update_keeps_old_model_until_staging_succeeds(tmp_path, monkeypatch):
+    import types
+    from comic_studio import ocr_worker
+
+    old = tmp_path / "hf-repos" / "owner__model" / "weights.bin"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b"previous-working-model")
+    calls = []
+
+    def failing_snapshot_download(**kwargs):
+        staging = Path(kwargs["local_dir"])
+        calls.append(staging)
+        assert old.read_bytes() == b"previous-working-model"
+        (staging / "weights.bin").write_bytes(b"partial-new-model")
+        raise OSError("connection timed out")
+
+    fake_hub = types.ModuleType("huggingface_hub")
+    fake_hub.HfApi = lambda endpoint=None: SimpleNamespace(model_info=lambda repo_id, timeout=8.0: SimpleNamespace(sha="a" * 40))
+    fake_hub.snapshot_download = failing_snapshot_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+    adapter = ocr_worker._BaseAdapter(tmp_path)
+    adapter.hf_repo = "owner/model"
+    with pytest.raises(OSError, match="timed out"):
+        adapter._download_hf_repo_resilient("owner/model")
+
+    assert old.read_bytes() == b"previous-working-model"
+    assert not calls[0].exists()
+    assert not list(old.parent.parent.glob(".owner__model.ocr-stage-*"))
+
+
+def _install_fake_mineru_downloader(monkeypatch, tmp_path, *, fail_repo=None):
+    import types
+
+    mineru_pkg = types.ModuleType("mineru")
+    mineru_pkg.__path__ = []
+    model_pkg = types.ModuleType("mineru.model")
+    model_pkg.__path__ = []
+    download_mod = types.ModuleType("mineru.model.download")
+    registry_mod = types.ModuleType("mineru.model.registry")
+    registry_mod.model_repos_for_tier = lambda tier: ["detector", "recognizer"]
+
+    def ready(repo_key):
+        root = Path(os.environ["MINERU_HOME"])
+        return (root / repo_key / "weights.bin").is_file()
+
+    def download(repo_key, source):
+        assert source == "huggingface"
+        if repo_key == fail_repo:
+            raise OSError("simulated repository download failure")
+        root = Path(os.environ["MINERU_HOME"])
+        (root / repo_key).mkdir(parents=True, exist_ok=True)
+        (root / repo_key / "weights.bin").write_bytes(b"new-mineru-weights")
+
+    download_mod.verify_model_repo = ready
+    download_mod.download_model_repo = download
+    for name, module in (
+        ("mineru", mineru_pkg),
+        ("mineru.model", model_pkg),
+        ("mineru.model.download", download_mod),
+        ("mineru.model.registry", registry_mod),
+    ):
+        monkeypatch.setitem(sys.modules, name, module)
+
+    import importlib.metadata
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "2.5.0" if name == "mineru" else "0")
+
+
+def test_paddleocr_update_forces_latest_supported_pipeline_instead_of_cached_older_weights(tmp_path, monkeypatch):
+    import types
+    import importlib.metadata
+    from comic_studio import ocr_worker
+
+    older = tmp_path / "paddlex" / "official_models" / "PaddleOCR-VL-1.5-0.9B"
+    older.mkdir(parents=True)
+    module = types.SimpleNamespace(_AVAILABLE_PIPELINE_VERSIONS=["v1.5", "v1.6"])
+    assert ocr_worker._select_paddleocr_vl_version(module, tmp_path) == "v1.5"
+    assert ocr_worker._select_paddleocr_vl_version(module, None) == "v1.6"
+
+    adapter = ocr_worker._PaddleOcrVlAdapter(tmp_path)
+    calls = []
+    monkeypatch.setattr(ocr_worker, "_configure_paddle_cpu_safe_env", lambda: None)
+    monkeypatch.setattr(adapter, "_get_pipeline", lambda **kwargs: calls.append(kwargs) or object())
+    monkeypatch.setattr(ocr_worker, "_release_worker_caches", lambda: None)
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "3.7.0")
+    assert adapter.prepare("eng") == "3.7.0"
+    assert calls == [{"force_latest": True}]
+
+
+def test_mineru_model_refresh_stages_full_repo_set_then_replaces_old(tmp_path, monkeypatch):
+    from comic_studio.ocr_worker import _MinerUAdapter
+
+    target = tmp_path / "mineru"
+    target.mkdir()
+    (target / "previous-model.bin").write_bytes(b"old-working-model")
+    monkeypatch.setenv("MINERU_HOME", str(target))
+    _install_fake_mineru_downloader(monkeypatch, tmp_path)
+
+    version = _MinerUAdapter(tmp_path).prepare("eng")
+    assert version == "2.5.0"
+    assert (target / "detector" / "weights.bin").read_bytes() == b"new-mineru-weights"
+    assert (target / "recognizer" / "weights.bin").read_bytes() == b"new-mineru-weights"
+    assert not (target / "previous-model.bin").exists()
+    assert os.environ["MINERU_HOME"] == str(target)
+    assert not list(tmp_path.glob(".mineru.ocr-stage-*"))
+    assert not list(tmp_path.glob(".mineru.ocr-backup-*"))
+
+
+def test_mineru_model_refresh_failure_keeps_previous_model_directory(tmp_path, monkeypatch):
+    from comic_studio.ocr_worker import _MinerUAdapter
+
+    target = tmp_path / "mineru"
+    target.mkdir()
+    (target / "previous-model.bin").write_bytes(b"old-working-model")
+    monkeypatch.setenv("MINERU_HOME", str(target))
+    _install_fake_mineru_downloader(monkeypatch, tmp_path, fail_repo="recognizer")
+
+    with pytest.raises(RuntimeError, match="Failed to download MinerU sub-model"):
+        _MinerUAdapter(tmp_path).prepare("eng")
+    assert (target / "previous-model.bin").read_bytes() == b"old-working-model"
+    assert not (target / "detector").exists()
+    assert os.environ["MINERU_HOME"] == str(target)
+    assert not list(tmp_path.glob(".mineru.ocr-stage-*"))
+
+
+def test_huggingface_cache_prunes_old_snapshots_and_unreferenced_blobs_after_success(tmp_path):
+    from comic_studio.ocr_worker import _prune_hf_repo_cache
+
+    repo = tmp_path / "hf" / "hub" / "models--owner--surya-weights"
+    snapshots = repo / "snapshots"
+    blobs = repo / "blobs"
+    active = snapshots / "revision-new"
+    stale = snapshots / "revision-old"
+    active.mkdir(parents=True)
+    stale.mkdir(parents=True)
+    blobs.mkdir(parents=True)
+    live_blob = blobs / "live-blob"
+    old_blob = blobs / "stale-blob"
+    live_blob.write_bytes(b"new weights")
+    old_blob.write_bytes(b"old weights")
+    (active / "model.gguf").symlink_to(live_blob)
+    (stale / "model.gguf").symlink_to(old_blob)
+    (repo / "refs").mkdir()
+    (repo / "refs" / "main").write_text("revision-new", encoding="utf-8")
+
+    freed = _prune_hf_repo_cache(tmp_path, "owner/surya-weights")
+    assert freed > 0
+    assert active.is_dir() and live_blob.is_file()
+    assert not stale.exists() and not old_blob.exists()
+
+
+def test_huggingface_repo_update_promotes_only_complete_model_and_removes_old_files(tmp_path, monkeypatch):
+    import types
+    from comic_studio import ocr_worker
+
+    old_root = tmp_path / "hf-repos" / "owner__model"
+    old_root.mkdir(parents=True)
+    (old_root / "old-weight.bin").write_bytes(b"old-version")
+    calls = []
+
+    def successful_snapshot_download(**kwargs):
+        staging = Path(kwargs["local_dir"])
+        calls.append(dict(kwargs))
+        assert (old_root / "old-weight.bin").is_file()
+        (staging / "new-weight.bin").write_bytes(b"complete-new-version")
+        return str(staging)
+
+    fake_hub = types.ModuleType("huggingface_hub")
+    fake_hub.HfApi = lambda endpoint=None: SimpleNamespace(model_info=lambda repo_id, timeout=8.0: SimpleNamespace(sha="b" * 40))
+    fake_hub.snapshot_download = successful_snapshot_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+    adapter = ocr_worker._BaseAdapter(tmp_path)
+    adapter.hf_repo = "owner/model"
+    local_dir, revision = adapter._download_hf_repo_resilient("owner/model")
+
+    assert Path(local_dir) == old_root
+    assert (old_root / "new-weight.bin").read_bytes() == b"complete-new-version"
+    assert not (old_root / "old-weight.bin").exists()
+    assert revision == f"hf:{'b' * 12}"
+    assert calls[0]["revision"] == "b" * 40
+    assert not Path(calls[0]["local_dir"]).exists()
+    assert not list(old_root.parent.glob(".owner__model.ocr-backup-*"))
 
 
 def test_v5_preparation_downloads_only_the_requested_language(monkeypatch):
@@ -270,6 +479,229 @@ def test_tesseract_explicit_download_uses_selected_language(tmp_path, monkeypatc
     engine.download("kor")
     assert seen[0][0].endswith("/kor.traineddata")
     assert (tmp_path / "models" / "tesseract" / "kor.traineddata").stat().st_size == 2000
+
+
+def test_huggingface_repo_activation_failure_rolls_back_previous_directory(tmp_path, monkeypatch):
+    import types
+    from comic_studio import ocr_worker
+
+    old_root = tmp_path / "hf-repos" / "owner__model"
+    old_root.mkdir(parents=True)
+    (old_root / "weights.bin").write_bytes(b"previous-model")
+
+    def successful_snapshot_download(**kwargs):
+        Path(kwargs["local_dir"], "weights.bin").write_bytes(b"new-model")
+
+    fake_hub = types.ModuleType("huggingface_hub")
+    fake_hub.HfApi = lambda endpoint=None: SimpleNamespace(model_info=lambda repo_id, timeout=8.0: SimpleNamespace(sha="c" * 40))
+    fake_hub.snapshot_download = successful_snapshot_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+    real_replace = os.replace
+
+    def fail_promotion(source, destination):
+        if ".ocr-stage-" in str(source):
+            raise OSError("simulated activation failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(ocr_worker.os, "replace", fail_promotion)
+    adapter = ocr_worker._BaseAdapter(tmp_path)
+    adapter.hf_repo = "owner/model"
+    with pytest.raises(OSError, match="activation failure"):
+        adapter._download_hf_repo_resilient("owner/model")
+
+    assert (old_root / "weights.bin").read_bytes() == b"previous-model"
+    assert not list(old_root.parent.glob(".owner__model.ocr-backup-*"))
+    assert not list(old_root.parent.glob(".owner__model.ocr-stage-*"))
+
+
+def test_atomic_mirror_download_preserves_installed_file_after_all_sources_fail(tmp_path, monkeypatch):
+    from comic_studio import ocr as ocr_mod
+
+    destination = tmp_path / "rapid-model.onnx"
+    destination.write_bytes(b"previous-valid-weight")
+
+    def fail_request(*args, **kwargs):
+        raise OSError("network unavailable")
+
+    monkeypatch.setattr(ocr_mod.urllib.request, "urlopen", fail_request)
+    with pytest.raises(OcrError, match="Download failed"):
+        ocr_mod._stream_download_with_mirrors(
+            [("https://first.invalid/model", {}), ("https://mirror.invalid/model", {})],
+            destination,
+            label="test model",
+            min_bytes=1,
+        )
+    assert destination.read_bytes() == b"previous-valid-weight"
+    assert not (tmp_path / ".rapid-model.onnx.part").exists()
+
+
+def test_rapidocr_forced_model_refresh_downloads_complete_set_before_replacing_old(tmp_path, monkeypatch):
+    import io
+    from comic_studio.ocr import RapidEngine
+
+    engine = RapidEngine("rapidocr-v5", "v5")
+    monkeypatch.setattr(engine, "_model_dir", lambda: tmp_path)
+    names = engine._expected_models("eng")
+    for name in names:
+        (tmp_path / name).write_bytes(b"old-valid-model" * 1000)
+
+    class Response:
+        headers = {"Content-Length": "20000"}
+        def __init__(self): self.data = io.BytesIO(b"N" * 20000)
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self, size=-1): return self.data.read(size)
+
+    monkeypatch.setattr("comic_studio.ocr.urllib.request.urlopen", lambda *a, **k: Response())
+    engine._download_v5_models_from_mirrors("eng", force_refresh=True)
+    assert all((tmp_path / name).read_bytes() == b"N" * 20000 for name in names)
+    assert not list(tmp_path.glob(".rapidocr-refresh-*"))
+    assert not list(tmp_path.glob("*.ocr-backup-*"))
+
+
+def test_rapidocr_failed_forced_refresh_keeps_entire_previous_model_set(tmp_path, monkeypatch):
+    from comic_studio.ocr import RapidEngine
+
+    engine = RapidEngine("rapidocr-v5", "v5")
+    monkeypatch.setattr(engine, "_model_dir", lambda: tmp_path)
+    names = engine._expected_models("eng")
+    previous = {name: b"old-valid-model" * 1000 for name in names}
+    for name, data in previous.items():
+        (tmp_path / name).write_bytes(data)
+
+    def fail_request(*args, **kwargs):
+        raise OSError("network unavailable")
+
+    monkeypatch.setattr("comic_studio.ocr.urllib.request.urlopen", fail_request)
+    with pytest.raises(OcrError):
+        engine._download_v5_models_from_mirrors("eng", force_refresh=True)
+    assert all((tmp_path / name).read_bytes() == data for name, data in previous.items())
+    assert not list(tmp_path.glob(".rapidocr-refresh-*"))
+
+
+def test_easyocr_forced_model_refresh_is_transactional(tmp_path, monkeypatch):
+    import io
+    from comic_studio.ocr import EasyEngine
+
+    engine = EasyEngine()
+    monkeypatch.setattr(engine, "_model_dir", lambda: tmp_path)
+    names = engine._expected_models("eng")
+    previous = {name: b"old-easy-model" * 10_000 for name in names}
+    for name, data in previous.items():
+        (tmp_path / name).write_bytes(data)
+
+    class Response:
+        headers = {"Content-Length": "100000"}
+        def __init__(self): self.data = io.BytesIO(b"E" * 100_000)
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self, size=-1): return self.data.read(size)
+
+    monkeypatch.setattr("comic_studio.ocr.urllib.request.urlopen", lambda *a, **k: Response())
+    engine._download_easyocr_models_from_mirrors("eng", force_refresh=True)
+    assert all((tmp_path / name).read_bytes() == b"E" * 100_000 for name in names)
+    assert not list(tmp_path.glob(".easyocr-refresh-*"))
+    assert not list(tmp_path.glob("*.ocr-backup-*"))
+
+
+def test_easyocr_failed_forced_refresh_keeps_entire_previous_model_set(tmp_path, monkeypatch):
+    from comic_studio.ocr import EasyEngine
+
+    engine = EasyEngine()
+    monkeypatch.setattr(engine, "_model_dir", lambda: tmp_path)
+    names = engine._expected_models("eng")
+    previous = {name: b"old-easy-model" * 10_000 for name in names}
+    for name, data in previous.items():
+        (tmp_path / name).write_bytes(data)
+
+    def fail_request(*args, **kwargs):
+        raise OSError("network unavailable")
+
+    monkeypatch.setattr("comic_studio.ocr.urllib.request.urlopen", fail_request)
+    with pytest.raises(OcrError):
+        engine._download_easyocr_models_from_mirrors("eng", force_refresh=True)
+    assert all((tmp_path / name).read_bytes() == data for name, data in previous.items())
+    assert not list(tmp_path.glob(".easyocr-refresh-*"))
+
+
+def test_tesseract_failed_refresh_keeps_previous_language_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    engine = TesseractEngine()
+    target = tmp_path / "models" / "tesseract" / "eng.traineddata"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"old-usable-traineddata" * 100)
+
+    def fail_request(*args, **kwargs):
+        raise OSError("network unavailable")
+
+    monkeypatch.setattr("comic_studio.ocr.urllib.request.urlopen", fail_request)
+    with pytest.raises(OcrError, match="دانلود فایل زبان Tesseract"):
+        engine._download_language_file("eng")
+    assert target.read_bytes() == b"old-usable-traineddata" * 100
+    assert not (target.parent / ".eng.traineddata.part").exists()
+
+
+def test_tesseract_update_with_no_local_languages_can_create_staging_directory(tmp_path, monkeypatch):
+    from comic_studio import ocr as ocr_mod
+
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    engine = TesseractEngine()
+    monkeypatch.setattr(TesseractEngine, "runtime_installed", property(lambda self: True))
+    engine._system_languages = set()
+    downloads = []
+
+    def fake_download(language, *, target_dir=None, timeout=30.0):
+        assert target_dir is not None
+        downloads.append(language)
+        path = target_dir / f"{language}.traineddata"
+        path.write_bytes(b"new-language-model")
+        return path
+
+    monkeypatch.setattr(engine, "_download_language_file", fake_download)
+    monkeypatch.setattr(ocr_mod, "detect_builtin_installed_version", lambda *_: "5.5.0")
+    monkeypatch.setattr(ocr_mod, "fetch_tessdata_revision", lambda *_: "test-revision")
+    monkeypatch.setattr(ocr_mod, "cleanup_superseded_engine_files", lambda *_: 0)
+    monkeypatch.setattr(ocr_mod, "acknowledge_engine_update", lambda *a, **kw: None)
+
+    engine.update("eng")
+    assert downloads == ["eng"]
+    assert (tmp_path / "models" / "tesseract" / "eng.traineddata").read_bytes() == b"new-language-model"
+    assert not list((tmp_path / "models" / "tesseract").glob(".tesseract-refresh-*"))
+
+
+def test_tesseract_multi_language_update_failure_keeps_all_previous_files(tmp_path, monkeypatch):
+    import io
+    from comic_studio.ocr import TesseractEngine
+
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    engine = TesseractEngine()
+    monkeypatch.setattr(TesseractEngine, "runtime_installed", property(lambda self: True))
+    monkeypatch.setattr("comic_studio.ocr._tesseract_executable", lambda: "/usr/bin/tesseract")
+    engine._system_languages = {"eng", "fas"}
+    root = tmp_path / "models" / "tesseract"
+    root.mkdir(parents=True)
+    old = {"eng": b"old-english" * 200, "fas": b"old-persian" * 200}
+    for language, data in old.items():
+        (root / f"{language}.traineddata").write_bytes(data)
+
+    class Response:
+        headers = {"Content-Length": "2000"}
+        def __init__(self): self.data = io.BytesIO(b"N" * 2000)
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self, size=-1): return self.data.read(size)
+
+    def urlopen(request, timeout=30):
+        if "/fas.traineddata" in request.full_url:
+            raise OSError("network unavailable for second language")
+        return Response()
+
+    monkeypatch.setattr("comic_studio.ocr.urllib.request.urlopen", urlopen)
+    with pytest.raises(OcrError, match="fas"):
+        engine.update("eng")
+    assert all((root / f"{language}.traineddata").read_bytes() == data for language, data in old.items())
+    assert not list(root.glob(".tesseract-refresh-*"))
+    assert not list(root.glob("*.ocr-backup-*"))
 
 
 def test_requested_model_catalog_enables_auto_download_for_all_models():
@@ -887,6 +1319,14 @@ def test_cleanup_superseded_versions_preserves_unused_installed_models(tmp_path,
     (sp / "transformers-4.48.0.dist-info").mkdir(parents=True)
     (sp / "transformers-5.12.1.dist-info").mkdir(parents=True)
 
+    # Orphaned interrupted refresh staging trees are removed only at successful cleanup time.
+    rapid_stage = models_root / "rapidocr" / ".rapidocr-refresh-interrupted"
+    easy_stage = models_root / "easyocr" / ".easyocr-refresh-interrupted"
+    hf_stage = models_root / "hf-repos" / ".another_model.ocr-stage-interrupted"
+    for stage in (rapid_stage, easy_stage, hf_stage):
+        stage.mkdir(parents=True)
+        (stage / "partial-weight.bin").write_bytes(b"temporary")
+
     freed = ocr_managed.cleanup_superseded_engine_files("dots-ocr")
     assert freed > 0
     assert not old_snap.exists()
@@ -896,6 +1336,7 @@ def test_cleanup_superseded_versions_preserves_unused_installed_models(tmp_path,
     assert safe_hf_dir.is_dir()
     assert not legacy_hf_dir.exists()
     assert not part_file.exists()
+    assert not rapid_stage.exists() and not easy_stage.exists() and not hf_stage.exists()
     assert not (sp / "~ransformers").exists()
     assert not (sp / "transformers-4.48.0.dist-info").exists()
     assert (sp / "transformers-5.12.1.dist-info").is_dir()
@@ -904,7 +1345,7 @@ def test_cleanup_superseded_versions_preserves_unused_installed_models(tmp_path,
     assert (unused_env / ".runtime-ready").is_file()
     assert unused_weights.is_file()
 
-    # 4. PaddleX superseded v1 directory removed when v1.5/v1.6 is present
+    # 4. PaddleX removes superseded releases while retaining the newest available directory
     official = models_root / "paddlex" / "official_models"
     (official / "PaddleOCR-VL-0.9B").mkdir(parents=True)
     (official / "PaddleOCR-VL-0.9B" / "old.pdiparams").write_bytes(b"OLD_VL")
@@ -913,6 +1354,11 @@ def test_cleanup_superseded_versions_preserves_unused_installed_models(tmp_path,
     ocr_managed.cleanup_superseded_engine_files("paddleocr-vl-1-6")
     assert not (official / "PaddleOCR-VL-0.9B").exists()
     assert (official / "PaddleOCR-VL-1.5-0.9B" / "new.safetensors").is_file()
+    (official / "PaddleOCR-VL-1.6-0.9B").mkdir()
+    (official / "PaddleOCR-VL-1.6-0.9B" / "newest.safetensors").write_bytes(b"NEWEST_VL")
+    ocr_managed.cleanup_superseded_engine_files("paddleocr-vl-1-6")
+    assert not (official / "PaddleOCR-VL-1.5-0.9B").exists()
+    assert (official / "PaddleOCR-VL-1.6-0.9B" / "newest.safetensors").is_file()
 
 
 def test_immediate_ram_unload_and_preprocess_memory_cap(tmp_path, monkeypatch):
@@ -1147,7 +1593,6 @@ def test_v385_onnx_gpu_detection_and_rapidengine_gpu_fallback_plus_cpu_pool(monk
     import threading
     import time
     import types
-    import numpy as np
     from PIL import Image
     import comic_studio.ocr as ocr_mod
     from comic_studio.ocr import RapidEngine
@@ -1636,7 +2081,7 @@ def test_worker_requests_timeout_widener_upgrades_short_timeouts(monkeypatch):
     import types
     import comic_studio.ocr_worker as worker
 
-    captured: list[Any] = []
+    captured = []
 
     class FakeSession:
         def request(self, method, url, **kwargs):
@@ -1753,11 +2198,12 @@ def test_surya_adapter_prepare_downloads_gguf_directly_without_spawning_server(m
     monkeypatch.setitem(sys.modules, "surya", fake_surya_pkg)
     monkeypatch.setitem(sys.modules, "surya.settings", fake_surya_settings)
 
-    downloaded_files: list[tuple[str, str]] = []
-    downloaded_snaps: list[str] = []
+    downloaded_files: list[tuple[str, str, dict[str, Any]]] = []
+    downloaded_snaps: list[tuple[str, dict[str, Any]]] = []
     fake_hf = types.ModuleType("huggingface_hub")
-    fake_hf.hf_hub_download = lambda repo_id, filename, **kw: downloaded_files.append((repo_id, filename)) or str(tmp_path / filename)  # type: ignore[attr-defined]
-    fake_hf.snapshot_download = lambda repo_id, **kw: downloaded_snaps.append(repo_id) or str(tmp_path)  # type: ignore[attr-defined]
+    fake_hf.HfApi = lambda endpoint=None: SimpleNamespace(model_info=lambda repo_id, timeout=8.0: SimpleNamespace(sha="d" * 40))
+    fake_hf.hf_hub_download = lambda repo_id, filename, **kw: downloaded_files.append((repo_id, filename, dict(kw))) or str(tmp_path / filename)  # type: ignore[attr-defined]
+    fake_hf.snapshot_download = lambda repo_id, **kw: downloaded_snaps.append((repo_id, dict(kw))) or str(tmp_path)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
     monkeypatch.setattr("importlib.metadata.version", lambda pkg: "0.23.0")
 
@@ -1766,9 +2212,14 @@ def test_surya_adapter_prepare_downloads_gguf_directly_without_spawning_server(m
     rev = adapter.prepare("eng")
 
     assert rev == "0.23.0"
-    assert ("datalab-to/surya-ocr-2.5-gguf", "surya-2.5-mmproj.gguf") in downloaded_files
-    assert ("datalab-to/surya-ocr-2.5-gguf", "surya-2.5.gguf") in downloaded_files
-    assert "datalab-to/surya_layout2" in downloaded_snaps
+    files_by_name = {filename: (repo, kwargs) for repo, filename, kwargs in downloaded_files}
+    assert files_by_name["surya-2.5-mmproj.gguf"][0] == "datalab-to/surya-ocr-2.5-gguf"
+    assert files_by_name["surya-2.5.gguf"][0] == "datalab-to/surya-ocr-2.5-gguf"
+    assert files_by_name["surya-2.5-mmproj.gguf"][1]["revision"] == "d" * 40
+    assert files_by_name["surya-2.5.gguf"][1]["revision"] == "d" * 40
+    layout_repo, layout_kwargs = downloaded_snaps[0]
+    assert layout_repo == "datalab-to/surya_layout2"
+    assert layout_kwargs["revision"] == "d" * 40
 
 
 def test_pip_streaming_stall_watchdog_and_cancel_kill_hung_child(monkeypatch, tmp_path):
@@ -2740,7 +3191,7 @@ def test_v396_persian_download_fixes_across_rapid_hezar_easy_and_bidi_shim(tmp_p
 def test_v397_idle_cpu_passive_threads_hardware_cache_and_worker_idle_reaper(tmp_path, monkeypatch):
     import io
     import time
-    from comic_studio import ocr_managed, ocr_worker
+    from comic_studio import ocr_managed
     from comic_studio.ocr import TesseractEngine, analyze_blocks_typography
 
     monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
@@ -2907,6 +3358,12 @@ def test_v399_worker_memory_trim_and_onnx_session_options():
     from pathlib import Path
     import comic_studio.ocr_managed as managed
     import comic_studio.ocr_worker as worker_mod
+    from comic_studio.ocr import RapidEngine
+
+    if importlib.util.find_spec("rapidocr") is None:
+        pytest.skip("optional RapidOCR runtime is not installed")
+    if not RapidEngine("rapidocr-v6", "v6").model_ready:
+        pytest.skip("PP-OCRv6 weights are not locally available; this test never downloads models")
 
     # 1. Both trim_process_memory and _release_worker_caches execute cleanly and configure Paddle eager deletion
     managed.trim_process_memory()
@@ -2918,7 +3375,6 @@ def test_v399_worker_memory_trim_and_onnx_session_options():
     assert os.environ.get("FLAGS_fast_eager_deletion_mode") == "1"
 
     # 2. RapidEngine._create disables both ONNX CPU arena and variable-shape mem_pattern caching
-    from comic_studio.ocr import RapidEngine
     eng = RapidEngine("rapidocr-v6", "v6")
     try:
         inst = eng._get("eng", allow_download=False)
@@ -3690,7 +4146,6 @@ def test_v428_tesseract_persian_language_auto_prepare_and_offline_bundle_guard(t
     """v4.28: a Persian OCR run must download the missing `fas` file instead of dying with HTTP 503."""
     import sys
     from pathlib import Path
-    import comic_studio.ocr as ocr_mod
     from comic_studio.ocr import OcrError, TesseractEngine
 
     repo_py = Path(__file__).resolve().parent.parent
@@ -4011,3 +4466,53 @@ def test_v431_a_table_cell_is_cropped_around_its_own_text():
     top, bottom, left, right = _tight_ink_box(ink)
     assert (top, bottom, left, right) == (12, 22, 60, 140)
     assert _tight_ink_box(np.zeros((0, 0), dtype=np.uint8)) == (0, 0, 0, 0)
+
+
+def test_indirect_mineru_huggingface_downloads_are_pinned_and_restored(monkeypatch):
+    import types
+    from comic_studio import ocr_worker
+
+    calls = []
+    fake_hub = types.ModuleType("huggingface_hub")
+    fake_hub.snapshot_download = lambda **kwargs: calls.append(("snapshot", dict(kwargs)))
+    fake_hub.hf_hub_download = lambda **kwargs: calls.append(("file", dict(kwargs)))
+    mineru_module = types.ModuleType("mineru.model.download")
+    mineru_module.snapshot_download = fake_hub.snapshot_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+    monkeypatch.setitem(sys.modules, "mineru.model.download", mineru_module)
+    resolver_calls = []
+
+    def resolve(repo_id, endpoint=None):
+        resolver_calls.append((repo_id, endpoint))
+        return "e" * 40, endpoint
+
+    original_snapshot = fake_hub.snapshot_download
+    original_file = fake_hub.hf_hub_download
+    with ocr_worker._pin_huggingface_downloads(resolve):
+        fake_hub.snapshot_download(repo_id="owner/snapshot")
+        fake_hub.hf_hub_download(repo_id="owner/file", filename="weights.bin")
+        mineru_module.snapshot_download(repo_id="owner/alias")
+    assert [call[0] for call in calls] == ["snapshot", "file", "snapshot"]
+    assert all(call[1]["revision"] == "e" * 40 for call in calls)
+    assert resolver_calls == [("owner/snapshot", None), ("owner/file", None), ("owner/alias", None)]
+    assert fake_hub.snapshot_download is original_snapshot
+    assert fake_hub.hf_hub_download is original_file
+    assert mineru_module.snapshot_download is original_snapshot
+
+
+def test_huggingface_download_refuses_unresolved_moving_revision(tmp_path, monkeypatch):
+    import types
+    from comic_studio import ocr_worker
+
+    calls = []
+    fake_hub = types.ModuleType("huggingface_hub")
+    fake_hub.HfApi = lambda endpoint=None: SimpleNamespace(model_info=lambda repo_id, timeout=8.0: SimpleNamespace(sha="main"))
+    fake_hub.snapshot_download = lambda **kwargs: calls.append(kwargs)
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+    adapter = ocr_worker._BaseAdapter(tmp_path)
+    adapter.hf_repo = "owner/model"
+
+    with pytest.raises(RuntimeError, match="immutable Hugging Face revision"):
+        adapter._download_hf_repo_resilient("owner/model")
+    assert calls == []
+    assert not (tmp_path / "hf-repos" / "owner__model").exists()

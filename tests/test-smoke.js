@@ -1,8 +1,8 @@
 // Smoke tests (node) for pure logic of the extension
-const PdfBuilder = require('../src/core/pdfbuilder.js');
-const OcrTools = require('../src/core/ocr.js');
-const Typeset = require('../src/core/typeset.js');
-const TranslateTools = require('../src/core/translate.js');
+const PdfBuilder = require('../extension/src/core/pdfbuilder.js');
+const OcrTools = require('../extension/src/core/ocr.js');
+const Typeset = require('../extension/src/core/typeset.js');
+const TranslateTools = require('../extension/src/core/translate.js');
 
 let failures = 0;
 function check(name, cond, extra) {
@@ -420,9 +420,44 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     check('translate tried google first', calls >= 2, calls);
   }
   {
+    let calls = 0;
+    const fetchFn = async (url) => {
+      calls++;
+      return url.includes('translate.googleapis.com')
+        ? { ok: true, json: async () => [[['سلام', 'hi']], null, null] }
+        : { ok: true, json: async () => ({ responseData: { translatedText: 'سلام' } }) };
+    };
+    const google = await TranslateTools.translate('hi', 'en', fetchFn, 'google');
+    const mymemory = await TranslateTools.translate('hi', 'en', fetchFn, 'mymemory');
+    check('selected Google engine is used directly', google.ok && google.engine === 'google' && google.text === 'سلام');
+    check('selected MyMemory engine is used directly', mymemory.ok && mymemory.engine === 'mymemory' && mymemory.text === 'سلام');
+    check('direct engine choices do not contact another provider', calls === 2, calls);
+  }
+  {
+    let calls = [];
+    const fetchFn = async (url) => {
+      calls.push(url);
+      return { ok: false, status: 500, json: async () => ({}) };
+    };
+    const r = await TranslateTools.translate('hi', 'en', fetchFn, 'google');
+    check('selected Google engine does not silently fall back to MyMemory',
+      r.ok === false && r.engine === 'google' && calls.length === 2 && calls.every((url) => url.includes('translate.googleapis.com')));
+  }
+  {
     const fetchFn = async () => ({ ok: false, status: 500, json: async () => ({}) });
     const r = await TranslateTools.translate('hi', 'en', fetchFn);
     check('translate all fail -> ok false', r.ok === false && r.text === '', r);
+  }
+  {
+    let calls = 0, aborted = 0;
+    const fetchFn = async (_url, options) => {
+      calls++;
+      options.signal.addEventListener('abort', () => { aborted++; }, { once: true });
+      return new Promise(() => {});
+    };
+    const r = await TranslateTools.translate('hi', 'en', fetchFn, 'google', 5);
+    check('stalled fallback translation requests time out and do not keep the translation job waiting',
+      r.ok === false && calls === 2 && aborted === 2, { ok: r.ok, calls, aborted });
   }
   {
     const twoColorCtx = {
@@ -440,6 +475,37 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     };
     const sampled = Typeset.sampleBg(twoColorCtx, { x0: 10, y0: 10, x1: 50, y1: 50 }, 60, 60);
     check('sampleBg detects two-color red/green border as non-uniform', sampled.uniform === false, sampled);
+  }
+
+  // viaGoogle / viaMyMemory direct edge cases (exported but only tested indirectly before)
+  {
+    const googleOk = async () => ({ ok: true, json: async () => [[['سلام', 'hello']]] });
+    const text = await TranslateTools.viaGoogle('hello', 'en', googleOk, 5000);
+    check('viaGoogle joins the response parts into the translated text', text === 'سلام', text);
+    let googleErr = null;
+    try { await TranslateTools.viaGoogle('hello', 'en', async () => ({ ok: false, status: 500 }), 5000); }
+    catch (error) { googleErr = error; }
+    check('viaGoogle throws on a non-OK HTTP status', googleErr && /HTTP 500/.test(googleErr.message), googleErr && googleErr.message);
+    let googleEmpty = null;
+    try { await TranslateTools.viaGoogle('hello', 'en', async () => ({ ok: true, json: async () => [[]] }), 5000); }
+    catch (error) { googleEmpty = error; }
+    check('viaGoogle throws on an empty translation', googleEmpty && googleEmpty.message === 'empty', googleEmpty && googleEmpty.message);
+
+    const memoryOk = async () => ({ ok: true, json: async () => ({ responseData: { translatedText: 'سلام' } }) });
+    const memoryText = await TranslateTools.viaMyMemory('hello', 'en-US', memoryOk, 5000);
+    check('viaMyMemory returns the translated text and strips the region from the language pair', memoryText === 'سلام', memoryText);
+    let memoryWarn = null;
+    try { await TranslateTools.viaMyMemory('hello', 'en', async () => ({ ok: true, json: async () => ({ responseData: { translatedText: 'MYMEMORY WARNING: YOU USED ALL AVAILABLE FREE TRANSLATIONS' } }) }), 5000); }
+    catch (error) { memoryWarn = error; }
+    check('viaMyMemory rejects quota warning text as a failure', memoryWarn && memoryWarn.message === 'mymemory', memoryWarn && memoryWarn.message);
+  }
+
+  // OCR language table sanity
+  {
+    check('OCR LANGS covers English, Korean, Japanese and Simplified Chinese with source codes',
+      OcrTools.LANGS.eng.sl === 'en' && OcrTools.LANGS.kor.sl === 'ko' &&
+      OcrTools.LANGS.jpn.sl === 'ja' && OcrTools.LANGS.jpn.cjk === true &&
+      OcrTools.LANGS.chi_sim.sl === 'zh-CN' && OcrTools.LANGS.chi_sim.cjk === true, OcrTools.LANGS);
   }
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL TESTS PASSED');
