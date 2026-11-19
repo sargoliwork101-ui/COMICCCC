@@ -444,21 +444,41 @@ async function retryServerConnection() {
     if (btn) { btn.disabled = false; btn.textContent = label || 'تلاش دوباره'; }
   }
 }
+function isTransientNetworkError(error) {
+  if (!error || error.cancelled || error.name === 'AbortError') return false;
+  if (error.status === 0) return true;
+  const msg = String(error.message || error || '');
+  return /failed to fetch|networkerror|load failed|خطای ارتباط با برنامه/i.test(msg);
+}
+async function runWithNetworkRetry(taskFn, { delays = [800, 1800, 3000], checkCancel = null } = {}) {
+  const maxAttempts = delays.length + 1;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    checkCancel?.();
+    const isLastAttempt = attempt + 1 >= maxAttempts;
+    try {
+      return await taskFn({ attempt, isLastAttempt });
+    } catch (error) {
+      if (isLastAttempt || !isTransientNetworkError(error)) throw error;
+      await sleep(delays[attempt]);
+    }
+  }
+}
 async function api(url, options = {}) {
-  const method = String(options.method || 'GET').toUpperCase();
+  const { suppressServerAlert = false, ...fetchOptions } = options || {};
+  const method = String(fetchOptions.method || 'GET').toUpperCase();
   let path = '';
   try { path = new URL(url, location.href).pathname; } catch { path = '(نشانی نامعتبر)'; }
   let response;
-  try { response = await fetch(url, options); }
+  try { response = await fetch(url, fetchOptions); }
   catch (cause) {
-    if (cause?.name === 'AbortError' || options.signal?.aborted) {
+    if (cause?.name === 'AbortError' || fetchOptions.signal?.aborted) {
       const abortErr = new Error('عملیات توسط کاربر لغو شد.');
       abortErr.name = 'AbortError'; abortErr.cancelled = true;
       throw abortErr;
     }
     // The local app is not answering any more (it was closed, or it is still
     // starting).  Show the recovery banner instead of leaving a dead page.
-    showServerUnreachable(`${method} ${path}`);
+    if (!suppressServerAlert) showServerUnreachable(`${method} ${path}`);
     const error = new Error(`خطای ارتباط با برنامه (${method} ${path})؛ ${cause?.name || 'Error'}: ${cause?.message || cause}. سرور و اتصال را بررسی کنید.`);
     error.status = 0; throw error;
   }
@@ -2644,32 +2664,24 @@ async function runOcr() {
         checkOcrNotCancelled();
         const pageId = ids[idx];
         const isLastPage = idx + 1 >= totalPages;
-        const shouldRecycle = !isLastPage && ((idx + 1) % 10 === 0);
-        if (!isLastPage && !shouldRecycle) usedKeepEngineLoaded = true;
+        if (!isLastPage) usedKeepEngineLoaded = true;
         if (idx > 0) applyActiveJobProgress(idx / totalPages);
         const ocrBody = {
           ...basePayload,
           image_ids: [pageId],
-          keep_engine_loaded: !isLastPage && !shouldRecycle,
+          keep_engine_loaded: !isLastPage,
           batch_index: idx + 1,
           batch_total: totalPages,
         };
-        let result;
-        try {
-          result = await api(`/api/projects/${state.project.id}/ocr`, {
+        const result = await runWithNetworkRetry(
+          ({ isLastAttempt }) => api(`/api/projects/${state.project.id}/ocr`, {
             ...jsonOptions('POST', ocrBody),
             signal: controller.signal,
-          });
-        } catch (err) {
-          if (ocrCancelledByUser || controller.signal.aborted || !/failed to fetch/i.test(String(err?.message || err))) throw err;
-          await new Promise((r) => setTimeout(r, 1200));
-          checkOcrNotCancelled();
-          result = await api(`/api/projects/${state.project.id}/ocr`, {
-            ...jsonOptions('POST', { ...ocrBody, keep_engine_loaded: false }),
-            signal: controller.signal,
-          });
-        }
-        if (isLastPage || shouldRecycle) usedKeepEngineLoaded = false;
+            suppressServerAlert: !isLastAttempt,
+          }),
+          { checkCancel: checkOcrNotCancelled },
+        );
+        if (isLastPage) usedKeepEngineLoaded = false;
         checkOcrNotCancelled();
         verifyPendingOcrState();
         adoptProject(result, { skipGrid: true });
@@ -2717,7 +2729,7 @@ async function runOcr() {
     }
     reportOcrError(error);
     const rawMsg = error?.message || String(error || 'خطای نامشخص در OCR');
-    const friendlyMsg = /failed to fetch/i.test(rawMsg)
+    const friendlyMsg = isTransientNetworkError(error)
       ? 'ارتباط با سرور محلی قطع شد (Failed to fetch). دوباره تلاش کنید.'
       : rawMsg;
     showReportDialog('خطا در OCR', [
@@ -3761,7 +3773,7 @@ async function decodeProjectImageBitmap(rawBlob, item) {
   }
   return bitmap;
 }
-async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false } = {}) {
+async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false, checkCancel = null } = {}) {
   const key = `${projectId}:${item.id}`;
   const blocks = overlayBlocks(item, mode);
   const active = blocks.some((block) => block.enabled && (hasRenderableText(block) || hasRenderableShapeFill(block))) || hasActiveWatermark(item?.watermark);
@@ -3770,7 +3782,13 @@ async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false
     return;
   }
   if (!active) {
-    const reverted = await api(`/api/projects/${projectId}/images/${item.id}/revert`, { method: 'POST' });
+    const reverted = await runWithNetworkRetry(
+      ({ isLastAttempt }) => api(`/api/projects/${projectId}/images/${item.id}/revert`, {
+        method: 'POST',
+        suppressServerAlert: !isLastAttempt,
+      }),
+      { checkCancel },
+    );
     imagePreviewVersions.set(key, ++previewRevision);
     renderedPageSignatures.set(key, signature);
     const current = state.project?.id === projectId ? state.project.images.find((entry) => entry.id === item.id) : null;
@@ -3780,9 +3798,26 @@ async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false
   }
   await ensureFont();
   await ensureWatermarkLogosReady(item?.watermark);
-  const response = await fetch(`/api/projects/${projectId}/images/${item.id}/content`);
-  if (!response.ok) throw new Error('تصویر اصلی باز نشد');
-  let rawBlob = await response.blob();
+  let rawBlob = await runWithNetworkRetry(
+    async ({ isLastAttempt }) => {
+      const contentPath = `/api/projects/${projectId}/images/${item.id}/content`;
+      let response;
+      try {
+        response = await fetch(contentPath);
+      } catch (cause) {
+        if (isLastAttempt && isTransientNetworkError(cause)) showServerUnreachable(`GET ${contentPath}`);
+        throw cause;
+      }
+      if (!response.ok) throw new Error('تصویر اصلی باز نشد');
+      try {
+        return await response.blob();
+      } catch (cause) {
+        if (isLastAttempt && isTransientNetworkError(cause)) showServerUnreachable(`GET ${contentPath}`);
+        throw cause;
+      }
+    },
+    { checkCancel },
+  );
   let bitmap = null;
   try {
     bitmap = await decodeProjectImageBitmap(rawBlob, item);
@@ -3810,7 +3845,15 @@ async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false
   if (!pngBlob) throw new Error(`ساخت PNG برای «${item.name}» ممکن نشد؛ تصویر خیلی بزرگ یا حافظهٔ مرورگر کم است`);
   let uploaded = null;
   try {
-    uploaded = await api(`/api/projects/${projectId}/images/${item.id}/rendered`, { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: pngBlob });
+    uploaded = await runWithNetworkRetry(
+      ({ isLastAttempt }) => api(`/api/projects/${projectId}/images/${item.id}/rendered`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'image/png' },
+        body: pngBlob,
+        suppressServerAlert: !isLastAttempt,
+      }),
+      { checkCancel },
+    );
   } finally {
     pngBlob = null;
   }
@@ -3852,7 +3895,7 @@ async function renderImagesText(ids = null, onStep = null, checkCancel = null, o
       if (checkCancel) checkCancel();
       const currentIdx = nextIdx;
       nextIdx += 1;
-      await renderAndUpload(targets[currentIdx], options);
+      await renderAndUpload(targets[currentIdx], { ...options, checkCancel });
       completed += 1;
       if (onStep) onStep(completed, targets.length);
     }

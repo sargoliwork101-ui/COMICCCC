@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.55"
+    assert health.json()["version"] == "4.56"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -3344,7 +3344,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.55"
+    assert APP_VERSION == "4.56"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "HaSaYaStudio"
@@ -5755,3 +5755,61 @@ def test_v446_pending_translation_explains_reason_and_stale_result_can_be_manual
     assert ocr_apply.status_code == 200, ocr_apply.text
     assert client.get(route).json()['images'][0]['blocks'][0]['text'] == 'متن جدید OCR'
     assert client.get(route + '/pending').json() == []
+
+
+def test_v456_long_batch_memory_trim_keeps_working_set_safe_and_api_keeps_session_alive(client, monkeypatch):
+    """v4.56: per-page OCR memory trims must not call Windows EmptyWorkingSet, and API traffic refreshes sessions."""
+    import ctypes
+    import sys
+    from pathlib import Path
+    import comic_studio.ocr_managed as managed_mod
+    from comic_studio import __main__ as main_entry
+
+    # 1. Non-aggressive per-page trim_process_memory must NOT invoke EmptyWorkingSet / _heapmin on Windows
+    win_calls = []
+
+    class _FakeKernel32:
+        def GetCurrentProcess(self):
+            win_calls.append("GetCurrentProcess")
+            return 123
+
+        def SetProcessWorkingSetSize(self, *_args):
+            win_calls.append("SetProcessWorkingSetSize")
+
+    class _FakePsapi:
+        def EmptyWorkingSet(self, _handle):
+            win_calls.append("EmptyWorkingSet")
+
+    class _FakeMsvcrt:
+        def _heapmin(self):
+            win_calls.append("_heapmin")
+
+    fake_windll = type("FakeWindll", (), {"kernel32": _FakeKernel32(), "psapi": _FakePsapi()})()
+    fake_cdll = type("FakeCdll", (), {"msvcrt": _FakeMsvcrt()})()
+    monkeypatch.setattr(managed_mod, "os", type("FakeOs", (), {"name": "nt"})())
+    monkeypatch.setattr(ctypes, "windll", fake_windll, raising=False)
+    monkeypatch.setattr(ctypes, "cdll", fake_cdll, raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    managed_mod.trim_process_memory()
+    assert win_calls == [], f"per-page trim must not strip Windows working set: {win_calls}"
+
+    managed_mod.trim_process_memory(aggressive=True)
+    assert "_heapmin" in win_calls and "EmptyWorkingSet" in win_calls
+
+    # 2. API traffic keeps a backgrounded/throttled session alive and server keep-alive timeout >= 60s
+    touched = []
+    orig_touch = client.app.state.sessions.touch_activity
+    monkeypatch.setattr(client.app.state.sessions, "touch_activity", lambda: (touched.append("touch"), orig_touch())[1])
+    res_act = client.get("/api/activity")
+    assert res_act.status_code == 200
+    assert len(touched) >= 1
+
+    # Health probe alone must not keep an abandoned app alive
+    touched.clear()
+    assert client.get("/api/health").status_code == 200
+    assert touched == []
+
+    # run_server configures keep-alive >= 60s so browser canvas rendering never races a 5s socket drop
+    entry_src = Path(main_entry.__file__).read_text(encoding="utf-8")
+    assert "timeout_keep_alive=60" in entry_src

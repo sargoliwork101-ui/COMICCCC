@@ -31,11 +31,13 @@ class SessionManager:
         close_grace: float = 2.0,
         stale_after: float = 180.0,
         abandon_after: float = 900.0,
+        is_busy: Callable[[], bool] | None = None,
     ) -> None:
         self.on_empty = on_empty
         self.close_grace = close_grace
         self.stale_after = stale_after
         self.abandon_after = abandon_after
+        self.is_busy = is_busy
         # Alive tabs: client id -> monotonic deadline of the next heartbeat.
         self._clients: dict[str, float] = {}
         # Silent tabs: client id -> monotonic deadline after which the tab is
@@ -138,6 +140,20 @@ class SessionManager:
             self._ensure_expiry_timer_locked(now)
             return len(self._clients)
 
+    def touch_activity(self) -> None:
+        """Keep known tabs alive while API requests or background jobs are running."""
+        with self._lock:
+            self._cancel_empty_locked()
+            if not self._clients and not self._silent:
+                return
+            now = time.monotonic()
+            for cid, deadline in list(self._clients.items()):
+                self._clients[cid] = max(deadline, now + self.stale_after)
+            for cid, deadline in list(self._silent.items()):
+                self._silent[cid] = max(deadline, now + self.abandon_after)
+            if not self._clients and self._silent:
+                self._schedule_abandon_locked(now)
+
     def close(self, client_id: str) -> tuple[int, bool]:
         """Forget one tab; return (remaining tabs, whether it was known)."""
         with self._lock:
@@ -172,11 +188,18 @@ class SessionManager:
                 self._schedule_abandon_locked(now)
 
     def _abandon_if_empty(self) -> None:
+        busy = bool(self.is_busy()) if callable(self.is_busy) else False
         with self._lock:
             self._abandon_timer = None
             if self._clients:
                 return
             now = time.monotonic()
+            if busy:
+                for cid, deadline in list(self._silent.items()):
+                    self._silent[cid] = max(deadline, now + max(self.abandon_after, 60.0))
+                if self._silent:
+                    self._schedule_abandon_locked(now)
+                return
             expired = [cid for cid, deadline in self._silent.items() if deadline <= now]
             for cid in expired:
                 self._silent.pop(cid, None)
@@ -186,9 +209,13 @@ class SessionManager:
             self._schedule_empty_locked()
 
     def _shutdown_if_empty(self) -> None:
+        busy = bool(self.is_busy()) if callable(self.is_busy) else False
         with self._lock:
             self._empty_timer = None
             if self._clients or self._silent or not self.on_empty:
+                return
+            if busy:
+                self._schedule_empty_locked()
                 return
             callback = self.on_empty
         callback()

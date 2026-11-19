@@ -153,13 +153,18 @@ def create_app() -> FastAPI:
     registry = EngineRegistry()
     translations = TranslationService()
     activity = ActivityLog()
-    sessions = SessionManager()
     context_locks: dict[str, asyncio.Lock] = {}
     storage_switch_lock = asyncio.Lock()
     active_jobs_lock = threading.Lock()
     active_jobs_count = 0
     next_job_token = 0
     active_job_entries: dict[int, tuple[str, threading.Event, Any]] = {}
+
+    def _has_active_jobs() -> bool:
+        with active_jobs_lock:
+            return active_jobs_count > 0
+
+    sessions = SessionManager(is_busy=_has_active_jobs)
 
     def cancel_active_jobs(target_kind: str = "all") -> int:
         with active_jobs_lock:
@@ -374,6 +379,13 @@ def create_app() -> FastAPI:
                     await resp(scope, receive, send)
                     return
 
+            if req_path.startswith("/api/") and req_path not in {
+                "/api/health",
+                "/api/session/heartbeat",
+                "/api/session/close",
+            }:
+                sessions.touch_activity()
+
             if req_path == "/" or req_path.endswith((".html", ".js", ".css")):
                 async def send_no_store(message: Any) -> None:
                     if message.get("type") == "http.response.start":
@@ -411,6 +423,7 @@ def create_app() -> FastAPI:
             next_job_token += 1
             job_token = next_job_token
             active_job_entries[job_token] = (job_kind, job_cancel_ev, on_cancel)
+        sessions.touch_activity()
 
         def _trigger_cancel() -> None:
             if not job_cancel_ev.is_set():
@@ -497,6 +510,7 @@ def create_app() -> FastAPI:
             with active_jobs_lock:
                 active_job_entries.pop(job_token, None)
                 active_jobs_count = max(0, active_jobs_count - 1)
+            sessions.touch_activity()
 
     def context_progress(run: dict[str, Any]) -> float:
         jobs = run.get('jobs', [])

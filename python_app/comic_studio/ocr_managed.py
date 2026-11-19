@@ -633,17 +633,23 @@ def process_rss_mb(pid: int | None = None) -> float:
     return 0.0
 
 
-def trim_process_memory() -> None:
-    """Run Python GC, flush optional GPU caches if already loaded, and return unused heap/working-set pages to OS."""
+def trim_process_memory(*, aggressive: bool = False) -> None:
+    """Run Python GC, flush optional GPU caches if already loaded, and optionally return OS working-set pages.
+
+    Per-page calls during multi-page OCR use ``aggressive=False`` so Windows does not
+    repeatedly strip resident DLL/ONNX/DirectML working-set pages or compact the C heap
+    mid-batch; full working-set trimming runs only when unloading engines at batch end.
+    """
     import gc
     gc.collect()
-    gc.collect()
+    if aggressive:
+        gc.collect()
     torch_mod = sys.modules.get("torch")
     if torch_mod is not None:
         try:
             if hasattr(torch_mod, "cuda") and torch_mod.cuda.is_available():
                 torch_mod.cuda.empty_cache()
-                if hasattr(torch_mod.cuda, "ipc_collect"):
+                if aggressive and hasattr(torch_mod.cuda, "ipc_collect"):
                     torch_mod.cuda.ipc_collect()
         except Exception:
             pass
@@ -662,7 +668,7 @@ def trim_process_memory() -> None:
         except Exception:
             pass
     try:
-        if os.name == "nt":
+        if os.name == "nt" and aggressive:
             try:
                 msvcrt = getattr(ctypes, "cdll", None)
                 if msvcrt is not None and hasattr(msvcrt, "msvcrt") and hasattr(msvcrt.msvcrt, "_heapmin"):

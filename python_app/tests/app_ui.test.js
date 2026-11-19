@@ -4629,7 +4629,7 @@ function check(name, condition) {
       const detail = document.getElementById('serverAlertDetail').textContent || '';
       window.fetch = async (url, opts = {}) => {
         const parsed = new URL(url, 'http://127.0.0.1:8765');
-        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.55' });
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.56' });
         return origFetch(url, opts);
       };
       document.getElementById('serverAlertRetry').click();
@@ -4797,6 +4797,122 @@ function check(name, condition) {
     v452OcrReview.prompt.includes('متن OCR قبلی') && v452OcrReview.prompt.includes('متن OCR تازه')
       && v452OcrReview.prompt.includes('ترجمهٔ قبلی') && v452OcrReview.text === 'متن OCR قبلی'
       && v452OcrReview.tr === 'ترجمهٔ قبلی' && v452OcrReview.saves === 1, JSON.stringify(v452OcrReview));
+
+  // v4.56: 26-page OCR batch keeps engine loaded throughout (no 10-page recycle thrashing)
+  // and retries transient Failed to fetch on both /ocr and /content+/rendered without flashing serverAlert.
+  {
+    const v456LargeBatchCheck = await vm.runInContext(`
+      (async () => {
+        const origFetch = window.fetch;
+        const origSleep = sleep;
+        const prevProject = JSON.parse(JSON.stringify(state.project));
+        const sleepDelays = [];
+        const keepFlags = [];
+        let ocrPage12Failures = 0;
+        let contentPage25Failures = 0;
+        let renderedPage25Failures = 0;
+        let alertShownDuringRetries = false;
+        try {
+          sleep = async (ms) => {
+            sleepDelays.push(ms);
+            if (!$('serverAlert').classList.contains('hidden')) alertShownDuringRetries = true;
+          };
+          const pages = Array.from({ length: 26 }, (_, i) => ({
+            id: 'pg-' + (i + 1),
+            name: 'page-' + (i + 1) + '.png',
+            file: 'pg-' + (i + 1) + '.png',
+            width: 200,
+            height: 120,
+            format: 'PNG',
+            bytes: 100,
+            order: i,
+            selected: true,
+            approved: false,
+            groupId: null,
+            crop: null,
+            edited: false,
+            blocks: [],
+          }));
+          state.project.images = pages;
+          renderGrid();
+
+          window.fetch = async (url, options = {}) => {
+            const u = String(url);
+            if (u.endsWith('/state') && options.method === 'PUT') {
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => state.project, text: async () => JSON.stringify(state.project) };
+            }
+            if (u.endsWith('/ocr') && options.method === 'POST') {
+              const req = JSON.parse(options.body);
+              const pid = req.image_ids[0];
+              if (pid === 'pg-12' && ocrPage12Failures < 2) {
+                ocrPage12Failures += 1;
+                throw new TypeError('Failed to fetch');
+              }
+              keepFlags.push(req.keep_engine_loaded);
+              const nextProj = JSON.parse(JSON.stringify(state.project));
+              const target = nextProj.images.find((im) => im.id === pid);
+              if (target) {
+                target.ocrCompleted = true;
+                target.edited = false;
+                target.blocks = [{ id: 1, text: 'PAGE ' + pid, tr: '', enabled: true, bg: 'white', x0: 10, y0: 10, x1: 150, y1: 45, lineH: 24, dir: 'ltr', align: 'center' }];
+              }
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => nextProj, text: async () => JSON.stringify(nextProj) };
+            }
+            if (u.includes('/images/pg-25/content') && contentPage25Failures < 1) {
+              contentPage25Failures += 1;
+              throw new TypeError('Failed to fetch');
+            }
+            if (u.endsWith('/pg-25/rendered') && renderedPage25Failures < 2) {
+              renderedPage25Failures += 1;
+              throw new TypeError('Failed to fetch');
+            }
+            if (u.includes('/content')) {
+              return { ok: true, status: 200, headers: { get: () => 'image/png' }, blob: async () => new window.Blob() };
+            }
+            if (u.endsWith('/rendered')) {
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ ok: true }), text: async () => '{"ok":true}' };
+            }
+            return origFetch(url, options);
+          };
+
+          hideServerUnreachable();
+          $('ocrOnlySelected').checked = true;
+          await runOcr();
+          const completedCount = state.project.images.filter((im) => im.ocrCompleted).length;
+          return {
+            completedCount,
+            keepFlagsLen: keepFlags.length,
+            allBeforeLastKeptLoaded: keepFlags.slice(0, 25).every((v) => v === true),
+            lastUnloaded: keepFlags[25] === false,
+            ocrPage12Failures,
+            contentPage25Failures,
+            renderedPage25Failures,
+            sleepDelays,
+            alertShownDuringRetries,
+            alertHiddenAtEnd: $('serverAlert').classList.contains('hidden'),
+          };
+        } finally {
+          window.fetch = origFetch;
+          sleep = origSleep;
+          hideServerUnreachable();
+          adoptProject(prevProject);
+        }
+      })()
+    `, context);
+    check(
+      'v4.56 26-page OCR keeps engine loaded across all pages until the end and recovers from transient Failed to fetch in both /ocr and render/upload',
+      v456LargeBatchCheck.completedCount === 26
+        && v456LargeBatchCheck.keepFlagsLen === 26
+        && v456LargeBatchCheck.allBeforeLastKeptLoaded === true
+        && v456LargeBatchCheck.lastUnloaded === true
+        && v456LargeBatchCheck.ocrPage12Failures === 2
+        && v456LargeBatchCheck.contentPage25Failures === 1
+        && v456LargeBatchCheck.renderedPage25Failures === 2
+        && v456LargeBatchCheck.alertShownDuringRetries === false
+        && v456LargeBatchCheck.alertHiddenAtEnd === true,
+      JSON.stringify(v456LargeBatchCheck),
+    );
+  }
 
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;
   window.dispatchEvent(new window.Event('beforeunload'));

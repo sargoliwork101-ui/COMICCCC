@@ -245,7 +245,16 @@ def run_server(host: str, port: int, listening_socket: socket.socket | None = No
             print("Network access requires HTTP Basic authentication. Use HTTPS or a trusted VPN; plain HTTP exposes the password.", file=sys.stderr, flush=True)
         else:
             print("Remote clients are denied by default. Set COMIC_STUDIO_ACCESS_PASSWORD (20+ characters) to enable authenticated access; use HTTPS or a trusted VPN.", file=sys.stderr, flush=True)
-    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, reload=False, access_log=False))
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host=host,
+            port=port,
+            reload=False,
+            access_log=False,
+            timeout_keep_alive=60,
+        )
+    )
     app.state.sessions.on_empty = lambda: setattr(server, "should_exit", True)
     try:
         if listening_socket is not None:

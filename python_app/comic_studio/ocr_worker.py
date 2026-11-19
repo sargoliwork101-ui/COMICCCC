@@ -123,16 +123,17 @@ def _configure_torch_runtime(torch_mod: Any) -> str:
     return "cpu"
 
 
-def _release_worker_caches() -> None:
-    """Release transient CPU/GPU activation buffers and OS working-set pages after each recognized page."""
+def _release_worker_caches(*, aggressive: bool = False) -> None:
+    """Release transient CPU/GPU activation buffers after each recognized page without thrashing Windows working sets."""
     gc.collect()
-    gc.collect()
+    if aggressive:
+        gc.collect()
     torch_mod = sys.modules.get("torch")
     if torch_mod is not None:
         try:
             if hasattr(torch_mod, "cuda") and torch_mod.cuda.is_available():
                 torch_mod.cuda.empty_cache()
-                if hasattr(torch_mod.cuda, "ipc_collect"):
+                if aggressive and hasattr(torch_mod.cuda, "ipc_collect"):
                     torch_mod.cuda.ipc_collect()
         except Exception:
             pass
@@ -151,7 +152,7 @@ def _release_worker_caches() -> None:
         except Exception:
             pass
     try:
-        if os.name == "nt":
+        if os.name == "nt" and aggressive:
             try:
                 msvcrt = getattr(ctypes, "cdll", None)
                 if msvcrt is not None and hasattr(msvcrt, "msvcrt") and hasattr(msvcrt.msvcrt, "_heapmin"):
