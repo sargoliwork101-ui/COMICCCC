@@ -446,11 +446,37 @@ async function retryServerConnection() {
 }
 function isTransientNetworkError(error) {
   if (!error || error.cancelled || error.name === 'AbortError') return false;
-  if (error.status === 0) return true;
+  if (error.status === 0 || error.status === 502 || error.status === 503 || error.status === 504) return true;
   const msg = String(error.message || error || '');
   return /failed to fetch|networkerror|load failed|خطای ارتباط با برنامه/i.test(msg);
 }
-async function runWithNetworkRetry(taskFn, { delays = [800, 1800, 3000], checkCancel = null } = {}) {
+async function waitForServerReady({ signal = null, checkCancel = null, maxProbes = 3, probeGapMs = 450 } = {}) {
+  for (let probe = 0; probe < maxProbes; probe += 1) {
+    checkCancel?.();
+    if (signal?.aborted) {
+      const abortErr = new Error('عملیات توسط کاربر لغو شد.');
+      abortErr.name = 'AbortError'; abortErr.cancelled = true;
+      throw abortErr;
+    }
+    try {
+      const res = await fetch('/api/health', { cache: 'no-store', ...(signal ? { signal } : {}) });
+      if (res && res.ok) {
+        noteServerReachable();
+        return true;
+      }
+      if (res && res.status > 0 && res.status < 500) return false;
+    } catch (cause) {
+      if (cause?.name === 'AbortError' || signal?.aborted) {
+        const abortErr = new Error('عملیات توسط کاربر لغو شد.');
+        abortErr.name = 'AbortError'; abortErr.cancelled = true;
+        throw abortErr;
+      }
+    }
+    if (probe + 1 < maxProbes) await sleep(probeGapMs);
+  }
+  return false;
+}
+async function runWithNetworkRetry(taskFn, { delays = [800, 1800, 3000], checkCancel = null, signal = null } = {}) {
   const maxAttempts = delays.length + 1;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     checkCancel?.();
@@ -460,6 +486,7 @@ async function runWithNetworkRetry(taskFn, { delays = [800, 1800, 3000], checkCa
     } catch (error) {
       if (isLastAttempt || !isTransientNetworkError(error)) throw error;
       await sleep(delays[attempt]);
+      await waitForServerReady({ signal, checkCancel });
     }
   }
 }
@@ -2679,7 +2706,7 @@ async function runOcr() {
             signal: controller.signal,
             suppressServerAlert: !isLastAttempt,
           }),
-          { checkCancel: checkOcrNotCancelled },
+          { checkCancel: checkOcrNotCancelled, signal: controller.signal },
         );
         if (isLastPage) usedKeepEngineLoaded = false;
         checkOcrNotCancelled();

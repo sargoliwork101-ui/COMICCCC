@@ -253,6 +253,7 @@ def create_app() -> FastAPI:
         return entry
     app.state.activity = activity
     app.state.sessions = sessions
+    app.state.cancel_active_jobs = cancel_active_jobs
     activity.add("برنامه آماده است")
 
     class _SecurityAndNoStoreMiddleware:

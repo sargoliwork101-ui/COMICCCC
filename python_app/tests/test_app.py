@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.56"
+    assert health.json()["version"] == "4.57"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -3344,7 +3344,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.56"
+    assert APP_VERSION == "4.57"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "HaSaYaStudio"
@@ -5813,3 +5813,34 @@ def test_v456_long_batch_memory_trim_keeps_working_set_safe_and_api_keeps_sessio
     # run_server configures keep-alive >= 60s so browser canvas rendering never races a 5s socket drop
     entry_src = Path(main_entry.__file__).read_text(encoding="utf-8")
     assert "timeout_keep_alive=60" in entry_src
+
+
+def test_v457_browser_close_cancels_active_jobs_and_runtime_avoids_opencl_and_noop_trim(client, monkeypatch):
+    """v4.57: shutdown cancels active jobs cleanly, OpenCL is not enabled globally, and noop unload_all skips memory trim."""
+    from pathlib import Path
+    import comic_studio.ocr as ocr_mod
+    import comic_studio.ocr_managed as managed_mod
+    from comic_studio import __main__ as main_entry
+
+    # 1. Explicit shutdown handler in __main__.py cancels active jobs before setting server.should_exit
+    assert callable(getattr(client.app.state, "cancel_active_jobs", None))
+    try:
+        assert client.app.state.cancel_active_jobs("all") == 0
+    finally:
+        ocr_mod._STANDARD_CANCEL_EVENT.clear()
+    entry_src = Path(main_entry.__file__).read_text(encoding="utf-8")
+    assert "cancel_active_jobs" in entry_src and "server.should_exit = True" in entry_src
+
+    # 2. configure_native_runtime keeps OpenCV OpenCL off to avoid Windows DirectML/OpenCL driver collisions
+    monkeypatch.setattr(managed_mod, "_RUNTIME_CONFIGURED", False)
+    rt = managed_mod.configure_native_runtime(eager_cv2=True)
+    assert rt["openclActive"] is False
+
+    # 3. EngineRegistry.unload_all(except_id) avoids redundant trim_process_memory when nothing was unloaded
+    trim_calls = []
+    monkeypatch.setattr(ocr_mod, "trim_process_memory", lambda aggressive=False: trim_calls.append(aggressive))
+    reg = ocr_mod.EngineRegistry()
+    reg.unload_all(except_id="rapidocr-v6")
+    assert trim_calls == []
+    reg.unload_all(except_id=None)
+    assert trim_calls == [True]

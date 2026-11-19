@@ -4629,7 +4629,7 @@ function check(name, condition) {
       const detail = document.getElementById('serverAlertDetail').textContent || '';
       window.fetch = async (url, opts = {}) => {
         const parsed = new URL(url, 'http://127.0.0.1:8765');
-        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.56' });
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.57' });
         return origFetch(url, opts);
       };
       document.getElementById('serverAlertRetry').click();
@@ -4811,6 +4811,7 @@ function check(name, condition) {
         let ocrPage12Failures = 0;
         let contentPage25Failures = 0;
         let renderedPage25Failures = 0;
+        let healthProbesDuringRetry = 0;
         let alertShownDuringRetries = false;
         try {
           sleep = async (ms) => {
@@ -4838,6 +4839,10 @@ function check(name, condition) {
 
           window.fetch = async (url, options = {}) => {
             const u = String(url);
+            if (u.endsWith('/api/health')) {
+              healthProbesDuringRetry += 1;
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ name: 'HaSaYa Studio', version: '4.57' }) };
+            }
             if (u.endsWith('/state') && options.method === 'PUT') {
               return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => state.project, text: async () => JSON.stringify(state.project) };
             }
@@ -4887,6 +4892,7 @@ function check(name, condition) {
             ocrPage12Failures,
             contentPage25Failures,
             renderedPage25Failures,
+            healthProbesDuringRetry,
             sleepDelays,
             alertShownDuringRetries,
             alertHiddenAtEnd: $('serverAlert').classList.contains('hidden'),
@@ -4900,7 +4906,7 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.56 26-page OCR keeps engine loaded across all pages until the end and recovers from transient Failed to fetch in both /ocr and render/upload',
+      'v4.56/v4.57 26-page OCR keeps engine loaded across all pages until the end, probes /api/health before retry, and recovers from transient Failed to fetch in both /ocr and render/upload',
       v456LargeBatchCheck.completedCount === 26
         && v456LargeBatchCheck.keepFlagsLen === 26
         && v456LargeBatchCheck.allBeforeLastKeptLoaded === true
@@ -4908,6 +4914,7 @@ function check(name, condition) {
         && v456LargeBatchCheck.ocrPage12Failures === 2
         && v456LargeBatchCheck.contentPage25Failures === 1
         && v456LargeBatchCheck.renderedPage25Failures === 2
+        && v456LargeBatchCheck.healthProbesDuringRetry >= 5
         && v456LargeBatchCheck.alertShownDuringRetries === false
         && v456LargeBatchCheck.alertHiddenAtEnd === true,
       JSON.stringify(v456LargeBatchCheck),

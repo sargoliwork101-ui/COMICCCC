@@ -255,7 +255,14 @@ def run_server(host: str, port: int, listening_socket: socket.socket | None = No
             timeout_keep_alive=60,
         )
     )
-    app.state.sessions.on_empty = lambda: setattr(server, "should_exit", True)
+    def _shutdown_server() -> None:
+        cancel_fn = getattr(app.state, "cancel_active_jobs", None)
+        if callable(cancel_fn):
+            with contextlib.suppress(Exception):
+                cancel_fn("all")
+        server.should_exit = True
+
+    app.state.sessions.on_empty = _shutdown_server
     try:
         if listening_socket is not None:
             server.run(sockets=[listening_socket])

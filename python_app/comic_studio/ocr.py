@@ -3849,7 +3849,8 @@ class EngineRegistry:
                     pass
             if was_loaded:
                 unloaded.append(engine_id)
-        trim_process_memory(aggressive=(except_id is None))
+        if unloaded or except_id is None:
+            trim_process_memory(aggressive=(except_id is None))
         after = self.memory_status()
         freed_mb = round(max(0.0, float(before["totalRamMb"]) - float(after["totalRamMb"])), 1)
         return {

@@ -128,7 +128,8 @@ def test_v430_the_server_gives_up_only_after_the_abandon_grace():
 
 
 def test_v456_active_jobs_and_api_activity_prevent_mid_ocr_server_shutdown():
-    """v4.56: a long OCR run in a backgrounded tab must never trigger server shutdown."""
+    """v4.56/v4.57: a long OCR run in a backgrounded tab must never trigger server shutdown,
+    while an explicit browser close always shuts down immediately even if busy."""
     calls = []
     busy = True
     sessions = SessionManager(
@@ -140,7 +141,7 @@ def test_v456_active_jobs_and_api_activity_prevent_mid_ocr_server_shutdown():
     )
     try:
         sessions.heartbeat("tab-long-ocr")
-        # Wait past both stale_after and abandon_after while job is still running
+        # Wait past both stale_after and abandon_after while job is still running (tab NOT closed)
         time.sleep(0.16)
         assert calls == []
         assert not sessions.shutdown_pending
@@ -150,12 +151,8 @@ def test_v456_active_jobs_and_api_activity_prevent_mid_ocr_server_shutdown():
         assert sessions.known_count == 1
         assert calls == []
 
-        # Even if tab explicitly closes while a job is busy, shutdown waits until busy becomes False
+        # Explicit browser close MUST shut down immediately even if a job is currently running
         sessions.close("tab-long-ocr")
-        time.sleep(0.06)
-        assert calls == []
-
-        busy = False
         time.sleep(0.08)
         assert calls == ["shutdown"]
     finally:

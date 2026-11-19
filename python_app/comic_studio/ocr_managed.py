@@ -805,11 +805,10 @@ def configure_native_runtime(eager_cv2: bool = True) -> dict[str, Any]:
                 cv2.setUseOptimized(True)
                 cv2.setNumThreads(cores)
                 cv_threads = int(cv2.getNumThreads())
-                if hasattr(cv2, "ocl") and cv2.ocl.haveOpenCL():
-                    hw = inspect_hardware()
-                    if hw.get("hasGpu"):
-                        cv2.ocl.setUseOpenCL(True)
-                        opencl_active = bool(cv2.ocl.useOpenCL())
+                if hasattr(cv2, "ocl"):
+                    with contextlib.suppress(Exception):
+                        cv2.ocl.setUseOpenCL(False)
+                    opencl_active = bool(cv2.ocl.useOpenCL())
             except Exception:
                 pass
             with _RUNTIME_LOCK:

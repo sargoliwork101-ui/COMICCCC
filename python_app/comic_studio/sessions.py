@@ -209,13 +209,9 @@ class SessionManager:
             self._schedule_empty_locked()
 
     def _shutdown_if_empty(self) -> None:
-        busy = bool(self.is_busy()) if callable(self.is_busy) else False
         with self._lock:
             self._empty_timer = None
             if self._clients or self._silent or not self.on_empty:
-                return
-            if busy:
-                self._schedule_empty_locked()
                 return
             callback = self.on_empty
         callback()
