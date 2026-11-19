@@ -6,9 +6,14 @@ import httpx
 import pytest
 
 from comic_studio.translation import (
-    TRANSLATION_SEPARATOR, TranslationError, TranslationService,
+    AI_PROVIDERS, TRANSLATION_SEPARATOR, TranslationError, TranslationService,
     combine_translation_texts, distribute_translation, split_free_query,
 )
+
+
+def test_gemini_key_help_points_to_google_ai_studio_api_keys():
+    assert AI_PROVIDERS["gemini"]["key_url"] == "https://aistudio.google.com/api-keys"
+    assert AI_PROVIDERS["gemini"]["model"] == "gemini-2.5-flash"
 
 
 def test_ai_settings_do_not_expose_key(tmp_path, monkeypatch):

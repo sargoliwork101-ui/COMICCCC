@@ -25,7 +25,7 @@ from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
-from starlette.background import BackgroundTask
+from PIL import UnidentifiedImageError
 
 from . import APP_NAME, APP_VERSION
 from .activity import ActivityLog, JobCancelledError, cancellation_scope, reporting
@@ -33,7 +33,7 @@ from .backup import BackupError, cleanup_backup_temp, make_backup, restore_backu
 from .exporter import build_docx, build_images_zip, build_pdf, build_pptx, build_txt, clean_name, crop_box, image_payload
 from .watermark_render import has_active_watermark
 from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, _INSTALL_LOCK, recognize_image
-from .ocr_grouping import group_ocr_lines, organize_ocr_blocks
+from .ocr_grouping import organize_ocr_blocks
 from .ocr_managed import (
     _stop_lingering_surya_server,
     configure_native_runtime,
@@ -52,7 +52,6 @@ from .paths import (
 from . import context_run, pending_results
 from . import resources
 from .license_guard import (
-    SUPPORT_PHONE,
     LicenseError,
     SECURITY_GATE,
     SESSION_COOKIE_NAME,
@@ -285,7 +284,7 @@ def create_app() -> FastAPI:
                     resp = JSONResponse(
                         {"detail": "Authentication required."},
                         status_code=401,
-                        headers={"WWW-Authenticate": 'Basic realm="Comic OCR Studio", charset="UTF-8"', "Cache-Control": "no-store"},
+                        headers={"WWW-Authenticate": 'Basic realm="HaSaYa Studio", charset="UTF-8"', "Cache-Control": "no-store"},
                     )
                     await resp(scope, receive, send)
                     return
@@ -816,7 +815,8 @@ def create_app() -> FastAPI:
         current = project(project_id)
         if _state_update_mutates_editing(current, update.state):
             require_module_license("editing")
-        return store.update_state(project_id, update.state)
+        expected = update.expected_updated_at or str(update.state.get("updatedAt") or "")
+        return store.update_state(project_id, update.state, expected_updated_at=expected or None)
 
     @app.get("/api/projects/{project_id}/pending")
     def pending_list(project_id: str) -> list[dict[str, Any]]:
@@ -841,7 +841,11 @@ def create_app() -> FastAPI:
             with store._lock:
                 entry = pending_results.load(store, project_id, token)
             require_module_license('ocr' if entry.get('kind') == 'ocr' else 'translation')
-            return pending_results.resolve(store, project_id, token, revision, choices)
+            # v4.46: force is the explicit manual-approval flag for results
+            # whose translation run has since changed; without it nothing is
+            # applied to such stale results.
+            force = values.get('force') is True
+            return pending_results.resolve(store, project_id, token, revision, choices, force=force)
         except KeyError as exc:
             raise HTTPException(404, 'نتیجهٔ منتظر پیدا نشد.') from exc
         except ValueError as exc:
@@ -926,6 +930,10 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "تصویر موردنظر پیدا نشد.") from exc
         except PermissionError as exc:
             raise HTTPException(503, "فایل پروژه موقتاً در حال ذخیره‌سازی است؛ چند لحظه بعد دوباره تلاش کنید.") from exc
+        except UnidentifiedImageError as exc:
+            # A broken render must be explained in Persian, not with the English
+            # message of the image library.
+            raise HTTPException(400, "فایل PNG معتبر نیست؛ تصویر ویرایش‌شده خراب است. دوباره تصویر را رندر کنید.") from exc
         except Exception as exc:
             raise HTTPException(400, f"فایل PNG معتبر نیست: {exc}") from exc
         finally:
@@ -1028,6 +1036,8 @@ def create_app() -> FastAPI:
         info = ENGINE_INFO[engine_id]
         if info.get("action") == "guide":
             return {"ok": False, "guide": True, "engine": {"id": engine_id, **info}, "engines": registry.status()}
+        if info.get("remoteCodeExecution") and not (values and values.accept_remote_code_risk):
+            raise HTTPException(428, "پیش از دریافت این مدل باید دربارهٔ اجرای کد همراه آن آگاهانه تأیید کنید.")
         language = values.language if values else "eng"
         force = bool(values.force) if values else False
         if info.get("isolated") and info["languages"] and language not in info["languages"]:
@@ -1081,6 +1091,8 @@ def create_app() -> FastAPI:
         require_module_license("ocr")
         registry.get(engine_id)
         info = ENGINE_INFO[engine_id]
+        if info.get("remoteCodeExecution") and not (values and values.accept_remote_code_risk):
+            raise HTTPException(428, "پیش از به‌روزرسانی این مدل باید دربارهٔ اجرای کد همراه آن آگاهانه تأیید کنید.")
         language = values.language if values else (info["languages"][0] if info["languages"] else "eng")
         if info["languages"] and language not in info["languages"]:
             language = info["languages"][0]
@@ -1169,7 +1181,7 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "این مدل به محیط اجرای جداگانه (external runtime) نیاز دارد و موتور مستقیم OCR نیست.")
         if values.language not in ENGINE_INFO[engine_id]["languages"]:
             raise HTTPException(400, "این موتور از زبان انتخاب‌شده پشتیبانی نمی‌کند.")
-        state = project(values.project_id)
+        project(values.project_id)  # raises 404 when the project is gone
         try:
             path = store.image_path(values.project_id, values.image_id)
         except (KeyError, FileNotFoundError) as exc:
@@ -1216,7 +1228,6 @@ def create_app() -> FastAPI:
         require_module_license("ocr")
         with store._lock:
             state = project(project_id)
-            expected_updated_at = state.get("updatedAt", "")
             baseline = {item['id']: pending_results.ocr_signature(store, state, item['id']) for item in state['images']}
             original_ocr = {item['id']: '\n'.join(str(b.get('text') or '') for b in item.get('blocks', [])) for item in state['images']}
         engine = registry.get(values.engine)
@@ -2079,7 +2090,7 @@ def create_app() -> FastAPI:
         signed_plan = plan
         if values.call_id is not None:
             if values.provider == "free" or (len(ids) != 1 and not values.call_image_id):
-                raise HTTPException(400, "An AI task needs its page ID")
+                raise HTTPException(400, "برای انجام هر بخش ترجمه باید شمارهٔ صفحه مشخص باشد.")
             task_image_id = values.call_image_id or ids[0]
             calls_to_run = [call for call in plan["calls"] if call.get("call_id") == values.call_id and call.get("image_id") == task_image_id]
             if len(calls_to_run) != 1:
@@ -2216,7 +2227,7 @@ def create_app() -> FastAPI:
         elif values.provider == "free":
             activity.add(f"هر {len(blocks)} متن جدا ترجمه و در کادرهای خودشان قرار گرفتند", "success", 1.0)
         elif not values.batch_total or values.batch_index == values.batch_total:
-            activity.add(f"ترجمهٔ صفحه‌های درخواست‌شده پایان یافت؛ هر صفحه جداگانه ذخیره شد", "success", 1.0)
+            activity.add("ترجمهٔ صفحه‌های درخواست‌شده پایان یافت؛ هر صفحه جداگانه ذخیره شد", "success", 1.0)
         return state
 
     @app.post("/api/translate-text/preview")
@@ -2300,7 +2311,7 @@ def create_app() -> FastAPI:
     @app.put("/api/resources")
     def save_resources(values: ResourceBudget) -> dict[str, Any]:
         """Store how much of the machine the app may use (v4.29)."""
-        saved = resources.save_budget(values.model_dump())
+        resources.save_budget(values.model_dump())
         summary = resources.budget_summary()
         activity.add(
             "سهمیهٔ پردازنده و حافظهٔ برنامه به‌روزرسانی شد "

@@ -129,7 +129,7 @@ const ICON_DELETE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" 
 const ICON_RETRY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>';
 const CONCURRENCY = 4;
 const MAX_CANVAS_H = 16000;
-const APP_TITLE = 'PIC TO PDF';
+const APP_TITLE = 'HASAYA';
 function setTaskTitle(message = '') {
   document.title = message ? `${message} · ${APP_TITLE}` : APP_TITLE;
 }
@@ -242,7 +242,10 @@ async function setRefererRule(pageUrl) {
       removeRuleIds: [1],
       addRules: [{
         id: 1, priority: 1,
-        action: { type: 'modifyHeaders', requestHeaders: [{ header: 'referer', operation: 'set', value: origin }] },
+        action: { type: 'modifyHeaders', requestHeaders: [
+          { header: 'referer', operation: 'set', value: origin },
+          { header: 'origin', operation: 'remove' }
+        ] },
         // فقط برای دریافت تصویرها؛ درخواست سرویس‌های ترجمه نباید Referer سایت کمیک را بگیرند
         condition: {
           resourceTypes: ['xmlhttprequest'],
@@ -339,6 +342,15 @@ function sniff(u) {
 async function analyze(it) {
   const u8 = new Uint8Array(await it.blob.arrayBuffer());
   let info = sniff(u8);
+  if (!info && (/svg/i.test(it.blob.type || '') || /^\s*(?:<\?xml[\s\S]*?)?<svg[\s>]/i.test(new TextDecoder().decode(u8.slice(0, 512))))) {
+    const text = new TextDecoder().decode(u8.slice(0, 4096));
+    const vb = text.match(/viewBox\s*=\s*["']\s*[\d.-]+\s+[\d.-]+\s+([\d.]+)\s+([\d.]+)/i);
+    const wm = text.match(/\bwidth\s*=\s*["']\s*([\d.]+)/i);
+    const hm = text.match(/\bheight\s*=\s*["']\s*([\d.]+)/i);
+    const w = Math.round(Number(wm && wm[1]) || Number(vb && vb[1]) || 1200) || 1200;
+    const h = Math.round(Number(hm && hm[1]) || Number(vb && vb[2]) || 800) || 800;
+    info = { fmt: 'SVG', ok: true, w, h };
+  }
   if (!info || !info.w || !info.h) {
     try {
       const b = await createImageBitmap(it.blob, { imageOrientation: 'none' });
