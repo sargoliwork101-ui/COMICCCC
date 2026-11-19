@@ -806,6 +806,7 @@ def pyinstaller_command(
         cmd.extend(["--collect-all", pkg])
 
     for hidden in (
+        "comic_studio.ocr_builtin_worker",
         "uvicorn.logging",
         "uvicorn.loops",
         "uvicorn.loops.auto",
