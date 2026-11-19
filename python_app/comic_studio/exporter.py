@@ -326,7 +326,7 @@ def build_pdf(store: ProjectStore, state: dict[str, Any], request: dict[str, Any
     require_active_license()
     images = selected_images(state, request.get("image_ids", []))
     if not images:
-        raise ValueError("No images selected")
+        raise ValueError("برای خروجی هیچ تصویری انتخاب نشده است؛ حداقل یک تصویر را انتخاب کنید.")
     seamless = bool(request.get("seamless"))
     uniform = bool(request.get("uniform_size")) and not seamless
     two_per_page = bool(request.get("two_per_page")) and not seamless
@@ -395,7 +395,7 @@ def build_images_zip(store: ProjectStore, state: dict[str, Any], request: dict[s
     require_active_license()
     images = selected_images(state, request.get("image_ids", []))
     if not images:
-        raise ValueError("No images selected")
+        raise ValueError("برای خروجی هیچ تصویری انتخاب نشده است؛ حداقل یک تصویر را انتخاب کنید.")
     output = project_root(state["id"]) / "exports" / f"{_export_stem(state, request)}-images.zip"
     folder = clean_name(request.get("folder_name", ""), "") if request.get("folder_name") else ""
     prefix = f"{folder}/" if folder else ""
@@ -455,7 +455,7 @@ def build_txt(store: ProjectStore, state: dict[str, Any], request: dict[str, Any
     require_active_license()
     images = selected_images(state, request.get("image_ids", []))
     if not images:
-        raise ValueError("No images selected")
+        raise ValueError("برای خروجی هیچ تصویری انتخاب نشده است؛ حداقل یک تصویر را انتخاب کنید.")
     chunks = []
     total = max(1, len(images))
     for index, item in enumerate(images, start=1):
@@ -1733,7 +1733,7 @@ def build_docx(store: ProjectStore, state: dict[str, Any], request: dict[str, An
     require_active_license()
     images = selected_images(state, request.get("image_ids", []))
     if not images:
-        raise ValueError("No images selected")
+        raise ValueError("برای خروجی هیچ تصویری انتخاب نشده است؛ حداقل یک تصویر را انتخاب کنید.")
     docx_mode = "ocr" if request.get("docx_mode") == "ocr" else "translation"
     if request.get("docx_layout") == "flowing":
         return _build_flowing_docx(store, state, images, request, docx_mode)
@@ -1924,7 +1924,7 @@ _PPTX_TABLE_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <a:tblStyleLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" def="{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}"/>"""
 
 _PPTX_THEME = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Comic OCR Studio Theme">
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="HaSaYa Studio Theme">
   <a:themeElements>
     <a:clrScheme name="Studio">
       <a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>
@@ -2259,21 +2259,21 @@ def _write_pptx_package(
         "  </p:defaultTextStyle>\n"
         "</p:presentation>"
     )
-    safe_title = xml_escape(_clean_text(deck_title or "Comic OCR Studio"))
+    safe_title = xml_escape(_clean_text(deck_title or "HaSaYa Studio"))
     core_xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
         '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
         'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" '
         'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n'
         f"  <dc:title>{safe_title}</dc:title>\n"
-        "  <dc:creator>Comic OCR Studio</dc:creator>\n"
+        "  <dc:creator>HaSaYa Studio</dc:creator>\n"
         "</cp:coreProperties>"
     )
     app_xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
         '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" '
         'xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">\n'
-        "  <Application>Comic OCR Studio</Application>\n"
+        "  <Application>HaSaYa Studio</Application>\n"
         f"  <Slides>{len(slides)}</Slides>\n"
         "  <Notes>0</Notes>\n"
         "  <HiddenSlides>0</HiddenSlides>\n"
@@ -2552,7 +2552,7 @@ def build_pptx(store: ProjectStore, state: dict[str, Any], request: dict[str, An
     require_active_license()
     images = selected_images(state, request.get("image_ids", []))
     if not images:
-        raise ValueError("No images selected")
+        raise ValueError("برای خروجی هیچ تصویری انتخاب نشده است؛ حداقل یک تصویر را انتخاب کنید.")
     raw_mode = request.get("pptx_mode") or request.get("docx_mode") or "translation"
     raw_layout = request.get("pptx_layout") or request.get("docx_layout") or "visual"
     pptx_mode = "ocr" if raw_mode == "ocr" else "translation"
