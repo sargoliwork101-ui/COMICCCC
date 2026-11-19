@@ -1,5 +1,5 @@
-"""Comic OCR Studio — local file-based OCR and translation."""
+"""HaSaYa Studio — local file-based OCR and translation."""
 
-APP_NAME = "Comic OCR Studio"
-APP_VERSION = "4.36"
-__version__ = "4.3.6"
+APP_NAME = "HaSaYa Studio"
+APP_VERSION = "4.55"
+__version__ = "4.5.5"
