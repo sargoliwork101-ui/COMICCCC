@@ -1,22 +1,22 @@
 @echo off
-rem Comic OCR Studio 4.36 - Windows offline EXE / Setup builder launcher.
+rem HaSaYa Studio 4.55 - Windows offline EXE / Setup builder launcher.
 rem The questions (which package, which output folder) are asked by the builder itself
 rem (Python), not by this file: the old `set /p` menu died silently on the seller's
 rem machine right after the output-folder question.
 rem Every run is recorded in python_app\build_offline.log
 setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul 2>nul
-title Build Offline EXE ^& Setup - Comic OCR Studio 4.36
+title Build Offline EXE ^& Setup - HaSaYa Studio 4.55
 
 cd /d "%~dp0"
 set "APP_DIR=%CD%"
 set "VENV_PY=%APP_DIR%\.venv\Scripts\python.exe"
 set "WHEELHOUSE_DIR=%APP_DIR%\wheelhouse"
 set "DEFAULT_OUT_DIR=%APP_DIR%\dist"
-set "APP_VERSION=4.36"
+set "APP_VERSION=4.55"
 
 echo ====================================================================
-echo   Comic OCR Studio 4.36 - Offline Windows EXE ^& Setup Builder
+echo   HaSaYa Studio 4.55 - Offline Windows EXE ^& Setup Builder
 echo ====================================================================
 echo.
 
@@ -53,29 +53,29 @@ if errorlevel 1 (
 "%VENV_PY%" -c "import PyInstaller" >nul 2>nul
 if errorlevel 1 goto pyi_failed
 
-echo [3/4] Building ComicOCRStudio.exe and 1-click Offline Windows Setup...
+echo [3/4] Building HaSaYaStudio.exe and 1-click Offline Windows Setup...
 "%VENV_PY%" -m offline_packaging.build_offline_package %EXTRA_FLAGS% --output-dir "%OUT_DIR%"
 if errorlevel 1 goto build_failed
 
 echo [4/4] Checking the produced files...
-if not exist "%OUT_DIR%\ComicOCRStudio" (
+if not exist "%OUT_DIR%\HaSaYaStudio" (
   echo.
-  echo [ERROR] The standalone app folder was not created: "%OUT_DIR%\ComicOCRStudio"
+  echo [ERROR] The standalone app folder was not created: "%OUT_DIR%\HaSaYaStudio"
   goto build_failed
 )
 set "SETUP_EXE="
-if exist "%OUT_DIR%\ComicOCRStudio-Offline-Setup-%APP_VERSION%.exe" set "SETUP_EXE=%OUT_DIR%\ComicOCRStudio-Offline-Setup-%APP_VERSION%.exe"
-if exist "%OUT_DIR%\ComicOCRStudio-Offline-Setup-%APP_VERSION%-Full-NMT.exe" set "SETUP_EXE=%OUT_DIR%\ComicOCRStudio-Offline-Setup-%APP_VERSION%-Full-NMT.exe"
+if exist "%OUT_DIR%\HaSaYaStudio-Offline-Setup-%APP_VERSION%.exe" set "SETUP_EXE=%OUT_DIR%\HaSaYaStudio-Offline-Setup-%APP_VERSION%.exe"
+if exist "%OUT_DIR%\HaSaYaStudio-Offline-Setup-%APP_VERSION%-Full-NMT.exe" set "SETUP_EXE=%OUT_DIR%\HaSaYaStudio-Offline-Setup-%APP_VERSION%-Full-NMT.exe"
 
 echo.
 echo ====================================================================
 echo   BUILD COMPLETE!
-echo   Standalone app : "%OUT_DIR%\ComicOCRStudio\ComicOCRStudio.exe"
+echo   Standalone app : "%OUT_DIR%\HaSaYaStudio\HaSaYaStudio.exe"
 if defined SETUP_EXE (
   echo   Offline Setup : "%SETUP_EXE%"
 ) else (
-  if exist "%OUT_DIR%\ComicOCRStudio-Offline-Setup-%APP_VERSION%.zip" (
-    echo   Offline Setup : "%OUT_DIR%\ComicOCRStudio-Offline-Setup-%APP_VERSION%.zip"
+  if exist "%OUT_DIR%\HaSaYaStudio-Offline-Setup-%APP_VERSION%.zip" (
+    echo   Offline Setup : "%OUT_DIR%\HaSaYaStudio-Offline-Setup-%APP_VERSION%.zip"
     echo   [note] Inno Setup is not installed on this computer, so only the .zip archive could be built.
     echo          Install "Inno Setup 6" and run this builder again to get a real .exe installer.
   ) else (
