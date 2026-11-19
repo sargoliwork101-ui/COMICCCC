@@ -4649,7 +4649,7 @@ function check(name, condition, detail = '') {
       const detail = document.getElementById('serverAlertDetail').textContent || '';
       window.fetch = async (url, opts = {}) => {
         const parsed = new URL(url, 'http://127.0.0.1:8765');
-        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.59' });
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.60' });
         return origFetch(url, opts);
       };
       document.getElementById('serverAlertRetry').click();
@@ -4861,7 +4861,7 @@ function check(name, condition, detail = '') {
             const u = String(url);
             if (u.endsWith('/api/health')) {
               healthProbesDuringRetry += 1;
-              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ name: 'HaSaYa Studio', version: '4.59' }) };
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ name: 'HaSaYa Studio', version: '4.60' }) };
             }
             if (u.endsWith('/state') && options.method === 'PUT') {
               return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => state.project, text: async () => JSON.stringify(state.project) };
@@ -4964,7 +4964,7 @@ function check(name, condition, detail = '') {
           window.fetch = async (url, options = {}) => {
             const u = String(url);
             if (u.endsWith('/api/health')) {
-              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ name: 'HaSaYa Studio', version: '4.59' }) };
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ name: 'HaSaYa Studio', version: '4.60' }) };
             }
             if (u.endsWith('/state') && options.method === 'PUT') {
               return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => state.project };
@@ -5021,6 +5021,12 @@ function check(name, condition, detail = '') {
           await heartbeat();
           const hiddenAfterRecovery = $('serverAlert').classList.contains('hidden');
 
+          // HTTP 503 with an explicit OcrError detail must NOT be disguised as "Failed to fetch"
+          const realOcrErr = new Error('POST /api/projects/p/ocr — HTTP 503: موتور آماده نیست');
+          realOcrErr.status = 503;
+          realOcrErr.detailText = 'موتور آماده نیست';
+          const real503MaskedAsConnectionLost = isConnectionLostError(realOcrErr) || isTransientNetworkError(realOcrErr);
+
           return {
             asyncDone,
             jobStarts,
@@ -5029,6 +5035,7 @@ function check(name, condition, detail = '') {
             shownAfterOneMiss,
             shownAfterTwoMisses,
             hiddenAfterRecovery,
+            real503MaskedAsConnectionLost,
           };
         } finally {
           window.fetch = origFetch;
@@ -5039,14 +5046,15 @@ function check(name, condition, detail = '') {
       })()
     `, context);
     check(
-      'v4.59 async OCR job queue recovers from poll Failed to fetch without restarting OCR, and heartbeat uses 2-strike confirmation + auto-recovery',
+      'v4.60 async OCR job queue recovers from poll Failed to fetch without restarting OCR, and heartbeat uses 2-strike confirmation + auto-recovery',
       v459AsyncAndHeartbeatCheck.asyncDone === true
         && v459AsyncAndHeartbeatCheck.jobStarts === 1
         && v459AsyncAndHeartbeatCheck.pollCalls >= 3
         && v459AsyncAndHeartbeatCheck.pollNetworkFails === 1
         && v459AsyncAndHeartbeatCheck.shownAfterOneMiss === false
         && v459AsyncAndHeartbeatCheck.shownAfterTwoMisses === true
-        && v459AsyncAndHeartbeatCheck.hiddenAfterRecovery === true,
+        && v459AsyncAndHeartbeatCheck.hiddenAfterRecovery === true
+        && v459AsyncAndHeartbeatCheck.real503MaskedAsConnectionLost === false,
       JSON.stringify(v459AsyncAndHeartbeatCheck),
     );
   }

@@ -1,5 +1,22 @@
 # تاریخچهٔ تغییرات
 
+## HaSaYa Studio 4.60 — 2026-11-19
+
+- **تکمیل بازیابی خودکار موتورهای ایزوله و جداسازی خطای واقعی OCR از `Failed to fetch`**:
+  - **بازیابی خودکار پردازشگرهای ایزوله (`IsolatedOcrEngine.recognize` در `ocr_managed.py`)**: اگر پردازشگر جداگانهٔ مدل‌هایی مثل `hezar-ocr`، `surya` یا `paddleocr-vl-1-6` وسط دستهٔ چندصفحه‌ای به‌شکل غیرمنتظره بسته شود، سیستم به‌طور خودکار پردازشگر جدید را راه‌اندازی و همان صفحه را یک‌بار دیگر تکرار می‌کند (مگر آنکه کاربر خودِ عملیات را لغو کرده باشد).
+  - **جلوگیری از پنهان‌شدن خطاهای `503` پشت برچسب کاذب `Failed to fetch` (`app.js`)**: تابع جدید `isConnectionLostError(error)` فقط خطاهای واقعی قطع ارتباط (`status === 0`، `502`، `504` یا `Failed to fetch`) را با پیام «ارتباط با سرور محلی قطع شد» گزارش می‌کند و دیگر پیام‌های واقعی خطای OCR (`HTTP 503` همراه با جزئیات سرور) را به‌اشتباه به قطع ارتباط تبدیل نمی‌کند؛ همچنین `isTransientNetworkError` تنها خطاهای `503` قفل موقت ذخیره‌سازی را retry می‌کند.
+  - **اتصال کامل `AbortSignal` به رندر و آپلود صفحه‌های پس از OCR (`app.js`)**: `renderImagesText` و `renderAndUploadNow` اکنون `signal` لغو را به درخواست‌های `content`، `rendered` و `revert` می‌رسانند و دریافت تصویر را با `cache: 'no-store'` انجام می‌دهند.
+- **افزودن تست بازگشت (`test_app.py` و `app_ui.test.js`)**:
+  - `test_v460_isolated_engine_crash_recovery` در `test_app.py` (راه‌اندازی مجدد خودکار `IsolatedOcrEngine` هنگام بسته‌شدن ناگهانی پردازشگر).
+  - بررسی `real503MaskedAsConnectionLost === false` در `app_ui.test.js`.
+- **افزایش نسخه**: نسخهٔ HaSaYa Studio و پنل فروشنده به `4.60` (`4.6.0`) افزایش یافت (افزونهٔ کروم بدون تغییر در `3.4.0` ماند).
+- **نتیجهٔ بررسی‌ها**:
+  - `git diff --check`: موفق و بدون خطا.
+  - `npm test` (۱۷ مجموعه تست افزونه و مبدل‌ها): کامل موفق شدند.
+  - `node python_app/tests/app_ui.test.js`: کامل موفق شد.
+  - `eslint` روی `app.js`، `help-guide.js` و `app_ui.test.js`: بدون خطا موفق شد.
+  - `pytest` (`test_license_guard.py`، `test_sessions.py`، `test_app.py`، `test_branding.py`، `test_launcher_startup.py`، `test_windows_launcher.py`، `test_ocr.py`): ۳۱۵ تست موفق و ۲ تست اختیاری ردشده (`skipped`)، ۰ خطا.
+
 ## HaSaYa Studio 4.59 — 2026-11-19
 
 - **حل ریشه‌ای خطای `Failed to fetch` / قطع ارتباط سرور با معماری استاندارد روز**:

@@ -476,11 +476,19 @@ async function retryServerConnection() {
     if (btn) { btn.disabled = false; btn.textContent = label || 'تلاش دوباره'; }
   }
 }
-function isTransientNetworkError(error) {
+function isConnectionLostError(error) {
   if (!error || error.cancelled || error.name === 'AbortError') return false;
-  if (error.status === 0 || error.status === 502 || error.status === 503 || error.status === 504) return true;
+  if (error.status === 0 || error.status === 502 || error.status === 504) return true;
   const msg = String(error.message || error || '');
   return /failed to fetch|networkerror|load failed|خطای ارتباط با برنامه/i.test(msg);
+}
+function isTransientNetworkError(error) {
+  if (!error || error.cancelled || error.name === 'AbortError') return false;
+  if (isConnectionLostError(error)) return true;
+  if (error.status === 503) {
+    return !error.detailText || /موقتاً|در حال ذخیره‌سازی/.test(error.detailText);
+  }
+  return false;
 }
 async function waitForServerReady({ signal = null, checkCancel = null, maxProbes = 3, probeGapMs = 450 } = {}) {
   for (let probe = 0; probe < maxProbes; probe += 1) {
@@ -2808,6 +2816,7 @@ async function runOcr() {
           [pageId],
           (done, tot) => applyActiveJobProgress((idx + 0.80 + 0.20 * (done / Math.max(1, tot))) / totalPages),
           checkOcrNotCancelled,
+          { signal: controller.signal },
         );
         applyActiveJobProgress(completedOcrPages / totalPages);
       }
@@ -2845,7 +2854,7 @@ async function runOcr() {
     }
     reportOcrError(error);
     const rawMsg = error?.message || String(error || 'خطای نامشخص در OCR');
-    const friendlyMsg = isTransientNetworkError(error)
+    const friendlyMsg = isConnectionLostError(error)
       ? 'ارتباط با سرور محلی قطع شد (Failed to fetch). دوباره تلاش کنید.'
       : rawMsg;
     showReportDialog('خطا در OCR', [
@@ -3889,7 +3898,7 @@ async function decodeProjectImageBitmap(rawBlob, item) {
   }
   return bitmap;
 }
-async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false, checkCancel = null } = {}) {
+async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false, checkCancel = null, signal = null } = {}) {
   const key = `${projectId}:${item.id}`;
   const blocks = overlayBlocks(item, mode);
   const active = blocks.some((block) => block.enabled && (hasRenderableText(block) || hasRenderableShapeFill(block))) || hasActiveWatermark(item?.watermark);
@@ -3901,9 +3910,10 @@ async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false
     const reverted = await runWithNetworkRetry(
       ({ isLastAttempt }) => api(`/api/projects/${projectId}/images/${item.id}/revert`, {
         method: 'POST',
+        ...(signal ? { signal } : {}),
         suppressServerAlert: !isLastAttempt,
       }),
-      { checkCancel },
+      { checkCancel, signal },
     );
     imagePreviewVersions.set(key, ++previewRevision);
     renderedPageSignatures.set(key, signature);
@@ -3919,8 +3929,13 @@ async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false
       const contentPath = `/api/projects/${projectId}/images/${item.id}/content`;
       let response;
       try {
-        response = await fetch(contentPath);
+        response = await fetch(contentPath, { cache: 'no-store', ...(signal ? { signal } : {}) });
       } catch (cause) {
+        if (cause?.name === 'AbortError' || signal?.aborted) {
+          const abortErr = new Error('عملیات توسط کاربر لغو شد.');
+          abortErr.name = 'AbortError'; abortErr.cancelled = true;
+          throw abortErr;
+        }
         if (isLastAttempt && isTransientNetworkError(cause)) showServerUnreachable(`GET ${contentPath}`);
         throw cause;
       }
@@ -3928,11 +3943,16 @@ async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false
       try {
         return await response.blob();
       } catch (cause) {
+        if (cause?.name === 'AbortError' || signal?.aborted) {
+          const abortErr = new Error('عملیات توسط کاربر لغو شد.');
+          abortErr.name = 'AbortError'; abortErr.cancelled = true;
+          throw abortErr;
+        }
         if (isLastAttempt && isTransientNetworkError(cause)) showServerUnreachable(`GET ${contentPath}`);
         throw cause;
       }
     },
-    { checkCancel },
+    { checkCancel, signal },
   );
   let bitmap = null;
   try {
@@ -3966,9 +3986,10 @@ async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false
         method: 'POST',
         headers: { 'Content-Type': 'image/png' },
         body: pngBlob,
+        ...(signal ? { signal } : {}),
         suppressServerAlert: !isLastAttempt,
       }),
-      { checkCancel },
+      { checkCancel, signal },
     );
   } finally {
     pngBlob = null;

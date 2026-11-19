@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.59"
+    assert health.json()["version"] == "4.60"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -3344,7 +3344,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.59"
+    assert APP_VERSION == "4.60"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "HaSaYaStudio"
@@ -5847,7 +5847,7 @@ def test_v457_browser_close_cancels_active_jobs_and_runtime_avoids_opencl_and_no
 
 
 def test_v459_async_ocr_job_queue_and_builtin_worker_crash_recovery(client, monkeypatch, tmp_path):
-    """v4.59: async OCR jobs return 202 + poll to done/cancelled, and built-in worker auto-recovers on crash with CPU fallback."""
+    """v4.60: async OCR jobs return 202 + poll to done/cancelled, and built-in worker auto-recovers on crash with CPU fallback."""
     import sys
     import time
     import comic_studio.main as main_mod
@@ -5933,3 +5933,66 @@ def test_v459_async_ocr_job_queue_and_builtin_worker_crash_recovery(client, monk
     finally:
         img.close()
         worker.stop()
+
+
+def test_v460_isolated_engine_crash_recovery(monkeypatch, tmp_path):
+    """v4.60: IsolatedOcrEngine (hezar-ocr/surya/paddle) restarts and retries once if its worker dies unexpectedly."""
+    import io as _io
+    import json as _json
+    import comic_studio.ocr as ocr_mod
+    import comic_studio.ocr_managed as managed_mod
+
+    iso = ocr_mod.EngineRegistry().get("hezar-ocr")
+    monkeypatch.setattr(type(iso), "runtime_installed", property(lambda self: True))
+    monkeypatch.setattr(type(iso), "model_ready", property(lambda self: True))
+
+    calls = {"ensure": 0}
+
+    class _FakeStream:
+        def __init__(self, lines=None):
+            self._lines = list(lines or [])
+            self.written = []
+            self.closed = False
+
+        def write(self, data):
+            self.written.append(data)
+
+        def flush(self):
+            pass
+
+        def readline(self):
+            return self._lines.pop(0) if self._lines else ""
+
+        def close(self):
+            self.closed = True
+
+    class _FakeProc:
+        def __init__(self, lines):
+            self.stdin = _FakeStream()
+            self.stdout = _FakeStream(lines)
+            self.stderr = _io.StringIO("")
+            self.pid = 99999
+
+        def poll(self):
+            return None
+
+    def _fake_ensure_worker():
+        calls["ensure"] += 1
+        if calls["ensure"] == 1:
+            return _FakeProc([])  # Simulates unexpected EOF / crash on attempt 0
+        return _FakeProc([
+            _json.dumps({"ok": True, "lines": [{"text": "متن بازیابی‌شده", "confidence": 0.94, "polygon": [[1, 1], [30, 1], [30, 20], [1, 20]]}]}) + "\n"
+        ])
+
+    monkeypatch.setattr(iso, "_ensure_worker", _fake_ensure_worker)
+    monkeypatch.setattr(managed_mod, "_kill_process_tree", lambda proc: None)
+    monkeypatch.setattr(managed_mod, "is_job_cancelled", lambda: False)
+    img = Image.new("RGB", (64, 64), "white")
+    try:
+        lines = iso.recognize(img, "fas")
+        assert calls["ensure"] == 2
+        assert len(lines) == 1
+        assert "متن" in lines[0].text
+    finally:
+        img.close()
+        iso.close()

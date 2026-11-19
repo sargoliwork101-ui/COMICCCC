@@ -3,7 +3,7 @@ setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul
 cd /d "%~dp0"
 
-title HaSaYa Studio 4.59 - Seller License Generator
+title HaSaYa Studio 4.60 - Seller License Generator
 
 rem Seller-only launcher (never shipped inside customer dist\HaSaYaStudio builds).
 rem The seller tool now lives in its own folder; the main app sits one level up.

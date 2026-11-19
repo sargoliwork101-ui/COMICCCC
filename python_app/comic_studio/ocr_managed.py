@@ -3306,46 +3306,56 @@ class IsolatedOcrEngine:
                     rgb_img.close()
             self._cancel_idle_timer()
             with self._worker_lock:
-                if self._cancel_ocr.is_set() or is_job_cancelled():
-                    raise JobCancelledError("عملیات OCR به درخواست کاربر لغو شد.")
-                proc = self._ensure_worker()
-                assert proc.stdin is not None and proc.stdout is not None
-                req = {"imagePath": str(tmp_path), "language": language, "regions": regions, "pageMode": page_mode}
-                try:
-                    proc.stdin.write(json.dumps(req) + "\n")
-                    proc.stdin.flush()
-                    raw_resp = proc.stdout.readline().strip()
-                except Exception:
-                    raw_resp = ""
-                if self._cancel_ocr.is_set() or is_job_cancelled():
-                    with self._proc_ref_lock:
-                        if self._worker_proc is proc:
-                            self._worker_proc = None
-                    _kill_process_tree(proc)
-                    for stream in (proc.stdin, proc.stdout, proc.stderr):
-                        if stream is not None:
-                            with contextlib.suppress(Exception):
-                                stream.close()
-                    if self.id == "surya":
-                        _stop_lingering_surya_server()
-                    raise JobCancelledError("عملیات OCR به درخواست کاربر لغو شد.")
-                if not raw_resp:
-                    _kill_process_tree(proc)
-                    for stream in (proc.stdin, proc.stdout, proc.stderr):
-                        if stream is not None:
-                            try:
-                                stream.close()
-                            except Exception:
-                                pass
-                    with self._proc_ref_lock:
-                        if self._worker_proc is proc:
-                            self._worker_proc = None
-                    if self.id == "surya":
-                        _stop_lingering_surya_server()
-                    err_hint = ("\n".join(self._worker_stderr_tail))[-600:]
-                    suffix = f": {err_hint}" if err_hint else ""
-                    raise self._error_cls(f"پردازشگر مدل {self.id} به شکل غیرمنتظره‌ای بسته شد.{suffix}")
-                payload = json.loads(raw_resp)
+                payload: dict[str, Any] | None = None
+                for attempt in range(2):
+                    if self._cancel_ocr.is_set() or is_job_cancelled():
+                        raise JobCancelledError("عملیات OCR به درخواست کاربر لغو شد.")
+                    proc = self._ensure_worker()
+                    assert proc.stdin is not None and proc.stdout is not None
+                    req = {"imagePath": str(tmp_path), "language": language, "regions": regions, "pageMode": page_mode}
+                    try:
+                        proc.stdin.write(json.dumps(req) + "\n")
+                        proc.stdin.flush()
+                        raw_resp = proc.stdout.readline().strip()
+                    except Exception:
+                        raw_resp = ""
+                    if self._cancel_ocr.is_set() or is_job_cancelled():
+                        with self._proc_ref_lock:
+                            if self._worker_proc is proc:
+                                self._worker_proc = None
+                        _kill_process_tree(proc)
+                        for stream in (proc.stdin, proc.stdout, proc.stderr):
+                            if stream is not None:
+                                with contextlib.suppress(Exception):
+                                    stream.close()
+                        if self.id == "surya":
+                            _stop_lingering_surya_server()
+                        raise JobCancelledError("عملیات OCR به درخواست کاربر لغو شد.")
+                    if not raw_resp:
+                        _kill_process_tree(proc)
+                        for stream in (proc.stdin, proc.stdout, proc.stderr):
+                            if stream is not None:
+                                try:
+                                    stream.close()
+                                except Exception:
+                                    pass
+                        with self._proc_ref_lock:
+                            if self._worker_proc is proc:
+                                self._worker_proc = None
+                        if self.id == "surya":
+                            _stop_lingering_surya_server()
+                        if attempt == 0:
+                            emit(
+                                f"پردازشگر مدل {self.id} ناگهانی بسته شد؛ در حال راه‌اندازی مجدد و تلاش دوباره…",
+                                "warning",
+                            )
+                            continue
+                        err_hint = ("\n".join(self._worker_stderr_tail))[-600:]
+                        suffix = f": {err_hint}" if err_hint else ""
+                        raise self._error_cls(f"پردازشگر مدل {self.id} به شکل غیرمنتظره‌ای بسته شد.{suffix}")
+                    payload = json.loads(raw_resp)
+                    break
+                assert payload is not None
                 if not payload.get("ok"):
                     raise self._error_cls(f"خواندن متن با موتور {self.id} ناموفق بود: {payload.get('error')}")
                 persian_norm = None
