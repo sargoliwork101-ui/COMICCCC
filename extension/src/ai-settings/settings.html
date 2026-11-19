@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>تنظیمات ترجمه — HASAYA</title>
+  <link rel="stylesheet" href="../shared/style.css">
+  <link rel="stylesheet" href="settings.css">
+</head>
+<body>
+  <main class="settings-shell">
+    <header class="settings-heading">
+      <a class="back-link" href="../popup/popup.html" aria-label="بازگشت به افزونه">←</a>
+      <div>
+        <span class="eyebrow">HASAYA</span>
+        <h1>تنظیمات API هوش مصنوعی</h1>
+        <p>سرویس، مدل و کلیدهایی را که می‌خواهید افزونه برای ترجمه استفاده کند اینجا تنظیم کنید.</p>
+      </div>
+    </header>
+
+    <section class="settings-card" aria-labelledby="aiSettingsTitle">
+      <h2 id="aiSettingsTitle">موتور ترجمهٔ صفحه</h2>
+      <div class="field">
+        <label for="pageEngine">انتخاب موتور ترجمه</label>
+        <select id="pageEngine" class="sel">
+          <option value="google">فقط Google Translate</option>
+          <option value="mymemory">فقط MyMemory</option>
+          <option value="ai">هوش مصنوعی (سرویس انتخابی پایین)</option>
+        </select>
+        <p class="help">این انتخاب برای ترجمهٔ کپی صفحهٔ وب است. سرویس و مدل هوش مصنوعی را جداگانه انتخاب کنید.</p>
+      </div>
+      <label class="toggle-row" for="aiEnabled">
+        <input type="checkbox" id="aiEnabled">
+        <span><strong>استفاده از هوش مصنوعی برای ترجمهٔ متن داخل تصویرها</strong><small>این گزینه مربوط به ترجمهٔ OCR تصاویر است؛ موتور ترجمهٔ صفحه از فهرست بالا انتخاب می‌شود.</small></span>
+      </label>
+      <div id="aiProviderSettings">
+      <div class="field">
+        <label for="provider">سرویس هوش مصنوعی</label>
+        <select id="provider" class="sel">
+          <option value="gemini">Google Gemini</option>
+          <option value="openai">OpenAI</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="avalai">AvalAI</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="model">نام مدل در سرویس انتخاب‌شده</label>
+        <input id="model" type="text" dir="ltr" spellcheck="false" autocomplete="off">
+        <p class="help">پیش‌فرض Google Gemini برابر <code dir="ltr">gemini-flash-latest</code> است. نام مدل‌های قدیمیِ پیش‌فرض خودکار به این مدل به‌روز می‌شود.</p>
+      </div>
+
+      <div class="field profile-heading">
+        <div>
+          <label>کلیدهای API</label>
+          <p class="help">می‌توانید چند کلید ثبت کنید؛ افزونه آن‌ها را به ترتیب امتحان می‌کند. «تست» یک جملهٔ ثابت را برای سنجش تولید ترجمه می‌فرستد، نه متن صفحه یا کمیک.</p>
+        </div>
+        <button id="addProfile" class="btn secondary" type="button">افزودن کلید</button>
+      </div>
+      <div id="profiles" class="profiles" aria-live="polite"></div>
+      <p id="keyHelp" class="help"></p>
+
+      <div class="field">
+        <label for="skill">راهنمای سبک ترجمهٔ هوش مصنوعی (اختیاری)</label>
+        <textarea id="skill" rows="6" placeholder="لحن و شیوهٔ ترجمهٔ دلخواهتان را بنویسید"></textarea>
+      </div>
+      </div>
+      <p class="privacy-note">کلیدها در فضای محلی افزونه در همین مرورگر ذخیره می‌شوند. درخواست‌ها با شبکهٔ Chrome ارسال می‌شوند؛ اینکه یک VPN افزونه‌ای آن‌ها را از تونل عبور دهد به روش و تنظیمات همان VPN بستگی دارد و تضمین‌شده نیست. اگر اتصال ناموفق شد، دسترسی به سرویس را در تنظیمات VPN بررسی کنید. پاسخ‌ندادن سرویس پس از مهلت محدود به خطا تبدیل می‌شود تا برنامه گیر نکند. هنگام ترجمه، متن صفحه برای سرویس انتخاب‌شده فرستاده می‌شود؛ HTML کامل، نشانی صفحه و کلید API در متن ترجمه قرار نمی‌گیرند. از فرستادن اطلاعات حساس خودداری کنید.</p>
+      <p id="settingsStatus" class="status" role="status" aria-live="polite"></p>
+      <div class="actions">
+        <button id="saveSettings" class="btn" type="button">ذخیرهٔ تنظیمات</button>
+      </div>
+    </section>
+  </main>
+  <script src="../core/ai-translate.js"></script>
+  <script src="settings.js"></script>
+</body>
+</html>
