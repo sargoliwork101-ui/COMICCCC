@@ -1,4 +1,4 @@
-"""Build standalone Windows `.exe` (`ComicOCRStudio.exe`) and 1-click offline Setup `.exe`.
+"""Build standalone Windows `.exe` (`HaSaYaStudio.exe`) and 1-click offline Setup `.exe`.
 
 Supports two bundle modes (matching user preference):
   1. Default (`--base`): Standalone app + bundled base RapidOCR models (100% offline OCR, compact size).
@@ -6,8 +6,8 @@ Supports two bundle modes (matching user preference):
      (100% offline OCR + Persian/English translation with zero internet access).
 
 Produces:
-  - `dist/ComicOCRStudio/ComicOCRStudio.exe` (PyInstaller `onedir` fast-start GUI executable)
-  - `dist/ComicOCRStudio-Offline-Setup-<version>.exe` (via Inno Setup `ISCC.exe` if present,
+  - `dist/HaSaYaStudio/HaSaYaStudio.exe` (PyInstaller `onedir` fast-start GUI executable)
+  - `dist/HaSaYaStudio-Offline-Setup-<version>.exe` (via Inno Setup `ISCC.exe` if present,
     falling back automatically to Windows built-in `.NET` `csc.exe` self-extracting GUI installer)
   - Optional `wheelhouse/` download (`--download-wheelhouse`) for portable `.bat` offline installs.
 """
@@ -31,10 +31,12 @@ REPO_PY_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_PY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_PY_ROOT))
 
-from comic_studio import APP_VERSION  # noqa: E402
+from comic_studio import APP_VERSION, __version__  # noqa: E402
 from comic_studio.paths import models_dir  # noqa: E402
 
 SFX_MAGIC = b"COS405PK"
+# چهاربخشی برای فرادادهٔ فایل نصاب C# (رشتهٔ «4.3.9» → «4.3.9.0») تا با هر بامپ نسخه خودکار به‌روز شود.
+SFX_ASSEMBLY_VERSION = f"{__version__}.0"
 
 
 class BuildError(RuntimeError):
@@ -107,6 +109,10 @@ PYPI_FALLBACK_MIRRORS: tuple[tuple[str, str], ...] = (
 )
 PIP_TIMEOUT_SECONDS = 120
 PIP_RETRIES = 10
+# Whole-process limit for the PyInstaller install.  pip's own timeout only
+# covers one socket read; a mirror that accepts the connection and then goes
+# silent used to freeze the builder forever with no message at all.
+PYINSTALLER_INSTALL_TIMEOUT_SECONDS = 15 * 60
 
 
 CSHARP_SFX_INSTALLER = r"""
@@ -119,9 +125,9 @@ using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyTitle("Comic OCR Studio Offline Setup")]
-[assembly: System.Reflection.AssemblyProduct("Comic OCR Studio")]
-[assembly: System.Reflection.AssemblyVersion("4.3.6.0")]
+[assembly: System.Reflection.AssemblyTitle("HaSaYa Studio Offline Setup")]
+[assembly: System.Reflection.AssemblyProduct("HaSaYa Studio")]
+[assembly: System.Reflection.AssemblyVersion("__APP_ASSEMBLY_VERSION__")]
 
 namespace ComicStudioInstaller {
     static class Program {
@@ -140,12 +146,12 @@ namespace ComicStudioInstaller {
             }
             string defaultDir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Programs", "ComicOCRStudio"
+                "Programs", "HaSaYaStudio"
             );
             string targetDir = string.IsNullOrWhiteSpace(customDir) ? defaultDir : customDir;
             if (silent) {
                 ExtractPayload(Application.ExecutablePath, targetDir, null);
-                CreateShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Comic OCR Studio.lnk"), Path.Combine(targetDir, "ComicOCRStudio.exe"), targetDir);
+                CreateShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "HaSaYa Studio.lnk"), Path.Combine(targetDir, "HaSaYaStudio.exe"), targetDir);
                 return 0;
             }
             Application.EnableVisualStyles();
@@ -172,7 +178,7 @@ namespace ComicStudioInstaller {
                     throw new InvalidOperationException("محدودهٔ آرشیو نصاب نامعتبر است.");
 
                 Directory.CreateDirectory(destDir);
-                string tempZip = Path.Combine(Path.GetTempPath(), "ComicOCRStudio-Setup-" + Guid.NewGuid().ToString("N") + ".zip");
+                string tempZip = Path.Combine(Path.GetTempPath(), "HaSaYaStudio-Setup-" + Guid.NewGuid().ToString("N") + ".zip");
                 try {
                     fs.Seek(zipOffset, SeekOrigin.Begin);
                     using (var outZip = new FileStream(tempZip, FileMode.Create, FileAccess.Write, FileShare.None)) {
@@ -224,7 +230,7 @@ namespace ComicStudioInstaller {
                 shortcut.TargetPath = targetExe;
                 shortcut.WorkingDirectory = workDir;
                 shortcut.IconLocation = targetExe + ",0";
-                shortcut.Description = "Comic OCR Studio - Offline OCR & Translation";
+                shortcut.Description = "HaSaYa Studio - Offline OCR & Translation";
                 shortcut.Save();
             } catch { }
         }
@@ -241,7 +247,7 @@ namespace ComicStudioInstaller {
         private readonly Button browseBtn;
 
         public SetupForm(string initialDir) {
-            Text = "نصب آفلاین Comic OCR Studio " + "__APP_VERSION__";
+            Text = "نصب آفلاین HaSaYa Studio " + "__APP_VERSION__";
             Size = new Size(560, 340);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
@@ -252,7 +258,7 @@ namespace ComicStudioInstaller {
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
             var title = new Label {
-                Text = "نصاب آفلاین و یک‌کلیکی Comic OCR Studio نسخهٔ __APP_VERSION__",
+                Text = "نصاب آفلاین و یک‌کلیکی HaSaYa Studio نسخهٔ __APP_VERSION__",
                 Font = new Font("Tahoma", 11f, FontStyle.Bold),
                 AutoSize = false,
                 Bounds = new Rectangle(20, 16, 505, 28)
@@ -277,9 +283,9 @@ namespace ComicStudioInstaller {
                 Bounds = new Rectangle(20, 100, 98, 28)
             };
             browseBtn.Click += (s, e) => {
-                using (var dlg = new FolderBrowserDialog { SelectedPath = dirBox.Text, Description = "پوشهٔ نصب Comic OCR Studio را انتخاب کنید" }) {
+                using (var dlg = new FolderBrowserDialog { SelectedPath = dirBox.Text, Description = "پوشهٔ نصب HaSaYa Studio را انتخاب کنید" }) {
                     if (dlg.ShowDialog(this) == DialogResult.OK && !string.IsNullOrWhiteSpace(dlg.SelectedPath))
-                        dirBox.Text = Path.Combine(dlg.SelectedPath, "ComicOCRStudio");
+                        dirBox.Text = Path.Combine(dlg.SelectedPath, "HaSaYaStudio");
                 }
             };
             desktopChk = new CheckBox {
@@ -288,7 +294,7 @@ namespace ComicStudioInstaller {
                 Bounds = new Rectangle(20, 140, 505, 24)
             };
             launchChk = new CheckBox {
-                Text = "اجرای فوری Comic OCR Studio بلافاصله پس از پایان نصب",
+                Text = "اجرای فوری HaSaYa Studio بلافاصله پس از پایان نصب",
                 Checked = true,
                 Bounds = new Rectangle(20, 168, 505, 24)
             };
@@ -337,12 +343,12 @@ namespace ComicStudioInstaller {
                             }));
                         } catch { }
                     });
-                    string exeTarget = Path.Combine(dest, "ComicOCRStudio.exe");
+                    string exeTarget = Path.Combine(dest, "HaSaYaStudio.exe");
                     if (desktopChk.Checked) {
-                        Program.CreateShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Comic OCR Studio.lnk"), exeTarget, dest);
-                        string startPrograms = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "Comic OCR Studio");
+                        Program.CreateShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "HaSaYa Studio.lnk"), exeTarget, dest);
+                        string startPrograms = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "HaSaYa Studio");
                         Directory.CreateDirectory(startPrograms);
-                        Program.CreateShortcut(Path.Combine(startPrograms, "Comic OCR Studio.lnk"), exeTarget, dest);
+                        Program.CreateShortcut(Path.Combine(startPrograms, "HaSaYa Studio.lnk"), exeTarget, dest);
                     }
                     BeginInvoke((Action)(() => {
                         bar.Value = 100;
@@ -350,7 +356,7 @@ namespace ComicStudioInstaller {
                         if (launchChk.Checked && File.Exists(exeTarget)) {
                             try { Process.Start(new ProcessStartInfo(exeTarget) { WorkingDirectory = dest }); } catch { }
                         } else {
-                            MessageBox.Show(this, "نصب آفلاین Comic OCR Studio با موفقیت انجام شد.", "پایان نصب", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            MessageBox.Show(this, "نصب آفلاین HaSaYa Studio با موفقیت انجام شد.", "پایان نصب", MessageBoxButtons.OK, MessageBoxIcon.Information);
                         }
                         ExitCode = 0;
                         Close();
@@ -406,7 +412,19 @@ def download_wheelhouse(pyproject_path: Path, wheelhouse_dir: Path) -> Path:
         str(wheelhouse_dir),
         *reqs,
     ]
-    subprocess.check_call(cmd, cwd=str(REPO_PY_ROOT))
+    try:
+        subprocess.run(
+            cmd,
+            cwd=str(REPO_PY_ROOT),
+            check=True,
+            timeout=PYINSTALLER_INSTALL_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise BuildError(
+            "Downloading the wheelhouse did not finish in time and was stopped.\n"
+            "Check the internet connection and run the build again; a local "
+            "'python_app\\wheelhouse' folder with the wheels is used automatically."
+        ) from exc
     return wheelhouse_dir
 
 
@@ -451,7 +469,7 @@ def ensure_pyinstaller(python_exe: str | None = None) -> bool:
     """
     exe = python_exe or sys.executable
     if _pyinstaller_installed(exe):
-        print("[ok] PyInstaller is already installed in the build environment.")
+        say("[ok] PyInstaller is already installed in the build environment.")
         return True
 
     base_cmd = [
@@ -485,17 +503,24 @@ def ensure_pyinstaller(python_exe: str | None = None) -> bool:
         if index_url:
             cmd.extend(["--index-url", index_url])
         cmd.append(PYINSTALLER_SPEC)
-        print(f"[pyinstaller] Installing from {label} ...")
+        say(f"[pyinstaller] Installing from {label} ...")
         try:
-            completed = subprocess.run(cmd, check=False)
+            completed = subprocess.run(cmd, check=False, timeout=PYINSTALLER_INSTALL_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            say(
+                f"[warn] The install from {label} did not finish within "
+                f"{PYINSTALLER_INSTALL_TIMEOUT_SECONDS // 60} minutes and was stopped; "
+                "trying the next source."
+            )
+            continue
         except Exception as exc:
-            print(f"[warn] pip could not be started for {label}: {exc}")
+            say(f"[warn] pip could not be started for {label}: {exc}")
             continue
         if completed.returncode == 0:
-            print(f"[ok] PyInstaller installed from {label}.")
+            say(f"[ok] PyInstaller installed from {label}.")
             return True
-        print(f"[warn] PyInstaller install from {label} failed (exit {completed.returncode}).")
-    print(
+        say(f"[warn] PyInstaller install from {label} failed (exit {completed.returncode}).")
+    say(
         "[ERROR] Could not install PyInstaller. Internet access to pypi.org (or one of the public\n"
         "        mirrors) is required, or place the PyInstaller .whl file inside the folder\n"
         "        'python_app\\wheelhouse' and run the build again."
@@ -526,7 +551,7 @@ def verify_bundled_language_models(tess_dir: Path, *, allow_missing: bool = Fals
             "the full float32 tessdata_best file (~3.33 MB) is required for correct Persian"
         )
     if not problems:
-        print("[ok] Bundled Tesseract language files (eng + fas) are present and up to date.")
+        say("[ok] Bundled Tesseract language files (eng + fas) are present and up to date.")
         return
     message = (
         "The offline bundle would ship without usable Tesseract language files:\n"
@@ -541,6 +566,65 @@ def verify_bundled_language_models(tess_dir: Path, *, allow_missing: bool = Fals
     raise BuildError(message)
 
 
+def _default_engine_model_files() -> tuple[str, ...]:
+    """Model files of the engine the app uses by default (`rapidocr-v6`).
+
+    The app starts with PP-OCRv6 Small; the v5 models are only the extra
+    Persian/Arabic recognizer.  The v6 weights live inside the `rapidocr`
+    package (`rapidocr/models`) and are bundled by `--collect-all rapidocr`,
+    or they can be staged next to the other models.
+    """
+    from comic_studio.ocr import RapidEngine
+
+    names = tuple(RapidEngine("rapidocr-v6", "v6")._expected_models("eng"))
+    if names:
+        return names
+    return ("PP-OCRv6_det_small.onnx", "PP-OCRv6_rec_small.onnx")
+
+
+def _find_default_engine_models(staging_dir: Path) -> tuple[Path | None, list[str]]:
+    """Return (folder that holds the default engine models, missing file names)."""
+    expected = list(_default_engine_model_files())
+    candidates: list[Path] = []
+    # v4.42: also check the flat staged copy of the user models folder. The builder
+    # previously looked ONLY at a dedicated 'rapidocr-v6' sub-folder or the vendored
+    # 'rapidocr/models' package; if the PP-OCRv6 files were copied into the flat
+    # staged 'rapidocr' folder by `stage_bundled_models`, the build still failed with
+    # "no model files" even though they were bundled.
+    staged_v6 = staging_dir / "rapidocr-v6"
+    if staged_v6.is_dir():
+        candidates.append(staged_v6)
+    candidates.append(staging_dir / "rapidocr")
+    try:
+        from comic_studio.ocr_managed import models_dir as _models_dir
+        candidates.append(_models_dir() / "rapidocr-v6")
+    except Exception:
+        pass
+    try:
+        import rapidocr
+
+        candidates.append(Path(rapidocr.__file__).resolve().parent / "models")
+    except Exception:
+        pass
+    for candidate in candidates:
+        missing = [
+            name
+            for name in expected
+            if not (candidate / name).is_file() or (candidate / name).stat().st_size <= 0
+        ]
+        if not missing:
+            return candidate, []
+    missing = [
+        name
+        for name in expected
+        if not any(
+            (candidate / name).is_file() and (candidate / name).stat().st_size > 0
+            for candidate in candidates
+        )
+    ]
+    return (candidates[0] if candidates else None), missing
+
+
 def verify_bundled_ocr_models(staging_dir: Path, *, allow_missing: bool = False) -> None:
     """Fail the build when the bundled OCR models are missing.
 
@@ -548,6 +632,12 @@ def verify_bundled_ocr_models(staging_dir: Path, *, allow_missing: bool = False)
     Tesseract language files and happily shipped a bundle **without the RapidOCR
     models**, so the installed app started but could not read a single line of text.
     Now the OCR models are verified exactly like the language files.
+
+    v4.38: the check also covers the engine the app uses **by default**
+    (`rapidocr-v6`).  The old check only looked at the v5 models, so a build
+    machine with an older `rapidocr` package (or a missing package at all)
+    produced a bundle whose default engine could not read anything - while the
+    builder still reported success.
     """
     problems: list[str] = []
     rapid_dir = staging_dir / "rapidocr"
@@ -563,6 +653,12 @@ def verify_bundled_ocr_models(staging_dir: Path, *, allow_missing: bool = False)
         for language, rec_name in (("English", "latin_PP-OCRv5_rec_mobile.onnx"), ("Persian", "arabic_PP-OCRv5_rec_mobile.onnx")):
             if rec_name not in present:
                 problems.append(f"the {language} OCR model ({rec_name}) is missing")
+    default_dir, default_missing = _find_default_engine_models(staging_dir)
+    if default_missing:
+        problems.append(
+            "the default OCR engine of the app (PP-OCRv6 Small) has no model files: "
+            + ", ".join(default_missing)
+        )
     if problems:
         message = (
             "The offline bundle would ship without usable OCR models:\n"
@@ -576,6 +672,7 @@ def verify_bundled_ocr_models(staging_dir: Path, *, allow_missing: bool = False)
             return
         raise BuildError(message)
     say("[ok] Bundled RapidOCR models (detector + English + Persian) are present.")
+    say(f"[ok] Default engine models (PP-OCRv6 Small) are present in '{default_dir}'.")
 
 
 def stage_bundled_models(
@@ -603,13 +700,13 @@ def stage_bundled_models(
             try:
                 engine.download(lang)
             except Exception as exc:
-                print(f"[warn] RapidOCR model download for {lang} skipped/failed: {exc}")
+                say(f"[warn] RapidOCR model download for {lang} skipped/failed: {exc}")
         tess_engine = TesseractEngine()
         for lang in ("eng", "fas"):
             try:
                 tess_engine._download_language_file(lang)
             except Exception as exc:
-                print(f"[warn] Tesseract traineddata download for {lang} skipped/failed: {exc}")
+                say(f"[warn] Tesseract traineddata download for {lang} skipped/failed: {exc}")
     if rapid_src.is_dir():
         shutil.copytree(rapid_src, rapid_dst, dirs_exist_ok=True)
     if tess_src.is_dir():
@@ -676,7 +773,7 @@ def pyinstaller_command(
         "--optimize",
         "1",
         "--name",
-        "ComicOCRStudio",
+        "HaSaYaStudio",
         "--distpath",
         str(dist_dir),
         "--workpath",
@@ -702,7 +799,7 @@ def pyinstaller_command(
     for pkg in ("rapidocr", "onnxruntime", "ctranslate2", "sentencepiece", "pymupdf", "bidi"):
         try:
             if importlib.util.find_spec(pkg) is None:
-                print(f"[warn] Optional package '{pkg}' is not installed - it will not be bundled.")
+                say(f"[warn] Optional package '{pkg}' is not installed - it will not be bundled.")
                 continue
         except Exception:
             continue
@@ -735,7 +832,7 @@ def pyinstaller_command(
         "tensorflow",
         "paddle",
         "pytest",
-        "license_manager",
+        "license_tool",
     ):
         cmd.extend(["--exclude-module", excluded])
 
@@ -750,17 +847,19 @@ def write_offline_readme(target_dir: Path, *, include_nmt: bool) -> None:
         else "- موتور پایهٔ OCR آفلاین داخل بسته قرار دارد؛ مدل مترجم آفلاین را نیز هر زمان بخواهید از داخل برنامه می‌توانید اضافه کنید."
     )
     text = (
-        f"Comic OCR Studio v{APP_VERSION} — نسخهٔ اجرایی آفلاین ویندوز\r\n"
+        f"HaSaYa Studio v{APP_VERSION} — نسخهٔ اجرایی آفلاین ویندوز\r\n"
         "=============================================================\r\n\r\n"
         "روش اجرا (فقط یک کلیک):\r\n"
-        "  روی فایل ComicOCRStudio.exe دوبار کلیک کنید.\r\n"
+        "  روی فایل HaSaYaStudio.exe دوبار کلیک کنید.\r\n"
         "  برنامه بلافاصله سرور محلی را بالا آورده و در مرورگر شما باز می‌شود.\r\n\r\n"
         "ویژگی‌های بسته:\r\n"
         "  - بدون نیاز به نصب پایتون و بدون نیاز به اتصال اینترنت.\r\n"
         f"  {nmt_line}\r\n"
         "  - با بستن تب مرورگر، برنامه به‌صورت خودکار و تمیز بسته می‌شود.\r\n"
     )
-    (target_dir / "README-OFFLINE-FA.txt").write_text(text, encoding="utf-8")
+    # The BOM matters on Windows: without it Notepad shows the Persian text as
+    # broken characters. The TXT export of the program does the same thing.
+    (target_dir / "README-OFFLINE-FA.txt").write_text("\ufeff" + text, encoding="utf-8")
 
 
 def find_iscc() -> Path | None:
@@ -845,13 +944,13 @@ def build_windows_installer(
     icon_path: Path,
     suffix: str = "",
 ) -> Path:
-    base_name = f"ComicOCRStudio-Offline-Setup-{APP_VERSION}{suffix}"
+    base_name = f"HaSaYaStudio-Offline-Setup-{APP_VERSION}{suffix}"
     output_exe = dist_root / f"{base_name}.exe"
 
     iscc = find_iscc()
     iss_script = Path(__file__).resolve().parent / "ComicOCRStudio.iss"
     if iscc and iss_script.is_file():
-        print(f"[installer] Building Inno Setup installer with {iscc} ...")
+        say(f"[installer] Building Inno Setup installer with {iscc} ...")
         subprocess.check_call([
             str(iscc),
             f"/DAppVersion={APP_VERSION}",
@@ -865,15 +964,19 @@ def build_windows_installer(
             return output_exe
 
     payload_zip = dist_root / f"{base_name}.zip"
-    print(f"[installer] Compressing offline bundle archive {payload_zip.name} ...")
+    say(f"[installer] Compressing offline bundle archive {payload_zip.name} ...")
     zip_directory(app_dist_dir, payload_zip)
 
     csc = find_dotnet_csc()
     if csc:
-        print(f"[installer] Building native Windows GUI Setup .exe via {csc} ...")
+        say(f"[installer] Building native Windows GUI Setup .exe via {csc} ...")
         cs_source = build_root / "SetupStub.cs"
         stub_exe = build_root / "SetupStub.exe"
-        cs_code = CSHARP_SFX_INSTALLER.replace("__APP_VERSION__", APP_VERSION)
+        cs_code = (
+            CSHARP_SFX_INSTALLER
+            .replace("__APP_VERSION__", APP_VERSION)
+            .replace("__APP_ASSEMBLY_VERSION__", SFX_ASSEMBLY_VERSION)
+        )
         cs_source.write_text(cs_code, encoding="utf-8-sig")
         subprocess.check_call([
             str(csc),
@@ -947,8 +1050,7 @@ def verify_no_seller_secrets_in_dist(app_dist_dir: Path) -> None:
         ".seller-key.json",
         "seller_customers",
         "issued_licenses",
-        "license_manager.py",
-        "start_license_manager.bat",
+        "license_tool",
     )
     for item in app_dist_dir.rglob("*"):
         low = item.name.lower()
@@ -967,11 +1069,11 @@ def verify_built_app(app_dist_dir: Path, *, expect_models: bool = True) -> None:
     if not app_dist_dir.is_dir():
         problems.append(f"the output folder '{app_dist_dir}' was not created")
     else:
-        exe = app_dist_dir / "ComicOCRStudio.exe"
+        exe = app_dist_dir / "HaSaYaStudio.exe"
         if not exe.is_file():
-            linux_exe = app_dist_dir / "ComicOCRStudio"
+            linux_exe = app_dist_dir / "HaSaYaStudio"
             if not linux_exe.is_file():
-                problems.append("the ComicOCRStudio executable is missing from the output folder")
+                problems.append("the HaSaYaStudio executable is missing from the output folder")
         internal = app_dist_dir / "_internal"
         base = internal if internal.is_dir() else app_dist_dir
         if not (base / "comic_studio" / "static" / "index.html").is_file():
@@ -1004,7 +1106,7 @@ def run_preflight(*, include_nmt: bool = False) -> int:
     that the builder solves on its own are shown as a note, not as a problem.
     """
     say("=" * 72)
-    say(f"  Comic OCR Studio v{APP_VERSION} - بررسی آمادگی ساخت بستهٔ آفلاین")
+    say(f"  HaSaYa Studio v{APP_VERSION} - بررسی آمادگی ساخت بستهٔ آفلاین")
     say("=" * 72)
     problems: list[str] = []
     notes: list[str] = []
@@ -1069,6 +1171,16 @@ def run_preflight(*, include_nmt: bool = False) -> int:
         rapid_ok,
         f"found in {rapid_dir}" if rapid_ok else f"not found in {rapid_dir} - connect to the internet and build again",
     )
+    # The app reads with PP-OCRv6 Small by default; those weights live inside
+    # the `rapidocr` package and are bundled automatically.  Without them the
+    # installed app would start but read nothing.
+    default_dir, default_missing = _find_default_engine_models(models_dir())
+    check(
+        "Default OCR engine models (PP-OCRv6 Small)",
+        not default_missing,
+        (f"found in {default_dir}" if not default_missing
+         else f"missing ({', '.join(default_missing)}) - run 'pip install -U rapidocr' on this machine and build again"),
+    )
     tess_dir = models_dir() / "tesseract"
     tess_ok = all((tess_dir / f"{lang}.traineddata").is_file() for lang in ("eng", "fas"))
     check(
@@ -1085,7 +1197,7 @@ def run_preflight(*, include_nmt: bool = False) -> int:
         )
 
     try:
-        from license_manager import SellerVault
+        from license_tool.manager import SellerVault
 
         vault = SellerVault()
         status = vault.key_status()
@@ -1149,7 +1261,7 @@ def run_preflight(*, include_nmt: bool = False) -> int:
         if any(("OCR models" in p) or ("Language files" in p) or ("translator" in p) for p in problems):
             say("  راه‌حل مدل‌ها: یک‌بار اینترنت را وصل کنید و دوباره اجرا کنید (مدل‌ها خودکار دانلود می‌شوند).")
         if any("Seller master key" in p for p in problems):
-            say("  راه‌حل کلید مادر: پنل فروشنده (start_license_manager.bat) را باز کنید یا فایل پشتیبان کلید را برگردانید.")
+            say("  راه‌حل کلید مادر: پنل فروشنده (license_tool\\start_license_manager.bat) را باز کنید یا فایل پشتیبان کلید را برگردانید.")
         say("  تا آن زمان ساخت بستهٔ آفلاین انجام نمی‌شود.")
     else:
         say("  همه‌چیز آماده است — ساخت بستهٔ آفلاین باید با موفقیت انجام شود.")
@@ -1184,7 +1296,7 @@ def interactive_menu() -> tuple[str, str]:
     ``mode`` is one of ``"1"``, ``"2"``, ``"3"`` or ``"4"`` (self-test only).
     """
     say("=" * 72)
-    say(f"  Comic OCR Studio v{APP_VERSION} - Offline Windows EXE & Setup Builder")
+    say(f"  HaSaYa Studio v{APP_VERSION} - Offline Windows EXE & Setup Builder")
     say("=" * 72)
     say("")
     say("Select offline package variant to build:")
@@ -1204,8 +1316,8 @@ def interactive_menu() -> tuple[str, str]:
     default_out = str(REPO_PY_ROOT / "dist")
     say("")
     say("Folder that receives the built EXE files:")
-    say(r"  Standalone app : <output folder>\ComicOCRStudio\ComicOCRStudio.exe")
-    say(rf"  Offline Setup  : <output folder>\ComicOCRStudio-Offline-Setup-{APP_VERSION}.exe")
+    say(r"  Standalone app : <output folder>\HaSaYaStudio\HaSaYaStudio.exe")
+    say(rf"  Offline Setup  : <output folder>\HaSaYaStudio-Offline-Setup-{APP_VERSION}.exe")
     say("")
     out_dir = _ask(f"Output folder (press Enter for {default_out}): ", default_out)
     out_path = Path(out_dir).expanduser()
@@ -1215,7 +1327,7 @@ def interactive_menu() -> tuple[str, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=f"Build Comic OCR Studio v{APP_VERSION} Offline .exe & Setup")
+    parser = argparse.ArgumentParser(description=f"Build HaSaYa Studio v{APP_VERSION} Offline .exe & Setup")
     parser.add_argument("--with-nmt", action="store_true", help="Bundle 600M offline NLLB-200 translator inside the offline installer")
     parser.add_argument("--skip-model-download", action="store_true", help="Only bundle models already present in local models directory")
     parser.add_argument("--download-wheelhouse", action="store_true", help="Populate python_app/wheelhouse with offline pip wheels")
@@ -1252,7 +1364,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     _reconfigure_console()
-    start_log(f"Comic OCR Studio v{APP_VERSION} offline builder - {' '.join(sys.argv[1:]) or 'no arguments'}")
+    start_log(f"HaSaYa Studio v{APP_VERSION} offline builder - {' '.join(sys.argv[1:]) or 'no arguments'}")
 
     if args.interactive:
         mode, out_dir = interactive_menu()
@@ -1320,7 +1432,7 @@ def _run_build(args: argparse.Namespace) -> int:
             "       'python_app\\wheelhouse' and run the build again."
         )
 
-    from license_manager import SellerKeyLostError, SellerVault
+    from license_tool.manager import SellerKeyLostError, SellerVault
 
     vault = SellerVault()
     key_state_before = vault.key_status()
@@ -1354,7 +1466,7 @@ def _run_build(args: argparse.Namespace) -> int:
     if embedded_now and embedded_now != str(seller_info["public_key_hex"]).lower():
         raise BuildError(
             "The key embedded in the app does NOT match the seller's master key.\n"
-            "       Restore the seller key (or run start_license_manager.bat once) and build again -\n"
+            "       Restore the seller key (or run license_tool/start_license_manager.bat once) and build again -\n"
             "       shipping this build would break every license your customers already have."
         )
     if not key_status.get("backupExists"):
@@ -1367,7 +1479,7 @@ def _run_build(args: argparse.Namespace) -> int:
     icon_png = REPO_PY_ROOT / "comic_studio" / "static" / "assets" / "icon128.png"
     if not icon_png.is_file():
         raise BuildError(f"The program icon is missing: {icon_png}")
-    icon_ico = generate_windows_ico(icon_png, build_root / "ComicOCRStudio.ico")
+    icon_ico = generate_windows_ico(icon_png, build_root / "HaSaYaStudio.ico")
     say(f"[ok] Generated multi-size Windows icon: {icon_ico}")
 
     staged_models = stage_bundled_models(
@@ -1390,7 +1502,7 @@ def _run_build(args: argparse.Namespace) -> int:
     say("[pyinstaller] Running: " + " ".join(cmd))
     subprocess.check_call(cmd, cwd=str(REPO_PY_ROOT))
 
-    app_dist_dir = dist_root / "ComicOCRStudio"
+    app_dist_dir = dist_root / "HaSaYaStudio"
     verify_built_app(app_dist_dir, expect_models=not args.allow_missing_language_models)
     guard_bin = build_native_license_guard(app_dist_dir, build_root, seller_info["public_key_hex"])
     if guard_bin is not None:
