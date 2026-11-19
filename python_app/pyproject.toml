@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comic-ocr-studio"
-version = "4.3.6"
-description = "Standalone local OCR, translation and comic editing studio"
+version = "4.5.5"
+description = "Standalone local OCR, translation and visual document editing studio"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",
@@ -46,7 +46,8 @@ dev = [
 ]
 
 [project.scripts]
-comic-ocr-studio = "comic_studio.__main__:main"
+hasaya-studio = "comic_studio.__main__:main"
+comic-ocr-studio = "comic_studio.__main__:main"  # Legacy command retained for existing developer environments.
 
 [tool.setuptools.packages.find]
 where = ["."]
