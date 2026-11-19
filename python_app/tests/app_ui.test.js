@@ -28,6 +28,8 @@ let activityClears = 0;
 let revertCalls = 0;
 let translationGate = null;
 let previewFailure = null;
+let contextStartStaleOnce = false;
+let contextStepCalls = 0;
 let ocrGate = null;
 let imageGate = null;
 let aiSaveFailure = false;
@@ -185,9 +187,14 @@ window.fetch = async (url, options = {}) => {
   }
   if (pathname === `/api/projects/${project.id}/context-start`) {
     translationCalls.push(JSON.parse(options.body));
+    if (contextStartStaleOnce) {
+      contextStartStaleOnce = false;
+      return jsonResponse({detail:'اطلاعات یا تنظیمات پس از پیش‌نمایش تغییر کرده است؛ دوباره بررسی و تأیید کنید.'},409);
+    }
     return jsonResponse({project: vm.runInContext('state.project', context), runId:'mock-run', completed:0});
   }
   if (pathname === `/api/projects/${project.id}/context-step`) {
+    contextStepCalls += 1;
     if (translationGate) await waitAbortable(translationGate, options.signal);
     return jsonResponse({project:overlayProject('NEW OCR', 'ترجمهٔ تازه'), done:true, completed:1, affectedImageIds:[project.images[0].id]});
   }
@@ -664,7 +671,12 @@ function check(name, condition) {
   vm.runInContext("state.project.images[0].blocks = window._priorBlocks; state.selectedBlockIds = []; buildBlockList(); drawEditor(); state.editorId = null; appendLocalActivity('OLD JOB')", context);
   const clearsBeforeOcr = activityClears;
   $('ocrConfidence').value = '0';
-  await vm.runInContext('runOcr()', context);
+  const ocrRun = vm.runInContext('runOcr()', context);
+  await sleep(0);
+  const askedForOcrReview = $('appModalDialog').open && $('appModalMessage').textContent.includes('نسخهٔ قبلی') && $('appModalMessage').textContent.includes('نتیجهٔ تازهٔ OCR');
+  if ($('appModalDialog').open) $('appModalConfirm').click();
+  await ocrRun;
+  check('v4.52 OCR asks once after the page run and lets the test choose the new result', askedForOcrReview);
   check('OCR accepts zero confidence without substituting the default', ocrRequests.at(-1).min_confidence === 0);
   check('automatic paragraph grouping is requested by default', ocrRequests.at(-1).group_lines === true);
   $('ocrGroupLines').checked = false;
@@ -701,7 +713,12 @@ function check(name, condition) {
   retranslateButton.click(); await sleep(20);
   check('per-block retranslation also previews before any direct send', $('translationPreviewDialog').open && $('translationPreviewRequests').textContent.includes('NEW OCR') && singleTranslationCalls.length === 0);
   $('translationPreviewConfirm').click();
-  await vm.runInContext('translationPreviewTask', context);
+  const singleTranslationTask = vm.runInContext('translationPreviewTask', context);
+  await sleep(0);
+  const askedAfterSingleTranslation = $('appModalDialog').open && $('appModalMessage').textContent.includes('ترجمهٔ قبلی') && $('appModalMessage').textContent.includes('ترجمهٔ تازه');
+  if ($('appModalDialog').open) $('appModalConfirm').click();
+  await singleTranslationTask;
+  check('v4.52 per-block retranslation asks only after the result is ready and offers old/new text', askedAfterSingleTranslation);
   check('per-block confirmation sends the same previewed text and signature', singleTranslationCalls.length === 1 && singleTranslationCalls[0].text === 'NEW OCR' && singleTranslationCalls[0].confirmation === 'ui-confirmation-signature');
   check('confirmed per-block translation appears on its read-only card', $('blockList').querySelector('.block-card').textContent.includes('ترجمهٔ تکی تازه'));
   check('confirmed per-block translation defaults to justify, font 12 and top placement', vm.runInContext("state.project.images[0].blocks[0].align === 'justify' && state.project.images[0].blocks[0].size === 12 && state.project.images[0].blocks[0].verticalAlign === 'top'", context));
@@ -726,13 +743,24 @@ function check(name, condition) {
   check('preview refresh errors remain visible and copyable with HTTP details', $('translationPreviewDialog').open && $('translationPreviewError').textContent.includes('HTTP 503') && $('translationPreviewError').textContent.includes('simulated preview outage') && !$('copyTranslationPreviewError').classList.contains('hidden') && $('translationPreviewConfirm').textContent.includes('به‌روزرسانی') && translationCalls.length === sendsBeforePreparationFailure);
   $('translationPreviewCancel').click(); previewFailure = null; vm.runInContext("state.ai.provider = 'free'", context);
 
+  const stalePreviewCallsBefore = translationPreviewCalls.length;
+  const staleStartCallsBefore = translationCalls.length;
+  const staleStepCallsBefore = contextStepCalls;
+  contextStartStaleOnce = true;
+  await vm.runInContext('runTranslation()', context);
+  $('translationPreviewConfirm').click(); await sleep(20);
+  await vm.runInContext('translationPreviewTask', context);
+  check('a stale context confirmation refreshes the preview and requires a second approval without sending a provider request', $('translationPreviewDialog').open && !$('translationDialog').open && translationPreviewCalls.length === stalePreviewCallsBefore + 2 && translationCalls.length === staleStartCallsBefore + 1 && contextStepCalls === staleStepCallsBefore && $('translationPreviewNote').textContent.includes('پیش‌نمایش تازه'));
+  $('translationPreviewCancel').click();
+
   vm.runInContext("window._projectBeforeOcrRace = JSON.parse(JSON.stringify(state.project)); state.project.images[0].blocks = []; delete state.project.images[0].ocrCompleted", context);
+  const sendsBeforeOcrRace = translationCalls.length;
   await vm.runInContext('runTranslation()', context);
   let releaseOcr; ocrGate = new Promise(resolve => { releaseOcr = resolve; });
   const raceOcr = vm.runInContext('runOcr().catch(() => {})', context);
   await sleep(20); vm.runInContext('state.project.images[0].selected = false', context);
   ocrGate = null; releaseOcr(); await raceOcr;
-  check('changed selection after OCR response cannot start translation or replace the current project', $('ocrDialog').open && $('ocrStatus').textContent.includes('OCR در سرور ذخیره شد') && !$('translationPreviewDialog').open && translationCalls.length === sendsBeforePreparationFailure && vm.runInContext('state.project.images[0].selected === false && state.project.images[0].blocks.length === 0', context));
+  check('changed selection after OCR response cannot start translation or replace the current project', $('ocrDialog').open && $('ocrStatus').textContent.includes('OCR در سرور ذخیره شد') && !$('translationPreviewDialog').open && translationCalls.length === sendsBeforeOcrRace && vm.runInContext('state.project.images[0].selected === false && state.project.images[0].blocks.length === 0', context));
   vm.runInContext("closeDialog('ocrDialog'); clearPendingTranslationOcr(); state.project = window._projectBeforeOcrRace; renderAll()", context);
 
   const revertsBeforeSelector = revertCalls;
@@ -770,6 +798,24 @@ function check(name, condition) {
   $('pendingDetail').querySelector('select').value = 'apply';
   await vm.runInContext('applyPendingResult()', context);
   check('pending conflict submits explicit selection and closes after success', pendingChoices['image-ui:1'] === 'apply' && !$('pendingDialog').open);
+
+  // v4.46: a stale translation pending result explains why it waits and offers
+  // an explicit manual-approval button that sends the force flag.
+  let staleBody = null;
+  window.fetch = async (url, options = {}) => {
+    if (String(url).includes('/pending/')) {
+      if (options.method === 'POST') { staleBody = JSON.parse(options.body); return jsonResponse({project: JSON.parse(JSON.stringify(vm.runInContext('state.project', context))), kind:'translation', done:false, affectedImageIds:[]}); }
+      return jsonResponse({id:pendingId, kind:'translation', revision:'rev2', canApply:false, reasons:['پس از آماده‌شدن این نتیجه، نوبت ترجمه تغییر کرده است؛ برای همین اعمال خودکار غیرفعال است.'], rows:[{key:'image-ui:2', name:'page', conflict:true, current:'edited', original:'old', result:'نتیجهٔ آماده', source:'source'}], summary:''});
+    }
+    return oldFetch(url, options);
+  };
+  await vm.runInContext(`openPendingResults('${pendingId}')`, context);
+  check('stale pending result explains why it waits for the user', $('pendingDetail').textContent.includes('چرا این نتیجه برای تأیید شما نگه داشته شد') && $('pendingDetail').textContent.includes('نوبت ترجمه تغییر کرده'));
+  check('stale pending result shows an explicit manual approval button', !$('pendingApply').classList.contains('hidden') && $('pendingApply').textContent.includes('تأیید و اعمال دستی'));
+  check('stale pending conflict still asks for a per-row choice', $('pendingDetail').querySelector('select') !== null);
+  $('pendingDetail').querySelector('select').value = 'apply';
+  await vm.runInContext('applyPendingResult()', context);
+  check('manual approval sends the force flag with the choices', staleBody && staleBody.force === true && staleBody.choices['image-ui:2'] === 'apply' && !$('pendingDialog').open);
   window.fetch = oldFetch;
 
   {
@@ -880,6 +926,23 @@ function check(name, condition) {
     $('inlineEditorApply').click();
     check('finishing box edit keeps the inline editor docked in idle state instead of hiding it', !$('inlineEditor').classList.contains('hidden') && $('inlineEditor').classList.contains('is-idle') && !$('editorBoxes').querySelector('.editor-box.editing'));
     check('merge and split tools live in their own separated group outside align/layout tools', !!$('inlineEditor').querySelector('.inline-box-ops-row > #inlineMergeSplitTools #editorMergeText') && !!$('inlineEditor').querySelector('.inline-box-ops-row > #inlineMergeSplitTools #editorSplitText') && !$('inlineEditor').querySelector('.inline-box-layout-tools #editorMergeText') && !$('inlineEditor').querySelector('.inline-box-layout-tools #editorSplitText'));
+    // v4.48: arrow keys nudge the selected box pixel-by-pixel and Ctrl+Z undoes box moves.
+    await vm.runInContext(`(async () => {
+      state.project.images[0].blocks = [{ id: 77, text: 'NUDGE', tr: '', richHtml: '', enabled: true, x0: 100, y0: 100, x1: 200, y1: 150, lineH: 20, bg: 'white', dir: 'rtl', align: 'justify', size: 12, verticalAlign: 'top' }];
+      state.selectedBlockIds = ['77']; state.activeBlockId = '77';
+      updateEditorSelection(); drawEditor();
+    })()`, context);
+    window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }));
+    window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowLeft', repeat: true, bubbles: true, cancelable: true }));
+    check('arrow keys nudge the selected box one pixel per press', vm.runInContext('{ const b = state.project.images[0].blocks[0]; (Number.isFinite(b.tx0) ? b.tx0 : b.x0) === 98 && (Number.isFinite(b.ty0) ? b.ty0 : b.y0) === 100; }', context));
+    window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowDown', shiftKey: true, bubbles: true, cancelable: true }));
+    check('Shift+arrow nudges the selected box ten pixels', vm.runInContext('{ const b = state.project.images[0].blocks[0]; (Number.isFinite(b.ty0) ? b.ty0 : b.y0) === 110; }', context));
+    window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true, cancelable: true }));
+    check('Ctrl+Z outside the text field undoes the last nudge batch', vm.runInContext('{ const b = state.project.images[0].blocks[0]; (Number.isFinite(b.ty0) ? b.ty0 : b.y0) === 100 && (Number.isFinite(b.tx0) ? b.tx0 : b.x0) === 98; }', context));
+    window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true, cancelable: true }));
+    check('a second Ctrl+Z restores the box to its original position', vm.runInContext('{ const b = state.project.images[0].blocks[0]; (Number.isFinite(b.tx0) ? b.tx0 : b.x0) === 100 && (Number.isFinite(b.ty0) ? b.ty0 : b.y0) === 100; }', context));
+    window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'y', ctrlKey: true, bubbles: true, cancelable: true }));
+    check('Ctrl+Y redoes the undone nudge batch', vm.runInContext('{ const b = state.project.images[0].blocks[0]; (Number.isFinite(b.tx0) ? b.tx0 : b.x0) === 98 && (Number.isFinite(b.ty0) ? b.ty0 : b.y0) === 100; }', context));
     await vm.runInContext(`(async () => {
       window.__savedUiBlocksV363 = JSON.parse(JSON.stringify(state.project.images[0].blocks));
       state.project.settings.overlayMode = 'translation';
@@ -1022,6 +1085,7 @@ function check(name, condition) {
         downloadSizeGb: 15, requiresNvidiaGpu: true, minVramGb: 16,
         runtimeInstalled: false, modelReady: false, readyLanguages: [],
         installedVersion: null, latestVersion: null, updateAvailable: false, updateSummary: '',
+        remoteCodeExecution: true, remoteCodeRepository: 'allenai/olmOCR-2-7B-1025',
         hardwareCheck: {
           compatible: false,
           warnings: ['این مدل برای اجرا به کارت گرافیک NVIDIA با حداقل 16 گیگابایت حافظهٔ گرافیکی نیاز دارد، اما کارت گرافیک NVIDIA روی این سیستم شناسایی نشد.'],
@@ -1070,22 +1134,34 @@ function check(name, condition) {
     await new Promise((r) => setTimeout(r, 20));
     check('modelsDialog shows hardware summary, update banner, and both standard + isolated model groups', $('modelsDialog').open === true && $('modelsHardwareSummary').textContent.includes('بدون کارت گرافیک مجزای NVIDIA') && !$('modelsUpdateBanner').classList.contains('hidden') && !$('updateAllModelsBtn').classList.contains('hidden') && $('engineCards').querySelectorAll('.model-group').length === 2);
 
-    // Click prepare on heavy GPU model olmOCR -> Persian hardware warning modal opens BEFORE downloading
+    // A model that executes its repository code must get a separate, informed approval.
     const olmCard = [...$('engineCards').querySelectorAll('.engine-card')].find((el) => el.querySelector('h3')?.textContent === 'olmOCR');
     const olmPrepareBtn = [...olmCard.querySelectorAll('.card-buttons button')].find((b) => b.textContent.includes('آماده‌سازی'));
     olmPrepareBtn.click();
     await new Promise((r) => setTimeout(r, 20));
-    check('clicking prepare on heavy GPU model opens Persian hardware warning modal before downloading', $('appModalDialog').open === true && $('appModalDialog').dataset.variant === 'warning' && $('appModalMessage').textContent.includes('NVIDIA') && engineDownloadCalls.length === 0);
+    check('remote-code model first shows a Persian security warning naming its source before download', $('appModalDialog').open === true && $('appModalDialog').dataset.variant === 'warning' && $('appModalTitle').textContent.includes('امنیتی') && $('appModalMessage').textContent.includes('allenai/olmOCR-2-7B-1025') && $('appModalMessage').textContent.includes('کد همراه') && engineDownloadCalls.length === 0);
     $('appModalCancel').click();
     await new Promise((r) => setTimeout(r, 20));
-    check('declining hardware warning cancels download cleanly without sending network download request', $('appModalDialog').open === false && engineDownloadCalls.length === 0);
+    check('declining remote-code approval cancels before any model download', $('appModalDialog').open === false && engineDownloadCalls.length === 0);
 
-    // Confirming hardware warning sends force=true and prepares olmOCR
+    // Approving code execution is not an approval to bypass the separate hardware warning.
     olmPrepareBtn.click();
     await new Promise((r) => setTimeout(r, 20));
     $('appModalConfirm').click();
+    await new Promise((r) => setTimeout(r, 20));
+    check('approving remote-code risk still shows the separate hardware warning', $('appModalDialog').open === true && $('appModalMessage').textContent.includes('NVIDIA') && engineDownloadCalls.length === 0);
+    $('appModalCancel').click();
+    await new Promise((r) => setTimeout(r, 20));
+    check('declining the hardware warning after security approval still sends no download', $('appModalDialog').open === false && engineDownloadCalls.length === 0);
+
+    // Both explicit approvals are required before sending the pinned model request.
+    olmPrepareBtn.click();
+    await new Promise((r) => setTimeout(r, 20));
+    $('appModalConfirm').click();
+    await new Promise((r) => setTimeout(r, 20));
+    $('appModalConfirm').click();
     await new Promise((r) => setTimeout(r, 30));
-    check('confirming hardware warning sends force=true and marks isolated engine ready', engineDownloadCalls.length === 1 && engineDownloadCalls[0].force === true && vm.runInContext(`state.engines.find(e => e.id === 'olmocr').runtimeInstalled === true`, context));
+    check('download request records explicit remote-code approval and force=true only after both warnings', engineDownloadCalls.length === 1 && engineDownloadCalls[0].force === true && engineDownloadCalls[0].accept_remote_code_risk === true && vm.runInContext(`state.engines.find(e => e.id === 'olmocr').runtimeInstalled === true`, context));
 
     // Clicking 1-click update updates rapidocr-v6 and hides update banner + badge
     $('updateAllModelsBtn').click();
@@ -2720,7 +2796,10 @@ function check(name, condition) {
           const previewServiceValue = $('translationPreviewService')?.value;
           const previewSkillHidden = $('translationSkillWrap')?.classList.contains('hidden');
           const previewExecIsLocal = $('translationPreviewExecBadge')?.classList.contains('is-local');
+          const originalReviewConfirm = appConfirm;
+          appConfirm = async () => true; // choose the freshly generated translation in this legacy UI scenario
           await confirmTranslationRequestPreview();
+          appConfirm = originalReviewConfirm;
           const translatedSingle = sampleBlock.tr;
           sampleBlock.tr = prevTr;
 
@@ -3648,6 +3727,8 @@ function check(name, condition) {
           const previewOpened = $('translationPreviewDialog').open === true;
           $('translationPreviewConfirm').click();
           await new Promise((r) => setTimeout(r, 35));
+          if ($('appModalDialog').open) $('appModalConfirm').click();
+          await translationPreviewTask;
           const translatedSingleTr = manualEn.tr;
 
           await closeEditor(true);
@@ -4548,7 +4629,7 @@ function check(name, condition) {
       const detail = document.getElementById('serverAlertDetail').textContent || '';
       window.fetch = async (url, opts = {}) => {
         const parsed = new URL(url, 'http://127.0.0.1:8765');
-        if (parsed.pathname === '/api/health') return mockJson({ name: 'Comic OCR Studio', version: '4.36' });
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.55' });
         return origFetch(url, opts);
       };
       document.getElementById('serverAlertRetry').click();
@@ -4566,6 +4647,156 @@ function check(name, condition) {
       && v430AlertCheck.hiddenAfterRetry === true,
     JSON.stringify(v430AlertCheck),
   );
+
+  // v4.39: swapping a watermark logo for a *different* image that serializes to the very
+  // same dataURL length must still change the page-render signature, otherwise pages are
+  // never re-rendered and the old logo silently stays inside exported files.
+  const v439WmSigCheck = await vm.runInContext(`
+    (() => {
+      const logoA = 'data:image/png;base64,' + 'A'.repeat(96);
+      const logoB = 'data:image/png;base64,' + 'B'.repeat(96); // same length, different content
+      const mk = (url) => ({ enabled: true, text: 'کانال', position: 'bottom-left', logoDataUrl: url });
+      const sigA = JSON.stringify(watermarkSignaturePart(mk(logoA)));
+      const sigB = JSON.stringify(watermarkSignaturePart(mk(logoB)));
+      const sigAgain = JSON.stringify(watermarkSignaturePart(mk(logoA)));
+      const partNone = watermarkSignaturePart({ enabled: true, text: 'کانال', position: 'bottom-left' });
+      return {
+        swapChanges: sigA !== sigB,
+        stableForSameLogo: sigA === sigAgain,
+        fingerprintField: String((JSON.parse(sigA) || []).slice(-1)[0] || ''),
+        noLogoHasEmptyFingerprint: Array.isArray(partNone) && partNone[partNone.length - 1] === '',
+      };
+    })()
+  `, context);
+  check(
+    'v4.39 notices a same-length watermark logo swap in the render signature',
+    v439WmSigCheck.swapChanges === true
+      && v439WmSigCheck.stableForSameLogo === true
+      && v439WmSigCheck.fingerprintField.includes(':')
+      && v439WmSigCheck.noLogoHasEmptyFingerprint === true,
+    JSON.stringify(v439WmSigCheck),
+  );
+
+  // v4.39: projects saved while a logo watermark was rendered could persist a poisoned
+  // `"_drawable": {}`/`"_logoDrawable": {}` (a DOM image serialized as an empty object);
+  // after the next launch the renderer crashed on ctx.drawImage({}) and the page's
+  // translated render never finished.  The renderer must ignore dimensionless junk, and
+  // newly attached runtime drawables must never be written into the saved project JSON.
+  const v439PoisonCheck = await vm.runInContext(`
+    (() => {
+      const calls = [];
+      const fakeCtx = {
+        measureText: (t) => ({ width: String(t).length * 9 }),
+        drawImage: (...a) => { calls.push(a[0]); },
+        save() {}, restore() {}, translate() {}, rotate() {}, fillText() {}, strokeText() {},
+      };
+      const wm = { enabled: true, text: 'کانال', position: 'bottom-left', logoId: 'L1' };
+      const poisoned = { L1: { dataUrl: 'data:image/png;base64,AAAA', _drawable: {} } };
+      const ok = { L1: { dataUrl: 'data:image/png;base64,AAAA', _drawable: { width: 48, height: 32 } } };
+      let threw = false;
+      try { Typeset.drawWatermark(fakeCtx, 400, 300, wm, poisoned); } catch (e) { threw = true; }
+      const ignoredPoison = calls.length === 0;
+      Typeset.drawWatermark(fakeCtx, 400, 300, wm, ok);
+      const usedRealDrawable = calls.length === 1 && calls[0] && calls[0].width === 48;
+      const inlinePoison = { enabled: true, text: 'کانال', position: 'top-right', logoDataUrl: 'data:image/png;base64,BBBB', _logoDrawable: {} };
+      let threwInline = false;
+      try { Typeset.drawWatermark(fakeCtx, 400, 300, inlinePoison, {}); } catch (e) { threwInline = true; }
+      const ignoredInline = calls.length === 1;
+      return { threw, ignoredPoison, usedRealDrawable, threwInline, ignoredInline };
+    })()
+  `, context);
+  check(
+    'v4.39 renderer ignores a poisoned serialized logo drawable instead of crashing',
+    v439PoisonCheck.threw === false
+      && v439PoisonCheck.ignoredPoison === true
+      && v439PoisonCheck.usedRealDrawable === true
+      && v439PoisonCheck.threwInline === false
+      && v439PoisonCheck.ignoredInline === true,
+    JSON.stringify(v439PoisonCheck),
+  );
+
+  const v439SaveLeakCheck = await vm.runInContext(`
+    (async () => {
+      const origDecode = decodeDataUrlDrawable;
+      try {
+        decodeDataUrlDrawable = async () => ({ width: 40, height: 30 });
+        state.project.settings.watermarkLogos = { L9: { dataUrl: 'data:image/png;base64,AAAA' } };
+        const libWm = { enabled: true, logoId: 'L9' };
+        const inlineWm = { enabled: true, logoDataUrl: 'data:image/png;base64,CCCC', text: '' };
+        await ensureWatermarkLogosReady(libWm);
+        await ensureWatermarkLogosReady(inlineWm);
+        const entry = state.project.settings.watermarkLogos.L9;
+        const noneInJson = !JSON.stringify(state.project.settings).includes('_drawable') && !JSON.stringify(inlineWm).includes('_logoDrawable');
+        const stillUsable = entry._drawable && entry._drawable.width === 40 && inlineWm._logoDrawable && inlineWm._logoDrawable.height === 30;
+        return { noneInJson, stillUsable: Boolean(stillUsable) };
+      } finally {
+        decodeDataUrlDrawable = origDecode;
+        delete state.project.settings.watermarkLogos.L9;
+      }
+    })()
+  `, context);
+  check(
+    'v4.39 runtime logo drawables never leak into the saved project JSON',
+    v439SaveLeakCheck.noneInJson === true && v439SaveLeakCheck.stillUsable === true,
+    JSON.stringify(v439SaveLeakCheck),
+  );
+
+  const v452PageReview = await vm.runInContext(`
+    (async () => {
+      const savedProject = state.project;
+      const originalConfirm = appConfirm, originalSave = saveProject, originalGrid = renderGrid, originalRender = renderImagesText;
+      const prompts = []; let saves = 0;
+      try {
+        state.project = {id:'review-ui', images:[
+          {id:'page-a', name:'صفحهٔ اول', blocks:[{id:1, text:'source A', tr:'ترجمهٔ قدیمی A', richHtml:'', aiTranslated:false}]},
+          {id:'page-b', name:'صفحهٔ دوم', blocks:[{id:1, text:'source B', tr:'ترجمهٔ قدیمی B', richHtml:'', aiTranslated:false}]},
+        ]};
+        appConfirm = async (message, options) => { prompts.push({message, options}); return prompts.length === 2; };
+        saveProject = async () => { saves += 1; return {}; };
+        renderGrid = () => {};
+        renderImagesText = async () => {};
+        const snapshot = captureTranslationReviewSnapshot(['page-a', 'page-b']);
+        state.project.images[0].blocks[0].tr = 'ترجمهٔ تازه A';
+        state.project.images[1].blocks[0].tr = 'ترجمهٔ تازه B';
+        await reviewTranslationReplacements(snapshot);
+        return {prompts, saves, first:state.project.images[0].blocks[0].tr, second:state.project.images[1].blocks[0].tr};
+      } finally {
+        state.project = savedProject; appConfirm = originalConfirm; saveProject = originalSave;
+        renderGrid = originalGrid; renderImagesText = originalRender;
+      }
+    })()
+  `, context);
+  check('v4.52 reviews changed translations only after the batch, once per page, and restores only the pages where the old version is kept',
+    v452PageReview.prompts.length === 2 && v452PageReview.prompts[0].message.includes('ترجمهٔ قدیمی A') && v452PageReview.prompts[0].message.includes('ترجمهٔ تازه A')
+      && v452PageReview.prompts[0].options.confirmText === 'جایگزینی با ترجمهٔ تازه'
+      && v452PageReview.prompts[0].options.cancelText === 'حفظ ترجمهٔ قبلی' && v452PageReview.prompts[0].options.destructive === true
+      && v452PageReview.prompts[1].message.includes('ترجمهٔ تازه B') && v452PageReview.first === 'ترجمهٔ قدیمی A'
+      && v452PageReview.second === 'ترجمهٔ تازه B' && v452PageReview.saves === 1, JSON.stringify(v452PageReview));
+
+  const v452OcrReview = await vm.runInContext(`
+    (async () => {
+      const savedProject = state.project;
+      const originalConfirm = appConfirm, originalSave = saveProject, originalGrid = renderGrid, originalRender = renderImagesText;
+      let prompt = '', saves = 0;
+      try {
+        state.project = {id:'ocr-review-ui', images:[{id:'page-ocr', name:'صفحهٔ OCR', pageMode:'comic', ocrCompleted:true,
+          blocks:[{id:1, text:'متن OCR قبلی', tr:'ترجمهٔ قبلی'}]}]};
+        const snapshot = captureOcrReviewSnapshot(['page-ocr']);
+        state.project.images[0].blocks = [{id:2, text:'متن OCR تازه', tr:''}];
+        appConfirm = async (message) => { prompt = message; return false; };
+        saveProject = async () => { saves += 1; return {}; }; renderGrid = () => {}; renderImagesText = async () => {};
+        await reviewOcrReplacements(snapshot, ['page-ocr']);
+        return {prompt, saves, text:state.project.images[0].blocks[0].text, tr:state.project.images[0].blocks[0].tr};
+      } finally {
+        state.project = savedProject; appConfirm = originalConfirm; saveProject = originalSave;
+        renderGrid = originalGrid; renderImagesText = originalRender;
+      }
+    })()
+  `, context);
+  check('v4.52 OCR reruns compare old text/translation with fresh OCR after completion and can keep the old page intact',
+    v452OcrReview.prompt.includes('متن OCR قبلی') && v452OcrReview.prompt.includes('متن OCR تازه')
+      && v452OcrReview.prompt.includes('ترجمهٔ قبلی') && v452OcrReview.text === 'متن OCR قبلی'
+      && v452OcrReview.tr === 'ترجمهٔ قبلی' && v452OcrReview.saves === 1, JSON.stringify(v452OcrReview));
 
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;
   window.dispatchEvent(new window.Event('beforeunload'));

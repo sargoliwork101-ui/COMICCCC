@@ -414,8 +414,6 @@ def _cell_text_line_count(sub: Any) -> int:
     Small bands (the dots above/below a Persian line) do not count as a line of their
     own, so a single line cell is never mistaken for a two line cell.
     """
-    import numpy as np
-
     if sub is None or sub.size == 0:
         return 0
     inner = sub
