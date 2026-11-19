@@ -6,9 +6,14 @@ import httpx
 import pytest
 
 from comic_studio.translation import (
-    TRANSLATION_SEPARATOR, TranslationError, TranslationService,
+    AI_PROVIDERS, TRANSLATION_SEPARATOR, TranslationError, TranslationService,
     combine_translation_texts, distribute_translation, split_free_query,
 )
+
+
+def test_gemini_key_help_points_to_google_ai_studio_api_keys():
+    assert AI_PROVIDERS["gemini"]["key_url"] == "https://aistudio.google.com/api-keys"
+    assert AI_PROVIDERS["gemini"]["model"] == "gemini-2.5-flash"
 
 
 def test_ai_settings_do_not_expose_key(tmp_path, monkeypatch):
@@ -549,3 +554,34 @@ def test_custom_translation_skill_is_sent_in_exact_system_instruction(tmp_path, 
     assert service.translate('Hello', 'eng', provider, ['Hello'], '') == 'سلام'
     no_skill = captured[1]['systemInstruction']['parts'][0]['text'] if provider == 'gemini' else captured[1]['messages'][0]['content']
     assert 'Additional translation guidance' not in no_skill and 'Never merge, split' in no_skill
+
+
+def test_tracked_client_sends_browser_user_agent(monkeypatch, tmp_path):
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    service = TranslationService()
+    with service._tracked_client(timeout=10) as client:
+        ua = client.headers.get('user-agent', '')
+        assert 'Mozilla/5.0' in ua
+        assert 'python-httpx' not in ua.lower()
+
+
+def test_google_translate_429_falls_back_to_clients5(monkeypatch, tmp_path):
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    service = TranslationService()
+    calls = []
+
+    class FakeClient:
+        def get(self, url, params=None):
+            calls.append(url)
+            if 'translate.googleapis.com' in url:
+                return httpx.Response(429, request=httpx.Request('GET', url))
+            return httpx.Response(200, json=[['سلام', 'en']], request=httpx.Request('GET', url))
+
+    result = service._google_translate_request(FakeClient(), 'Hello', 'en', 'fa')
+    assert result == 'سلام'
+    assert len(calls) == 2 and 'clients5.google.com' in calls[1]
+
+
+def test_release_memory_runs_cleanly():
+    from comic_studio import resources
+    resources.release_memory()
