@@ -5,6 +5,7 @@ const TR = { worker: null, lang: null, cancel: false, aiController: null };
 const AI_SETTINGS_KEY = 'gemini_translation_settings_v1';
 const AI_PROVIDER_IDS = Object.keys(AiTranslateTools.PROVIDERS);
 let aiProvider = 'gemini', aiProviderSettings = {}, aiProfiles = [], aiProfileSerial = 0;
+let webpageTranslationEngine = 'auto';
 
 function makeAiProfile(name = '', apiKey = '', id = '') {
   aiProfileSerial++;
@@ -68,7 +69,7 @@ function renderAiProfiles() {
     keyInput.addEventListener('change', saveAiSettings);
     const test = document.createElement('button');
     test.type = 'button'; test.className = 'mini ai-profile-test'; test.textContent = 'تست';
-    test.title = 'تست اتصال این کلید با مدل انتخاب‌شده؛ بدون ارسال متن کمیک';
+    test.title = 'ترجمهٔ یک جملهٔ آزمایشی ثابت را می‌سنجد؛ متن کمیک یا صفحه ارسال نمی‌شود.';
     test.setAttribute('aria-label', `تست اتصال API ${index + 1}`);
     test.onclick = async () => {
       const apiKey = profile.apiKey.trim();
@@ -77,10 +78,10 @@ function renderAiProfiles() {
       if (!apiKey) { showStatus('ابتدا کلید API را وارد کنید.', 'bad'); keyInput.focus(); return; }
       const unchanged = () => aiProvider === provider && profile.apiKey.trim() === apiKey &&
         ($('trAiModel').value.trim() || AiTranslateTools.DEFAULT_MODELS[provider]) === model;
-      test.disabled = true; test.textContent = '…'; showStatus('در حال بررسی ارتباط...');
+      test.disabled = true; test.textContent = '…'; showStatus('در حال آزمودن تولید ترجمه...');
       try {
-        await AiTranslateTools.testConnection({ provider, apiKey, model });
-        showStatus(unchanged() ? 'اتصال برقرار است ✓' : 'کلید یا مدل تغییر کرد؛ دوباره تست کنید.', unchanged() ? 'ok' : '');
+        const result = await AiTranslateTools.testConnection({ provider, apiKey, model });
+        showStatus(unchanged() ? `آزمون ترجمه موفق ✓ ${result.sampleTranslation}` : 'کلید یا مدل تغییر کرد؛ دوباره تست کنید.', unchanged() ? 'ok' : '');
       } catch (error) {
         showStatus(unchanged() ? AiTranslateTools.safeError(error) : 'کلید یا مدل تغییر کرد؛ دوباره تست کنید.', unchanged() ? 'bad' : '');
       } finally {
@@ -104,6 +105,8 @@ async function loadAiSettings() {
   try {
     const stored = await chrome.storage.local.get(AI_SETTINGS_KEY);
     const settings = stored[AI_SETTINGS_KEY] || {};
+    webpageTranslationEngine = ['auto', 'google', 'mymemory', 'ai'].includes(settings.engine)
+      ? settings.engine : (settings.enabled === true ? 'ai' : 'auto');
     $('trAiEnabled').checked = settings.enabled === true;
     const providerStore = settings.providers && typeof settings.providers === 'object' ? settings.providers : null;
     AI_PROVIDER_IDS.forEach((id) => {
@@ -117,8 +120,10 @@ async function loadAiSettings() {
         profiles = [makeAiProfile('کلید اصلی', settings.apiKey)];
       }
       const rawModel = legacy ? settings.model : raw.model;
+      const savedModel = typeof rawModel === 'string' && rawModel.trim() ? rawModel.trim() : AiTranslateTools.DEFAULT_MODELS[id];
       aiProviderSettings[id] = {
-        model: typeof rawModel === 'string' && rawModel.trim() ? rawModel.trim() : AiTranslateTools.DEFAULT_MODELS[id],
+        model: id === 'gemini' && savedModel === 'gemini-2.5-flash'
+          ? AiTranslateTools.DEFAULT_MODELS.gemini : savedModel,
         profiles
       };
     });
@@ -127,6 +132,7 @@ async function loadAiSettings() {
     showAiProvider(AI_PROVIDER_IDS.includes(settings.provider) ? settings.provider : 'gemini');
   } catch (error) {
     console.warn('خواندن تنظیمات ترجمهٔ هوش مصنوعی ناموفق بود', error);
+    webpageTranslationEngine = 'auto';
     aiProviderSettings = {};
     $('trAiSkill').value = AiTranslateTools.DEFAULT_SKILL;
     showAiProvider('gemini');
@@ -146,6 +152,7 @@ async function saveAiSettings() {
       };
     });
     await chrome.storage.local.set({ [AI_SETTINGS_KEY]: {
+      engine: webpageTranslationEngine,
       enabled: $('trAiEnabled').checked,
       provider: aiProvider,
       providers,
