@@ -1,4 +1,4 @@
-"""User-defined CPU & RAM budget for Comic OCR Studio (v4.29).
+"""User-defined CPU & RAM budget for HaSaYa Studio (v4.29).
 
 Why this exists: on weaker computers the studio used every core and as much
 memory as it could, which made the whole system (and the app itself) feel
@@ -10,6 +10,7 @@ survives restarts and follows the optional custom storage folder.
 """
 from __future__ import annotations
 
+import gc
 import json
 import os
 import threading
@@ -151,13 +152,17 @@ def machine_profile() -> dict[str, Any]:
 def effective_cpu_cores(total_cores: int | None = None) -> int:
     """How many CPU cores the app may use right now.
 
-    In the automatic mode nothing changes (the app keeps its existing smart
-    behaviour); in the manual mode the cores are scaled by the user's share.
+    In automatic mode, leaves headroom for the OS and browser so the system
+    stays responsive; in manual mode, scales cores by the user's share.
     """
     cores = max(1, int(total_cores if total_cores is not None else (os.cpu_count() or 1)))
     share = cpu_percent()
     if share is None:
-        return cores
+        if cores <= 1:
+            return 1
+        if cores <= 4:
+            return max(1, cores - 1)
+        return max(2, int(round(cores * 0.7)))
     allowed = int(round(cores * share / 100.0))
     return max(1, min(cores, allowed))
 
@@ -170,7 +175,7 @@ def usable_ram_mb(total_ram_gb: float | None = None, *, reserve_gb: float = RAM_
     free_gb = max(0.0, total_gb - max(0.0, reserve_gb))
     share = ram_percent()
     if share is None:
-        return free_gb * 1024.0
+        return free_gb * 1024.0 * 0.75
     return free_gb * 1024.0 * (share / 100.0)
 
 
