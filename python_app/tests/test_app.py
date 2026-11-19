@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.60"
+    assert health.json()["version"] == "4.61"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -3344,7 +3344,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.60"
+    assert APP_VERSION == "4.61"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "HaSaYaStudio"
@@ -5847,7 +5847,7 @@ def test_v457_browser_close_cancels_active_jobs_and_runtime_avoids_opencl_and_no
 
 
 def test_v459_async_ocr_job_queue_and_builtin_worker_crash_recovery(client, monkeypatch, tmp_path):
-    """v4.60: async OCR jobs return 202 + poll to done/cancelled, and built-in worker auto-recovers on crash with CPU fallback."""
+    """v4.61: async OCR jobs return 202 + poll to done/cancelled, and built-in worker auto-recovers on crash with CPU fallback."""
     import sys
     import time
     import comic_studio.main as main_mod
@@ -5936,7 +5936,7 @@ def test_v459_async_ocr_job_queue_and_builtin_worker_crash_recovery(client, monk
 
 
 def test_v460_isolated_engine_crash_recovery(monkeypatch, tmp_path):
-    """v4.60: IsolatedOcrEngine (hezar-ocr/surya/paddle) restarts and retries once if its worker dies unexpectedly."""
+    """v4.61: IsolatedOcrEngine (hezar-ocr/surya/paddle) restarts and retries once if its worker dies unexpectedly."""
     import io as _io
     import json as _json
     import comic_studio.ocr as ocr_mod
@@ -5996,3 +5996,82 @@ def test_v460_isolated_engine_crash_recovery(monkeypatch, tmp_path):
     finally:
         img.close()
         iso.close()
+
+
+def test_v461_builtin_worker_end_to_end_via_ocr_jobs_and_run_py(client, monkeypatch, tmp_path):
+    """v4.61: _invoke_recognize -> should_use_builtin_worker -> _builtin_worker.recognize (including is_job_cancelled) and run.py --builtin-ocr-worker work end-to-end."""
+    import json as _json
+    import os as _os
+    import subprocess as _sp
+    import sys as _sys
+    import time as _time
+    from pathlib import Path as _Path
+
+    project, item = make_project(client)
+    pid = project["id"]
+
+    # 1. Real subprocess boot of `run.py --builtin-ocr-worker`
+    run_py = _Path(__file__).resolve().parent.parent / "run.py"
+    proc = _sp.Popen(
+        [_sys.executable, str(run_py), "--builtin-ocr-worker", "--parent-pid", str(_os.getpid())],
+        stdin=_sp.PIPE,
+        stdout=_sp.PIPE,
+        stderr=_sp.PIPE,
+        text=True,
+    )
+    try:
+        ready_msg = _json.loads(proc.stdout.readline())
+        assert ready_msg["type"] == "ready"
+        proc.stdin.write(_json.dumps({"cmd": "shutdown"}) + "\n")
+        proc.stdin.flush()
+        bye_msg = _json.loads(proc.stdout.readline())
+        assert bye_msg == {"type": "bye"}
+        assert proc.wait(timeout=10) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+    # 2. Real POST /ocr/jobs -> _invoke_recognize -> should_use_builtin_worker -> _builtin_worker.recognize (no recognize_image monkeypatch!)
+    fake_worker = tmp_path / "e2e_builtin_worker.py"
+    fake_worker.write_text(
+        "import json, os, sys\n"
+        "sys.stdout.write(json.dumps({'type': 'ready', 'pid': os.getpid()}) + '\\n')\n"
+        "sys.stdout.flush()\n"
+        "while True:\n"
+        "    line = sys.stdin.readline()\n"
+        "    if not line:\n"
+        "        break\n"
+        "    req = json.loads(line)\n"
+        "    if req.get('cmd') == 'shutdown':\n"
+        "        sys.stdout.write(json.dumps({'type': 'bye'}) + '\\n')\n"
+        "        sys.stdout.flush()\n"
+        "        break\n"
+        "    sys.stdout.write(json.dumps({'type': 'result', 'ok': True, 'blocks': [{'text': 'E2E WORKER OK', 'confidence': 0.98, 'polygon': [[5, 5], [95, 5], [95, 35], [5, 35]]}]}) + '\\n')\n"
+        "    sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("COMIC_STUDIO_BUILTIN_WORKER", "1")
+    bw = client.app.state.registry._builtin_worker
+    monkeypatch.setattr(bw, "_build_command", lambda: ([_sys.executable, str(fake_worker)], str(tmp_path)))
+    try:
+        start_resp = client.post(
+            f"/api/projects/{pid}/ocr/jobs",
+            json={"image_ids": [item["id"]], "engine": "rapidocr-v6", "language": "eng"},
+        )
+        assert start_resp.status_code == 202
+        job_id = start_resp.json()["jobId"]
+        final_payload = None
+        for _ in range(80):
+            poll = client.get(f"/api/jobs/{job_id}")
+            assert poll.status_code == 200
+            data = poll.json()
+            if data["status"] != "running":
+                final_payload = data
+                break
+            _time.sleep(0.02)
+        assert final_payload is not None
+        assert final_payload["status"] == "done", final_payload
+        assert final_payload["result"]["images"][0]["ocrCompleted"] is True
+        assert final_payload["result"]["images"][0]["blocks"][0]["text"] == "E2E WORKER OK"
+    finally:
+        bw.stop()

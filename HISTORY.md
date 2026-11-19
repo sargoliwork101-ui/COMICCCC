@@ -1,5 +1,14 @@
 # تاریخچهٔ تغییرات
 
+## HaSaYa Studio 4.61 — 2026-11-19
+
+- **رفع فوری دو خطای واقعی در مسیر پردازشگر ایزولهٔ داخلی (`main.py` و `ocr_builtin_worker.py`)**:
+  - **واردکردن `is_job_cancelled` در `main.py`**: خطای زمان اجرای `name 'is_job_cancelled' is not defined` هنگام اجرای OCR از طریق `BuiltinOcrWorkerClient` برطرف شد.
+  - **اصلاح مسیر import در `ocr_builtin_worker.py`**: توابع `configure_native_runtime` و `trim_process_memory` به‌جای `.resources` از `.ocr_managed` وارد شدند تا اجرای مستقیم `run.py --builtin-ocr-worker` بدون خطای `ImportError` آغاز شود.
+- **افزودن تست سرتاسری واقعی (`test_app.py`)**:
+  - `test_v461_builtin_worker_end_to_end_via_ocr_jobs_and_run_py`: اجرای واقعی `run.py --builtin-ocr-worker` (`ready` → `shutdown` → `bye`) و اجرای کامل مسیر `POST /api/projects/{id}/ocr/jobs` ← `_invoke_recognize` ← `should_use_builtin_worker` ← `BuiltinOcrWorkerClient.recognize` بدون mock کردن `recognize_image`.
+- **افزایش نسخه و بررسی کامل**: نسخه به `4.61` (`4.6.1`) افزایش یافت؛ `git diff --check`، `npm test` (۱۷ مجموعه)، `node python_app/tests/app_ui.test.js`، `eslint` و `pytest` (**۳۱۶ تست موفق**، ۲ `skipped`، ۰ خطا) همگی موفق شدند.
+
 ## HaSaYa Studio 4.60 — 2026-11-19
 
 - **تکمیل بازیابی خودکار موتورهای ایزوله و جداسازی خطای واقعی OCR از `Failed to fetch`**:

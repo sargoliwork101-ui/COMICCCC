@@ -28,7 +28,7 @@ from starlette.concurrency import run_in_threadpool
 from PIL import UnidentifiedImageError
 
 from . import APP_NAME, APP_VERSION
-from .activity import ActivityLog, JobCancelledError, cancellation_scope, reporting
+from .activity import ActivityLog, JobCancelledError, cancellation_scope, is_job_cancelled, reporting
 from .backup import BackupError, cleanup_backup_temp, make_backup, restore_backup
 from .exporter import build_docx, build_images_zip, build_pdf, build_pptx, build_txt, clean_name, crop_box, image_payload
 from .watermark_render import has_active_watermark

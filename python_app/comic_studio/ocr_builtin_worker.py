@@ -121,7 +121,7 @@ def _worker_main(argv: list[str] | None = None) -> int:
 
     from . import ocr as ocr_mod
     from .activity import JobCancelledError, reporting
-    from .resources import configure_native_runtime, trim_process_memory
+    from .ocr_managed import configure_native_runtime, trim_process_memory
 
     configure_native_runtime(True)
     registry = ocr_mod.EngineRegistry()
