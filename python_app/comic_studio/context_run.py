@@ -17,7 +17,7 @@ from .translation import (
     normalize_target_language,
     target_language_direction,
 )
-from .translation_plan import logical_page_units, split_ai_paragraph, target_snapshot
+from .translation_plan import logical_page_units, target_snapshot
 
 RUN_KEY = '_aiContextRun'
 SUMMARY_KEY = '_aiStorySummary'
@@ -318,8 +318,10 @@ def next_request(run: dict[str, Any], skill: str) -> tuple[ContextRequest | Free
             break
         remaining = job['remaining']
         prefix = combine_translation_texts([c['text'] for c in chosen])
-        def fits_next(part: str) -> bool:
-            return request.fits((prefix + '\n' if prefix else '') + part)
+        # The values are bound as defaults on purpose: a closure that reads the
+        # loop variables would silently use the values of a later iteration.
+        def fits_next(part: str, _request: Any = request, _prefix: str = prefix) -> bool:
+            return _request.fits((_prefix + '\n' if _prefix else '') + part)
         if fits_next(remaining):
             chosen.append({'job': index, 'text': remaining, 'rest': '', 'join': ''})
             continue
@@ -437,6 +439,10 @@ def apply_response(state: dict[str, Any], run: dict[str, Any], chosen: list[dict
         for ref in job['refs']:
             block = lookup[(str(ref['imageId']), str(ref['blockId']))]
             block['tr'] = job['accumulated']; block['richHtml'] = ''
+            # v4.43: persist whether this block was produced by an AI agent or
+            # by a plain/direct/fallback path. The flag lets the image grid
+            # show a tiny "AI" badge without re-querying translation logs.
+            block['aiTranslated'] = run['provider'] not in {'free', 'local'}
             apply_translated_block_defaults(block, target_language=target_lang)
             # Old checkpoints describe different payloads, not this context run.
             block.pop('_aiTranslationParts', None); block.pop('_aiReusedTranslation', None)

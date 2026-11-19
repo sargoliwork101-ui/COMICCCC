@@ -10,7 +10,6 @@ from PIL import Image, ImageDraw
 from support_client import scoped_client
 
 from comic_studio.local_nmt import (
-    LOCAL_NMT_MODELS,
     LocalNmtError,
     LocalNmtManager,
     resolve_nllb_pair,

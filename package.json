@@ -1,16 +1,17 @@
 {
-  "name": "pic-to-pdf-extension",
-  "version": "2.68.0",
+  "name": "hasaya-chrome-extension",
+  "version": "3.3.0",
   "private": true,
-  "description": "افزونهٔ Chrome برای جمع‌آوری تصاویر کمیک و وب‌تون و خروجی PDF/تصویر به‌همراه OCR و ترجمه + برنامهٔ دسکتاپ Comic OCR Studio",
+  "description": "افزونهٔ Chrome HASAYA برای جمع‌آوری تصاویر کمیک و وب‌تون و خروجی PDF/تصویر به‌همراه OCR و ترجمه + برنامهٔ دسکتاپ HaSaYa Studio",
   "scripts": {
-    "test": "node tests/test-paths.js && node tests/test-smoke.js && node tests/test-ai-translate.js && node tests/test-popup.js && node tests/test-background.js && node tests/test-pdf-import.js && node tests/test-dom.js && node tests/test-errors.js && node tests/test-interact.js && node tests/test-navigation.js && node tests/test-gbooks-background.js && node tests/test-gbooks-popup.js && node tests/test-update.js",
+    "test": "node tests/test-paths.js && node tests/test-smoke.js && node tests/test-ai-translate.js && node tests/test-ai-settings.js && node tests/test-page-translation.js && node tests/test-page-translation-content.js && node tests/test-popup.js && node tests/test-background.js && node tests/test-pdf-import.js && node tests/test-pdf-import-store.js && node tests/test-dom.js && node tests/test-errors.js && node tests/test-interact.js && node tests/test-navigation.js && node tests/test-gbooks-background.js && node tests/test-gbooks-popup.js && node tests/test-update.js",
     "test:studio-browser": "node python_app/tests/app_browser.test.cjs",
     "lint": "eslint ."
   },
   "devDependencies": {
     "@sparticuz/chromium": "^153.0.0",
     "eslint": "^9.0.0",
+    "fake-indexeddb": "^6.2.8",
     "jsdom": "^30.0.0",
     "puppeteer-core": "^25.16.0"
   },
