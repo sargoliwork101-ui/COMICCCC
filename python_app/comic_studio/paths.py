@@ -172,7 +172,7 @@ def models_dir() -> Path:
 
 
 def bundled_models_dir() -> Path | None:
-    """Optional read-only offline model bundle shipped next to ComicOCRStudio.exe or python_app."""
+    """Optional read-only offline model bundle shipped next to HaSaYaStudio.exe or python_app."""
     raw_env = os.environ.get("COMIC_STUDIO_BUNDLED_MODELS")
     candidates: list[Path] = []
     if raw_env and raw_env.strip():
@@ -237,7 +237,7 @@ def ensure_custom_site_packages_on_path() -> Path | None:
 def _is_forbidden_system_or_app_dir(resolved: Path) -> str | None:
     # 1. Never allow bare filesystem / drive root (e.g. `C:\`, `D:\`, `/`)
     if resolved.parent == resolved:
-        return "ریشهٔ مستقیم درایو (مثل D:\\) قابل انتخاب نیست؛ لطفاً یک پوشهٔ مشخص مثل D:\\ComicOCRStudio انتخاب کنید."
+        return "ریشهٔ مستقیم درایو (مثل D:\\) قابل انتخاب نیست؛ لطفاً یک پوشهٔ مشخص مثل D:\\HaSaYaStudio انتخاب کنید."
 
     norm = os.path.normcase(str(resolved))
     if os.name == "nt":
@@ -286,7 +286,7 @@ def validate_custom_data_dir(raw_path: str) -> Path:
         raise ValueError("مسیر واردشده کاراکتر غیرمجاز دارد.")
     candidate = Path(expanded)
     if not candidate.is_absolute():
-        raise ValueError("لطفاً مسیر کامل پوشه را وارد کنید (مثلاً D:\\ComicOCRStudio).")
+        raise ValueError("لطفاً مسیر کامل پوشه را وارد کنید (مثلاً D:\\HaSaYaStudio).")
     try:
         resolved = candidate.resolve(strict=False)
     except OSError as exc:
@@ -538,7 +538,7 @@ def apply_storage_directory(
     # Block recursive parent/child nesting when migrating
     if old_dir in target_dir.parents or target_dir in old_dir.parents:
         raise ValueError(
-            "مسیر جدید نباید زیرپوشه یا پوشهٔ والدِ مستقیم مسیر فعلی باشد؛ لطفاً یک پوشهٔ مجزا (مثلاً D:\\ComicOCRStudio) انتخاب کنید."
+            "مسیر جدید نباید زیرپوشه یا پوشهٔ والدِ مستقیم مسیر فعلی باشد؛ لطفاً یک پوشهٔ مجزا (مثلاً D:\\HaSaYaStudio) انتخاب کنید."
         )
 
     migrated_bytes = 0
@@ -675,7 +675,7 @@ def pick_folder_dialog(initial_dir: str | None = None) -> str | None:
             [
                 "osascript",
                 "-e",
-                'POSIX path of (choose folder with prompt "پوشهٔ ذخیره‌سازی Comic OCR Studio را انتخاب کنید:")',
+                'POSIX path of (choose folder with prompt "پوشهٔ ذخیره‌سازی HaSaYa Studio را انتخاب کنید:")',
             ],
             capture_output=True,
             text=True,
@@ -754,5 +754,5 @@ def pick_folder_dialog(initial_dir: str | None = None) -> str | None:
             pass
 
     raise RuntimeError(
-        "پنجرهٔ گرافیکی انتخاب پوشه در این محیط در دسترس نیست؛ لطفاً مسیر پوشه (مثلاً D:\\ComicOCRStudio) را مستقیماً در کادر بالا تایپ یا پیست کنید."
+        "پنجرهٔ گرافیکی انتخاب پوشه در این محیط در دسترس نیست؛ لطفاً مسیر پوشه (مثلاً D:\\HaSaYaStudio) را مستقیماً در کادر بالا تایپ یا پیست کنید."
     )

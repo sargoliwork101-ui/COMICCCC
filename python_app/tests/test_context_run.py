@@ -17,8 +17,9 @@ def make_project(client):
     project = client.post(route + '/files', files=[('files', ('a.png', png(), 'image/png')), ('files', ('b.png', png(), 'image/png'))]).json()
     for n, image in enumerate(project['images']):
         image['blocks'] = [{'id':1, 'text':'repeated title', 'tr':'old', 'enabled':True}, {'id':2, 'text':'page ' + str(n), 'tr':'old', 'enabled':True}]
-    assert client.put(route + '/state', json={'state': project}).status_code == 200
-    return route, project
+    saved = client.put(route + '/state', json={'state': project})
+    assert saved.status_code == 200, saved.text
+    return route, saved.json()
 
 
 def test_safe_prefix_splits_sentence_boundaries_inside_one_ocr_line():
@@ -126,7 +127,6 @@ def test_actual_openai_and_gemini_payload_are_bounded_and_summary_is_validated(t
     import httpx
     from comic_studio.context_budget import ContextBudget, build_context_request
     from comic_studio.context_run import provider_policy
-    from comic_studio.translation import TranslationError
     monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
     service = TranslationService()
     captured = []
@@ -236,7 +236,7 @@ def test_rolling_summary_auto_shortens_to_fit_next_safe_request():
     from comic_studio.context_run import create_run, next_request
     import copy
     budget = ContextBudget(1000, 15, 0)
-    empty = build_context_request(budget, 'English', '', '')
+    build_context_request(budget, 'English', '', '')
     source = 'A' * 499 + '.'
     state = {'images':[{'id':'p','name':'page','order':0,'blocks':[{'id':1,'text':source,'enabled':True}]}]}
     run = create_run(copy.deepcopy(state), ['p'], 'openai', 'eng', '', 'x' * 90, 1000, 15, 0, False, {})
@@ -568,7 +568,6 @@ def test_commit_before_cleanup_never_reapplies_or_resends(tmp_path, monkeypatch)
         route, project, step = _pending_setup(client)
         original_remove = pending_results.remove
         monkeypatch.setattr(pending_results, 'remove', lambda *a: (_ for _ in ()).throw(OSError('crash after commit')))
-        import pytest
         committed = client.post(route+'/context-step', json=step)
         assert committed.status_code == 200, committed.text
         monkeypatch.setattr(pending_results, 'remove', original_remove)
