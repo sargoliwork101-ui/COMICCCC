@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.58"
+    assert health.json()["version"] == "4.59"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -3344,7 +3344,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.58"
+    assert APP_VERSION == "4.59"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "HaSaYaStudio"
@@ -5844,3 +5844,92 @@ def test_v457_browser_close_cancels_active_jobs_and_runtime_avoids_opencl_and_no
     assert trim_calls == []
     reg.unload_all(except_id=None)
     assert trim_calls == [True]
+
+
+def test_v459_async_ocr_job_queue_and_builtin_worker_crash_recovery(client, monkeypatch, tmp_path):
+    """v4.59: async OCR jobs return 202 + poll to done/cancelled, and built-in worker auto-recovers on crash with CPU fallback."""
+    import sys
+    import time
+    import comic_studio.main as main_mod
+    import comic_studio.ocr as ocr_mod
+    from comic_studio.ocr_builtin_worker import BuiltinOcrWorkerClient
+
+    project, item = make_project(client)
+    pid = project["id"]
+
+    # 1. Async job endpoint returns 202 immediately and polling /api/jobs/{jobId} finishes cleanly
+    monkeypatch.setattr(
+        ocr_mod,
+        "recognize_image",
+        lambda engine, image, *a, **kw: [{"text": "ASYNC JOB TEXT", "confidence": 0.95, "polygon": [[10, 10], [110, 10], [110, 40], [10, 40]]}],
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "recognize_image",
+        lambda engine, image, *a, **kw: [{"text": "ASYNC JOB TEXT", "confidence": 0.95, "polygon": [[10, 10], [110, 10], [110, 40], [10, 40]]}],
+    )
+    start_resp = client.post(
+        f"/api/projects/{pid}/ocr/jobs",
+        json={"image_ids": [item["id"]], "engine": "rapidocr-v6", "language": "eng"},
+    )
+    assert start_resp.status_code == 202
+    job_id = start_resp.json()["jobId"]
+    final_payload = None
+    for _ in range(50):
+        poll = client.get(f"/api/jobs/{job_id}")
+        assert poll.status_code == 200
+        data = poll.json()
+        if data["status"] != "running":
+            final_payload = data
+            break
+        time.sleep(0.02)
+    assert final_payload is not None
+    assert final_payload["status"] == "done"
+    assert final_payload["result"]["images"][0]["ocrCompleted"] is True
+    assert final_payload["result"]["images"][0]["blocks"][0]["text"] == "ASYNC JOB TEXT"
+
+    # 2. Missing job ID returns 404
+    assert client.get("/api/jobs/nonexistent-job-id").status_code == 404
+
+    # 3. BuiltinOcrWorkerClient survives native worker crash on attempt 0 and recovers in CPU mode
+    fake_worker_script = tmp_path / "fake_builtin_worker.py"
+    fake_worker_script.write_text(
+        "import json, os, sys\n"
+        "sys.stdout.write(json.dumps({'type': 'ready', 'pid': os.getpid()}) + '\\n')\n"
+        "sys.stdout.flush()\n"
+        "while True:\n"
+        "    line = sys.stdin.readline()\n"
+        "    if not line:\n"
+        "        break\n"
+        "    req = json.loads(line)\n"
+        "    if req.get('cmd') == 'shutdown':\n"
+        "        sys.stdout.write(json.dumps({'type': 'bye'}) + '\\n')\n"
+        "        sys.stdout.flush()\n"
+        "        break\n"
+        "    if os.environ.get('COMIC_STUDIO_FORCE_CPU') != '1':\n"
+        "        sys.stderr.write('simulated native DirectML crash\\n')\n"
+        "        sys.stderr.flush()\n"
+        "        os._exit(139)\n"
+        "    sys.stdout.write(json.dumps({'type': 'log', 'message': 'CPU worker recovered', 'level': 'info', 'progress': None}) + '\\n')\n"
+        "    sys.stdout.write(json.dumps({'type': 'result', 'ok': True, 'blocks': [{'text': 'RECOVERED', 'confidence': 0.99, 'polygon': [[1, 1], [10, 1], [10, 10], [1, 10]]}]}) + '\\n')\n"
+        "    sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+    worker = BuiltinOcrWorkerClient()
+    monkeypatch.setattr(worker, "_build_command", lambda: ([sys.executable, str(fake_worker_script)], str(tmp_path)))
+    logs: list[str] = []
+    img = Image.new("RGB", (64, 64), "white")
+    try:
+        blocks = worker.recognize(
+            "rapidocr-v6",
+            img,
+            "eng",
+            emit_fn=lambda msg, level="info", progress=None: logs.append(f"{level}:{msg}"),
+        )
+        assert blocks == [{"text": "RECOVERED", "confidence": 0.99, "polygon": [[1, 1], [10, 1], [10, 10], [1, 10]]}]
+        assert worker._force_cpu is True
+        assert any("warning:" in m for m in logs)
+        assert any("CPU worker recovered" in m for m in logs)
+    finally:
+        img.close()
+        worker.stop()

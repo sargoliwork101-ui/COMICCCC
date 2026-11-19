@@ -29,6 +29,8 @@ let jobProgressTransform = null;
 let sessionTimer = null;
 let sessionCloseSent = false;
 let heartbeatInFlight = false;
+let consecutiveHeartbeatFailures = 0;
+let heartbeatRetryTimer = null;
 let sessionVisibilityBound = false;
 let localActivityId = 0;
 let editorCloseTask = null;
@@ -331,22 +333,47 @@ async function clearActivity(notify = true) {
   }
   if (notify && succeeded) toast('گزارش کارها پاک شد');
 }
+function scheduleHeartbeatProbe(delayMs) {
+  if (sessionCloseSent) return;
+  if (heartbeatRetryTimer) clearTimeout(heartbeatRetryTimer);
+  heartbeatRetryTimer = setTimeout(() => {
+    heartbeatRetryTimer = null;
+    heartbeat();
+  }, Math.max(250, Number(delayMs) || 1500));
+  heartbeatRetryTimer.unref?.();
+}
 async function heartbeat() {
   if (sessionCloseSent || heartbeatInFlight) return;
   heartbeatInFlight = true;
   try {
     const response = await fetch('/api/session/heartbeat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: TAB_ID }), cache: 'no-store' });
-    if (response && response.ok) noteServerReachable();
-    else showServerUnreachable(`پاسخ سرور برای ضربان نشست: ${response ? response.status : 'بدون پاسخ'}`);
+    if (response && response.ok) {
+      noteServerReachable();
+    } else {
+      consecutiveHeartbeatFailures += 1;
+      if (consecutiveHeartbeatFailures >= 2) {
+        showServerUnreachable(`پاسخ سرور برای ضربان نشست: ${response ? response.status : 'بدون پاسخ'}`);
+        scheduleHeartbeatProbe(5000);
+      } else {
+        scheduleHeartbeatProbe(1500);
+      }
+    }
   } catch (cause) {
-    // The local app is gone (closed while this tab was in the background).
-    // Tell the user instead of leaving a dead workspace behind.
-    showServerUnreachable(cause?.message || 'بدون پاسخ');
+    consecutiveHeartbeatFailures += 1;
+    if (consecutiveHeartbeatFailures >= 2) {
+      // Confirmed unreachable across consecutive probes — show recovery banner
+      // and keep probing every 5s so it auto-hides the moment the server answers.
+      showServerUnreachable(cause?.message || 'بدون پاسخ');
+      scheduleHeartbeatProbe(5000);
+    } else {
+      scheduleHeartbeatProbe(1500);
+    }
   }
   finally { heartbeatInFlight = false; }
 }
 function startSession() {
   sessionCloseSent = false;
+  consecutiveHeartbeatFailures = 0;
   heartbeat();
   if (!sessionTimer) {
     sessionTimer = setInterval(heartbeat, 45000);
@@ -362,6 +389,7 @@ function closeSession() {
   sessionCloseSent = true;
   stopTrialCountdown();
   if (sessionTimer) { clearInterval(sessionTimer); sessionTimer = null; }
+  if (heartbeatRetryTimer) { clearTimeout(heartbeatRetryTimer); heartbeatRetryTimer = null; }
   if (activityPollTimer) { clearTimeout(activityPollTimer); activityPollTimer = null; }
   if (downloadUrl) { URL.revokeObjectURL(downloadUrl); downloadUrl = null; }
   if (backupDownloadUrl) { URL.revokeObjectURL(backupDownloadUrl); backupDownloadUrl = null; }
@@ -423,11 +451,15 @@ function showServerUnreachable(detail = '') {
   serverUnreachableShown = true;
 }
 function hideServerUnreachable() {
+  consecutiveHeartbeatFailures = 0;
+  if (heartbeatRetryTimer) { clearTimeout(heartbeatRetryTimer); heartbeatRetryTimer = null; }
   const alert = $('serverAlert');
   if (alert) alert.classList.add('hidden');
   serverUnreachableShown = false;
 }
 function noteServerReachable() {
+  consecutiveHeartbeatFailures = 0;
+  if (heartbeatRetryTimer) { clearTimeout(heartbeatRetryTimer); heartbeatRetryTimer = null; }
   if (serverUnreachableShown) hideServerUnreachable();
 }
 async function retryServerConnection() {
@@ -2622,6 +2654,66 @@ async function reviewTranslationReplacements(snapshot) {
     toast(`ترجمهٔ قبلی برای ${restoreIds.length} صفحه حفظ شد.`);
   }
 }
+async function submitAndWaitOcrPage(projectId, ocrBody, { checkCancel = null, signal = null } = {}) {
+  let jobInfo;
+  try {
+    jobInfo = await runWithNetworkRetry(
+      ({ isLastAttempt }) => api(`/api/projects/${projectId}/ocr/jobs`, {
+        ...jsonOptions('POST', ocrBody),
+        signal,
+        suppressServerAlert: !isLastAttempt,
+      }),
+      { delays: [600, 1400, 2600, 4200], checkCancel, signal },
+    );
+  } catch (error) {
+    if (error && (error.status === 404 || error.status === 405)) {
+      return runWithNetworkRetry(
+        ({ isLastAttempt }) => api(`/api/projects/${projectId}/ocr`, {
+          ...jsonOptions('POST', ocrBody),
+          signal,
+          suppressServerAlert: !isLastAttempt,
+        }),
+        { checkCancel, signal },
+      );
+    }
+    throw error;
+  }
+  if (!jobInfo || !jobInfo.jobId) return jobInfo;
+  const jobUrl = `/api/jobs/${encodeURIComponent(jobInfo.jobId)}`;
+  while (true) {
+    checkCancel?.();
+    if (signal?.aborted) {
+      const abortErr = new Error('عملیات توسط کاربر لغو شد.');
+      abortErr.name = 'AbortError'; abortErr.cancelled = true;
+      throw abortErr;
+    }
+    const statusPayload = await runWithNetworkRetry(
+      ({ isLastAttempt }) => api(jobUrl, {
+        cache: 'no-store',
+        signal,
+        suppressServerAlert: !isLastAttempt,
+      }),
+      { delays: [600, 1400, 2600, 4200, 6000], checkCancel, signal },
+    );
+    if (statusPayload?.status === 'done') return statusPayload.result;
+    if (statusPayload?.status === 'cancelled') {
+      const abortErr = new Error(statusPayload.error || 'عملیات توسط کاربر لغو شد.');
+      abortErr.name = 'AbortError'; abortErr.cancelled = true; abortErr.status = 499;
+      throw abortErr;
+    }
+    if (statusPayload?.status === 'error') {
+      const err = new Error(statusPayload.error || 'خطا در اجرای OCR');
+      err.status = Number(statusPayload.statusCode || 500);
+      if (statusPayload.pendingId) {
+        err.pendingId = statusPayload.pendingId;
+        err.pendingKind = statusPayload.pendingKind || 'ocr';
+      }
+      if (statusPayload.code) err.code = statusPayload.code;
+      throw err;
+    }
+    await sleep(350);
+  }
+}
 async function runOcr() {
   if (ocrRunning) return;
   if (!isModuleLicensed('ocr')) { await ensureModuleLicensed('ocr'); return; }
@@ -2700,12 +2792,9 @@ async function runOcr() {
           batch_index: idx + 1,
           batch_total: totalPages,
         };
-        const result = await runWithNetworkRetry(
-          ({ isLastAttempt }) => api(`/api/projects/${state.project.id}/ocr`, {
-            ...jsonOptions('POST', ocrBody),
-            signal: controller.signal,
-            suppressServerAlert: !isLastAttempt,
-          }),
+        const result = await submitAndWaitOcrPage(
+          state.project.id,
+          ocrBody,
           { checkCancel: checkOcrNotCancelled, signal: controller.signal },
         );
         if (isLastPage) usedKeepEngineLoaded = false;
@@ -2770,7 +2859,7 @@ async function runOcr() {
     ocrClosingNormally = false; ocrRunning = false; $('startOcrBtn').disabled = false; $('cancelOcrBtn')?.classList.add('hidden');
     dismissJobCancelModal('ocr');
     usedKeepEngineLoaded = false;
-    api('/api/engines/unload', { method: 'POST' })
+    api('/api/engines/unload', { method: 'POST', suppressServerAlert: true })
       .then(() => refreshEngineMemory().catch(() => {}))
       .catch(() => { refreshEngineMemory().catch(() => {}); });
   }
@@ -4181,7 +4270,7 @@ function formatRamSummary() {
 
 async function refreshEngineMemory() {
   try {
-    const mem = await api('/api/engines/memory');
+    const mem = await api('/api/engines/memory', { suppressServerAlert: true });
     if (mem && typeof mem === 'object') {
       engineMemorySummary = mem;
       syncEngineUpdateUi();

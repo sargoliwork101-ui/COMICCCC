@@ -159,10 +159,32 @@ def create_app() -> FastAPI:
     active_jobs_count = 0
     next_job_token = 0
     active_job_entries: dict[int, tuple[str, threading.Event, Any]] = {}
+    background_jobs_lock = threading.Lock()
+    background_jobs: dict[str, dict[str, Any]] = {}
+
+    def _prune_background_jobs_locked() -> None:
+        now = time.monotonic()
+        stale = [
+            jid for jid, entry in background_jobs.items()
+            if entry.get("status") != "running" and (now - float(entry.get("updatedAt") or entry.get("createdAt") or now)) > 1800.0
+        ]
+        for jid in stale:
+            background_jobs.pop(jid, None)
+        while len(background_jobs) > 120:
+            victim = next(
+                (jid for jid, entry in background_jobs.items() if entry.get("status") != "running"),
+                None,
+            )
+            if victim is None:
+                break
+            background_jobs.pop(victim, None)
 
     def _has_active_jobs() -> bool:
         with active_jobs_lock:
-            return active_jobs_count > 0
+            if active_jobs_count > 0:
+                return True
+        with background_jobs_lock:
+            return any(entry.get("status") == "running" for entry in background_jobs.values())
 
     sessions = SessionManager(is_busy=_has_active_jobs)
 
@@ -173,6 +195,13 @@ def create_app() -> FastAPI:
                 for kind, ev, cb in active_job_entries.values()
                 if target_kind == "all" or kind == target_kind
             ]
+        with background_jobs_lock:
+            bg_events = [
+                entry["cancelEv"]
+                for entry in background_jobs.values()
+                if entry.get("status") == "running"
+                and (target_kind == "all" or entry.get("kind") == target_kind)
+            ]
         count = 0
         for _kind, ev, cb in entries:
             if not ev.is_set():
@@ -181,6 +210,10 @@ def create_app() -> FastAPI:
             if callable(cb):
                 with contextlib.suppress(Exception):
                     cb()
+        for ev in bg_events:
+            if not ev.is_set():
+                ev.set()
+                count += 1
         if target_kind in {"all", "ocr"}:
             cancel_ocr_fn = getattr(registry, "cancel_ocr", None)
             if callable(cancel_ocr_fn):
@@ -253,6 +286,7 @@ def create_app() -> FastAPI:
         return entry
     app.state.activity = activity
     app.state.sessions = sessions
+    app.state.registry = registry
     app.state.cancel_active_jobs = cancel_active_jobs
     activity.add("برنامه آماده است")
 
@@ -1181,6 +1215,21 @@ def create_app() -> FastAPI:
         page_mode: str = "auto",
         persian_preprocess: bool = False,
     ) -> list[dict[str, Any]]:
+        engine_id = str(getattr(engine, "id", "") or "")
+        should_worker = getattr(registry, "should_use_builtin_worker", None)
+        if callable(should_worker) and should_worker(engine_id, recognize_image):
+            return registry._builtin_worker.recognize(
+                engine_id,
+                image,
+                language,
+                contrast,
+                precise,
+                min_confidence,
+                page_mode=page_mode,
+                persian_preprocess=persian_preprocess,
+                emit_fn=activity.add,
+                is_cancelled_fn=is_job_cancelled,
+            )
         kwargs: dict[str, Any] = {}
         if _supports_kwarg(recognize_image, "page_mode"):
             kwargs["page_mode"] = page_mode
@@ -1240,8 +1289,7 @@ def create_app() -> FastAPI:
         activity.add(f"آزمایش تمام شد؛ {len(blocks)} تکه متن تشخیص داده شد", "success", 1.0)
         return {"engine": engine_id, "imageId": values.image_id, "blocks": blocks, "memory": registry.memory_status()}
 
-    @app.post("/api/projects/{project_id}/ocr")
-    async def run_ocr(project_id: str, values: OcrRequest, http_request: Request) -> dict[str, Any]:
+    def _validate_ocr_request(project_id: str, values: OcrRequest) -> tuple[dict[str, Any], dict[str, str | None], dict[str, str], Any, list[str]]:
         require_module_license("ocr")
         with store._lock:
             state = project(project_id)
@@ -1260,6 +1308,17 @@ def create_app() -> FastAPI:
                 entry = pending_results.load(store, project_id, pending['id'])
                 if set(ids).intersection(output['id'] for output in entry['outputs']):
                     raise PendingResultConflict(pending['id'], 'ocr')
+        return state, baseline, original_ocr, engine, ids
+
+    async def _execute_ocr(
+        project_id: str,
+        values: OcrRequest,
+        preflight: tuple[dict[str, Any], dict[str, str | None], dict[str, str], Any, list[str]],
+        *,
+        http_request: Request | None = None,
+        external_cancel_ev: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        state, baseline, original_ocr, engine, ids = preflight
         registry.reset_ocr_cancel()
         await run_in_threadpool(configure_native_runtime, True)
         await run_in_threadpool(registry.unload_all, values.engine)
@@ -1326,6 +1385,7 @@ def create_app() -> FastAPI:
                 f"در «{item['name']}» {len(organized)} تکه متن ({mode_label}) پیدا شد",
                 progress=done_p,
             )
+
             def _format_ocr_log_entry(blk: dict[str, Any]) -> str:
                 raw_txt = str(blk.get("text") or "").strip("\r\n")
                 if not raw_txt.strip():
@@ -1348,21 +1408,29 @@ def create_app() -> FastAPI:
             else:
                 activity.add(f"در «{item['name']}» متنی پیدا نشد", "warning")
 
+        should_worker = getattr(registry, "should_use_builtin_worker", None)
+        use_worker = callable(should_worker) and should_worker(values.engine, recognize_image)
         batch_ctx = (
             engine.configure_batch(total_targets)
-            if hasattr(engine, "configure_batch") and total_targets > 1
+            if (not use_worker) and hasattr(engine, "configure_batch") and total_targets > 1
             else contextlib.nullcontext(1)
         )
         keep_loaded_ok = False
-        ocr_cancel_ev = threading.Event()
+        ocr_cancel_ev = external_cancel_ev if external_cancel_ev is not None else threading.Event()
+
+        async def _http_disconnected() -> bool:
+            return bool(http_request is not None and await http_request.is_disconnected())
+
         try:
             from PIL import Image
 
             with batch_ctx as batch_workers:
                 if int(batch_workers) <= 1:
                     for completed, item in enumerate(target_items, start=1):
-                        if ocr_cancel_ev.is_set() or await http_request.is_disconnected():
+                        if ocr_cancel_ev.is_set() or await _http_disconnected():
                             activity.add("فرایند OCR به درخواست شما متوقف شد.", "warning")
+                            if external_cancel_ev is not None and ocr_cancel_ev.is_set():
+                                raise JobCancelledError("فرایند OCR به درخواست شما متوقف شد.")
                             return store.get(project_id)
                         disp_idx = ui_batch_index if is_ui_paged_batch else completed
                         disp_tot = ui_batch_total if is_ui_paged_batch else total_targets
@@ -1390,8 +1458,10 @@ def create_app() -> FastAPI:
                             page_size = image.size
                         finally:
                             image.close()
-                        if ocr_cancel_ev.is_set() or await http_request.is_disconnected():
+                        if ocr_cancel_ev.is_set() or await _http_disconnected():
                             activity.add("فرایند OCR به درخواست شما متوقف شد.", "warning")
+                            if external_cancel_ev is not None and ocr_cancel_ev.is_set():
+                                raise JobCancelledError("فرایند OCR به درخواست شما متوقف شد.")
                             return store.get(project_id)
                         _apply_page_ocr_result(item, blocks, page_size, completed)
                         if completed < total_targets:
@@ -1437,9 +1507,13 @@ def create_app() -> FastAPI:
                     )
                     if not finished_ok:
                         activity.add("فرایند OCR به درخواست شما متوقف شد.", "warning")
+                        if external_cancel_ev is not None and ocr_cancel_ev.is_set():
+                            raise JobCancelledError("فرایند OCR به درخواست شما متوقف شد.")
                         return store.get(project_id)
-            if ocr_cancel_ev.is_set() or await http_request.is_disconnected():
+            if ocr_cancel_ev.is_set() or await _http_disconnected():
                 activity.add("فرایند OCR به درخواست شما متوقف شد.", "warning")
+                if external_cancel_ev is not None and ocr_cancel_ev.is_set():
+                    raise JobCancelledError("فرایند OCR به درخواست شما متوقف شد.")
                 return store.get(project_id)
             with store._lock:
                 entry = pending_results.stage(store, project_id, 'ocr', {
@@ -1455,6 +1529,8 @@ def create_app() -> FastAPI:
             keep_loaded_ok = bool(values.keep_engine_loaded)
         except JobCancelledError:
             activity.add("فرایند OCR به درخواست شما متوقف شد.", "warning")
+            if external_cancel_ev is not None:
+                raise
             return store.get(project_id)
         except Exception as exc:
             activity.add(f"خواندن متن ناموفق بود: {exc}", "error")
@@ -1473,6 +1549,132 @@ def create_app() -> FastAPI:
                 round((ui_batch_index - 0.18) / ui_batch_total, 4),
             )
         return state
+
+    @app.post("/api/projects/{project_id}/ocr")
+    async def run_ocr(project_id: str, values: OcrRequest, http_request: Request) -> dict[str, Any]:
+        preflight = _validate_ocr_request(project_id, values)
+        return await _execute_ocr(project_id, values, preflight, http_request=http_request)
+
+    background_task_refs: set[asyncio.Task[Any]] = set()
+
+    @app.post("/api/projects/{project_id}/ocr/jobs", status_code=202)
+    async def start_ocr_job(project_id: str, values: OcrRequest) -> JSONResponse:
+        preflight = _validate_ocr_request(project_id, values)
+        job_id = uuid.uuid4().hex
+        cancel_ev = threading.Event()
+        with background_jobs_lock:
+            _prune_background_jobs_locked()
+            background_jobs[job_id] = {
+                "jobId": job_id,
+                "kind": "ocr",
+                "projectId": project_id,
+                "status": "running",
+                "createdAt": time.monotonic(),
+                "updatedAt": time.monotonic(),
+                "cancelEv": cancel_ev,
+                "result": None,
+                "error": None,
+                "statusCode": None,
+            }
+
+        async def _runner() -> None:
+            try:
+                result_state = await _execute_ocr(
+                    project_id,
+                    values,
+                    preflight,
+                    http_request=None,
+                    external_cancel_ev=cancel_ev,
+                )
+                with background_jobs_lock:
+                    entry = background_jobs.get(job_id)
+                    if entry is not None:
+                        entry["status"] = "done"
+                        entry["result"] = result_state
+                        entry["updatedAt"] = time.monotonic()
+            except JobCancelledError as exc:
+                with background_jobs_lock:
+                    entry = background_jobs.get(job_id)
+                    if entry is not None:
+                        entry["status"] = "cancelled"
+                        entry["error"] = str(exc) or "عملیات به درخواست شما لغو شد."
+                        entry["statusCode"] = 499
+                        entry["updatedAt"] = time.monotonic()
+            except PendingResultConflict as exc:
+                with background_jobs_lock:
+                    entry = background_jobs.get(job_id)
+                    if entry is not None:
+                        entry["status"] = "error"
+                        entry["error"] = str(exc)
+                        entry["statusCode"] = 409
+                        entry["pendingId"] = exc.token
+                        entry["pendingKind"] = exc.kind
+                        entry["updatedAt"] = time.monotonic()
+            except LicenseError as exc:
+                with background_jobs_lock:
+                    entry = background_jobs.get(job_id)
+                    if entry is not None:
+                        entry["status"] = "error"
+                        entry["error"] = exc.message
+                        entry["code"] = exc.code
+                        entry["statusCode"] = exc.status_code
+                        entry["updatedAt"] = time.monotonic()
+            except OcrError as exc:
+                with background_jobs_lock:
+                    entry = background_jobs.get(job_id)
+                    if entry is not None:
+                        entry["status"] = "error"
+                        entry["error"] = str(exc)
+                        entry["statusCode"] = 503
+                        entry["updatedAt"] = time.monotonic()
+            except HTTPException as exc:
+                with background_jobs_lock:
+                    entry = background_jobs.get(job_id)
+                    if entry is not None:
+                        entry["status"] = "error"
+                        entry["error"] = str(exc.detail)
+                        entry["statusCode"] = exc.status_code
+                        entry["updatedAt"] = time.monotonic()
+            except Exception as exc:
+                with background_jobs_lock:
+                    entry = background_jobs.get(job_id)
+                    if entry is not None:
+                        entry["status"] = "error"
+                        entry["error"] = str(exc)
+                        entry["statusCode"] = 500
+                        entry["updatedAt"] = time.monotonic()
+            finally:
+                sessions.touch_activity()
+
+        task = asyncio.create_task(_runner())
+        background_task_refs.add(task)
+        task.add_done_callback(background_task_refs.discard)
+        return JSONResponse(
+            {"jobId": job_id, "status": "running"},
+            status_code=202,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get("/api/jobs/{job_id}")
+    def get_background_job(job_id: str) -> JSONResponse:
+        with background_jobs_lock:
+            entry = background_jobs.get(job_id)
+            if entry is None:
+                raise HTTPException(404, "کار درخواستی پیدا نشد.")
+            snapshot: dict[str, Any] = {
+                "jobId": entry["jobId"],
+                "kind": entry["kind"],
+                "status": entry["status"],
+                "result": entry.get("result"),
+                "error": entry.get("error"),
+                "statusCode": entry.get("statusCode"),
+                "pendingId": entry.get("pendingId"),
+                "pendingKind": entry.get("pendingKind"),
+                "code": entry.get("code"),
+            }
+        if snapshot["status"] == "running":
+            sessions.touch_activity()
+        return JSONResponse(snapshot, headers={"Cache-Control": "no-store"})
 
     def translation_settings(provider: str, skill: str | None, target_language: str = "fa") -> dict[str, Any]:
         return {

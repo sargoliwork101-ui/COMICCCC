@@ -604,6 +604,8 @@ def _polygon(box: Any) -> list[list[float]]:
 
 def _detect_onnx_acceleration() -> dict[str, Any]:
     """Detect available ONNX Runtime GPU execution providers (CUDA, Windows DirectML, macOS CoreML)."""
+    if os.environ.get("COMIC_STUDIO_FORCE_CPU") == "1":
+        return {"mode": "cpu", "gpu": False, "params": {}}
     try:
         import onnxruntime as ort
         providers = list(ort.get_available_providers())
@@ -1776,9 +1778,10 @@ class EasyEngine:
                         pass
                     use_gpu = bool(
                         not self._force_cpu
+                        and os.environ.get("COMIC_STUDIO_FORCE_CPU") != "1"
                         and (
                             (hasattr(torch, "cuda") and torch.cuda.is_available())
-                            or (hasattr(torch, "backends") and hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+                            or (hasattr(torch.backends, "mps") and torch.backends.mps.is_available() if hasattr(torch, "backends") else False)
                         )
                     )
                 except Exception:
@@ -3735,6 +3738,9 @@ for _eng_id, _eng_meta in ENGINE_INFO.items():
 
 class EngineRegistry:
     def __init__(self) -> None:
+        from .ocr_builtin_worker import BuiltinOcrWorkerClient
+
+        self._builtin_worker = BuiltinOcrWorkerClient()
         self.engines: dict[str, Any] = {
             "rapidocr-v6": RapidEngine("rapidocr-v6", "v6"),
             "rapidocr-v5": RapidEngine("rapidocr-v5", "v5"),
@@ -3754,6 +3760,39 @@ class EngineRegistry:
                 )
             elif info.get("action") == "guide":
                 self.engines[engine_id] = ManualEngine(engine_id)
+
+    def should_use_builtin_worker(self, engine_id: str, recognize_fn: Any) -> bool:
+        from .ocr_builtin_worker import BUILTIN_ISOLATABLE_ENGINES
+
+        if engine_id not in BUILTIN_ISOLATABLE_ENGINES:
+            return False
+        flag = os.environ.get("COMIC_STUDIO_BUILTIN_WORKER", "").strip()
+        if flag == "0":
+            return False
+        if flag != "1" and os.environ.get("PYTEST_CURRENT_TEST"):
+            return False
+        engine = self.engines.get(engine_id)
+        if recognize_fn is not _ORIG_RECOGNIZE_IMAGE:
+            return False
+        if engine_id in {"rapidocr-v6", "rapidocr-v5"}:
+            return (
+                type(engine) is RapidEngine
+                and RapidEngine._create is _ORIG_RAPID_CREATE
+                and RapidEngine._get is _ORIG_RAPID_GET
+                and RapidEngine.recognize is _ORIG_RAPID_RECOGNIZE
+            )
+        if engine_id == "easyocr":
+            return (
+                type(engine) is EasyEngine
+                and EasyEngine._reader is _ORIG_EASY_READER
+                and EasyEngine.recognize is _ORIG_EASY_RECOGNIZE
+            )
+        return False
+
+    def _engine_loaded_in_ram(self, engine_id: str, engine: Any) -> bool:
+        if bool(getattr(engine, "is_loaded_in_ram", False)):
+            return True
+        return self._builtin_worker.is_running and self._builtin_worker.loaded_engine_id == engine_id
 
     def get(self, engine_id: str):
         if engine_id not in self.engines:
@@ -3803,7 +3842,7 @@ class EngineRegistry:
                 "runtimeInstalled": rt_installed,
                 "modelReady": m_ready,
                 "readyLanguages": ready_languages,
-                "isLoadedInRam": bool(getattr(engine, "is_loaded_in_ram", False)),
+                "isLoadedInRam": self._engine_loaded_in_ram(engine_id, engine),
                 "canUninstall": engine_has_uninstallable_files(engine_id, engine),
                 "isBuiltinBase": engine_id == "rapidocr-v6",
                 **download_fields,
@@ -3816,15 +3855,20 @@ class EngineRegistry:
         app_ram_mb = process_rss_mb()
         worker_ram_mb = 0.0
         loaded_engines: list[dict[str, str]] = []
+        bw_pid = self._builtin_worker.worker_pid
+        bw_engine = self._builtin_worker.loaded_engine_id
+        if bw_pid:
+            worker_ram_mb += process_rss_mb(int(bw_pid))
         for engine_id, info in ENGINE_INFO.items():
             engine = self.engines.get(engine_id)
             if engine is None:
                 continue
-            if bool(getattr(engine, "is_loaded_in_ram", False)):
+            if self._engine_loaded_in_ram(engine_id, engine):
                 loaded_engines.append({"id": engine_id, "name": str(info.get("name") or engine_id)})
-                w_pid = getattr(engine, "worker_pid", None)
-                if w_pid:
-                    worker_ram_mb += process_rss_mb(int(w_pid))
+                if engine_id != bw_engine:
+                    w_pid = getattr(engine, "worker_pid", None)
+                    if w_pid:
+                        worker_ram_mb += process_rss_mb(int(w_pid))
         total_mb = round(app_ram_mb + worker_ram_mb, 1)
         return {
             "processRamMb": app_ram_mb,
@@ -3837,6 +3881,11 @@ class EngineRegistry:
     def unload_all(self, except_id: str | None = None) -> dict[str, Any]:
         before = self.memory_status()
         unloaded: list[str] = []
+        bw_engine = self._builtin_worker.loaded_engine_id
+        if self._builtin_worker.is_running and (except_id is None or bw_engine != except_id):
+            self._builtin_worker.stop()
+            if bw_engine:
+                unloaded.append(bw_engine)
         for engine_id, engine in self.engines.items():
             if except_id and engine_id == except_id:
                 continue
@@ -3847,7 +3896,7 @@ class EngineRegistry:
                     unloader()
                 except Exception:
                     pass
-            if was_loaded:
+            if was_loaded and engine_id not in unloaded:
                 unloaded.append(engine_id)
         if unloaded or except_id is None:
             trim_process_memory(aggressive=(except_id is None))
@@ -3876,6 +3925,7 @@ class EngineRegistry:
     def reset_ocr_cancel(self) -> None:
         with _ACTIVE_OCR_PROCS_LOCK:
             _KILLED_OCR_PROCS.clear()
+        self._builtin_worker.reset_cancel()
 
     def cancel_ocr(self, engine_id: str | None = None) -> None:
         """Preemptively abort active OCR inference subprocesses/workers across built-in and isolated engines."""
@@ -3885,6 +3935,9 @@ class EngineRegistry:
                 _KILLED_OCR_PROCS.add(id(p))
         for proc in procs:
             _kill_process_tree(proc)
+        if engine_id is None or engine_id in {"rapidocr-v6", "rapidocr-v5", "easyocr"}:
+            with contextlib.suppress(Exception):
+                self._builtin_worker.cancel()
         target_ids = [engine_id] if engine_id and engine_id in self.engines else list(self.engines.keys())
         for eid in target_ids:
             engine = self.engines.get(eid)
@@ -5658,3 +5711,11 @@ def recognize_image(
                 emit("نتیجهٔ حباب بهتر نبود؛ بهترین نتیجهٔ فعلی حفظ شد")
     _check_ocr_cancelled()
     return _finalize(best)
+
+
+_ORIG_RECOGNIZE_IMAGE = recognize_image
+_ORIG_RAPID_CREATE = RapidEngine._create
+_ORIG_RAPID_GET = RapidEngine._get
+_ORIG_RAPID_RECOGNIZE = RapidEngine.recognize
+_ORIG_EASY_READER = EasyEngine._reader
+_ORIG_EASY_RECOGNIZE = EasyEngine.recognize

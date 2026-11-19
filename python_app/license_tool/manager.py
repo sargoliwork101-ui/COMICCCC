@@ -64,7 +64,7 @@ from comic_studio.license_guard import (  # noqa: E402
     verify_license_token,
 )
 
-APP_VERSION = "4.58"
+APP_VERSION = "4.59"
 
 
 PUBLIC_KEY_MODULE_PATH = APP_DIR / "comic_studio" / "_public_key.py"
@@ -1682,6 +1682,8 @@ _PANEL_HTML = """<!doctype html>
     let sessionTimer = null;
     let sessionCloseSent = false;
     let heartbeatInFlight = false;
+    let consecutiveHeartbeatFailures = 0;
+    let heartbeatRetryTimer = null;
     let sessionVisibilityBound = false;
     let serverUnreachableShown = false;
     const $ = (id) => document.getElementById(id);
@@ -1710,9 +1712,20 @@ _PANEL_HTML = """<!doctype html>
       serverUnreachableShown = true;
     }
     function hideSellerServerUnreachable() {
+      consecutiveHeartbeatFailures = 0;
+      if (heartbeatRetryTimer) { clearTimeout(heartbeatRetryTimer); heartbeatRetryTimer = null; }
       const box = $('sellerServerAlert');
       if (box) box.hidden = true;
       serverUnreachableShown = false;
+    }
+    function scheduleHeartbeatProbe(delayMs) {
+      if (sessionCloseSent) return;
+      if (heartbeatRetryTimer) clearTimeout(heartbeatRetryTimer);
+      heartbeatRetryTimer = setTimeout(() => {
+        heartbeatRetryTimer = null;
+        heartbeat();
+      }, Math.max(250, Number(delayMs) || 1500));
+      heartbeatRetryTimer.unref?.();
     }
     async function heartbeat() {
       if (sessionCloseSent || heartbeatInFlight) return;
@@ -1724,16 +1737,32 @@ _PANEL_HTML = """<!doctype html>
           body: JSON.stringify({ client_id: TAB_ID, secret: SECRET }),
           cache: 'no-store',
         });
-        if (res && res.ok) hideSellerServerUnreachable();
-        else showSellerServerUnreachable(`پاسخ سرور برای ضربان نشست: ${res ? res.status : 'بدون پاسخ'}`);
+        if (res && res.ok) {
+          hideSellerServerUnreachable();
+        } else {
+          consecutiveHeartbeatFailures += 1;
+          if (consecutiveHeartbeatFailures >= 2) {
+            showSellerServerUnreachable(`پاسخ سرور برای ضربان نشست: ${res ? res.status : 'بدون پاسخ'}`);
+            scheduleHeartbeatProbe(5000);
+          } else {
+            scheduleHeartbeatProbe(1500);
+          }
+        }
       } catch (err) {
-        showSellerServerUnreachable(err?.message || 'بدون پاسخ');
+        consecutiveHeartbeatFailures += 1;
+        if (consecutiveHeartbeatFailures >= 2) {
+          showSellerServerUnreachable(err?.message || 'بدون پاسخ');
+          scheduleHeartbeatProbe(5000);
+        } else {
+          scheduleHeartbeatProbe(1500);
+        }
       } finally {
         heartbeatInFlight = false;
       }
     }
     function startSession() {
       sessionCloseSent = false;
+      consecutiveHeartbeatFailures = 0;
       heartbeat();
       if (!sessionTimer) {
         sessionTimer = setInterval(heartbeat, 45000);
@@ -1748,6 +1777,7 @@ _PANEL_HTML = """<!doctype html>
       if (sessionCloseSent) return;
       sessionCloseSent = true;
       if (sessionTimer) { clearInterval(sessionTimer); sessionTimer = null; }
+      if (heartbeatRetryTimer) { clearTimeout(heartbeatRetryTimer); heartbeatRetryTimer = null; }
       const body = JSON.stringify({ client_id: TAB_ID, secret: SECRET });
       try {
         if (navigator.sendBeacon?.('/api/session/close', new Blob([body], { type: 'application/json' }))) return;
@@ -1834,19 +1864,27 @@ _PANEL_HTML = """<!doctype html>
     }
 
     async function callApi(path, method = 'GET', body = null) {
+      const canRetryGet = String(method || 'GET').toUpperCase() === 'GET';
       let res;
-      try {
-        res = await fetch(path, {
-          method,
-          headers: { 'Content-Type': 'application/json', 'X-Seller-Secret': SECRET },
-          body: body ? JSON.stringify(body) : null,
-          cache: 'no-store',
-        });
-      } catch (err) {
-        showSellerServerUnreachable(err?.message || 'قطع ارتباط با سرور پنل');
-        throw new Error('ارتباط با سرور پنل لایسنس قطع شد (Failed to fetch).');
+      for (let attempt = 0; attempt < (canRetryGet ? 2 : 1); attempt += 1) {
+        try {
+          res = await fetch(path, {
+            method,
+            headers: { 'Content-Type': 'application/json', 'X-Seller-Secret': SECRET },
+            body: body ? JSON.stringify(body) : null,
+            cache: 'no-store',
+          });
+          break;
+        } catch (err) {
+          if (canRetryGet && attempt === 0) {
+            await new Promise((r) => setTimeout(r, 350));
+            continue;
+          }
+          showSellerServerUnreachable(err?.message || 'قطع ارتباط با سرور پنل');
+          throw new Error('ارتباط با سرور پنل لایسنس قطع شد (Failed to fetch).');
+        }
       }
-      if (serverUnreachableShown) hideSellerServerUnreachable();
+      hideSellerServerUnreachable();
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'خطا در عملیات');
       return data;
@@ -2837,7 +2875,12 @@ def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
     panel_secret = secrets.token_urlsafe(24)
     sessions = SessionManager(close_grace=2.0, stale_after=180.0, abandon_after=900.0)
     handler_cls = build_seller_panel_handler(vault, panel_secret, sessions=sessions)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+
+    class _SellerThreadingHTTPServer(ThreadingHTTPServer):
+        daemon_threads = True
+        allow_reuse_address = True
+
+    server = _SellerThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
     port = int(server.server_address[1])
     url = f"http://127.0.0.1:{port}/?secret={panel_secret}"
     print("=" * 72)

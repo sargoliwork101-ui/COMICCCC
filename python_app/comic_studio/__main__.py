@@ -278,6 +278,10 @@ def run_server(host: str, port: int, listening_socket: socket.socket | None = No
         raise
     finally:
         app.state.sessions.stop()
+        reg = getattr(app.state, "registry", None)
+        if reg is not None:
+            with contextlib.suppress(Exception):
+                reg.unload_all()
 
 
 def main() -> None:

@@ -1306,6 +1306,8 @@ def test_v458_seller_panel_has_browser_heartbeat_and_immediate_close_shutdown(tm
         assert "/api/session/close" in html
         assert "beforeunload" in html and "pagehide" in html
         assert "sellerServerAlert" in html
+        assert "consecutiveHeartbeatFailures" in html
+        assert "scheduleHeartbeatProbe" in html
 
         # 2. Heartbeat rejects missing/wrong secret
         bad_req = Request(

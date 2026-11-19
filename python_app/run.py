@@ -82,6 +82,13 @@ _REQUIRED_IMPORTS = {
 }
 
 if __name__ == "__main__":
+    if "--builtin-ocr-worker" in sys.argv[1:]:
+        if not _IS_FROZEN:
+            _ensure_local_package_resolution()
+        from comic_studio.ocr_builtin_worker import _worker_main
+
+        worker_argv = [a for a in sys.argv[1:] if a != "--builtin-ocr-worker"]
+        raise SystemExit(_worker_main(worker_argv))
     _ensure_frozen_stdio()
     if not _IS_FROZEN:
         _ensure_local_package_resolution()

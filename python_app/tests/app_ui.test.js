@@ -178,6 +178,20 @@ window.fetch = async (url, options = {}) => {
     Promise.resolve(gate).then((v) => { signal?.removeEventListener?.('abort', onAbort); resolve(v); }, reject);
   });
   if (pathname === `/api/projects/${project.id}/ocr`) { ocrRequests.push(JSON.parse(options.body)); if (ocrGate) await waitAbortable(ocrGate, options.signal); return jsonResponse(overlayProject('NEW OCR', '')); }
+  if (pathname === `/api/projects/${project.id}/ocr/jobs`) {
+    ocrRequests.push(JSON.parse(options.body));
+    const jobId = `mock-ocr-job-${ocrRequests.length}`;
+    globalThis.__mockOcrJobs = globalThis.__mockOcrJobs || new Map();
+    globalThis.__mockOcrJobs.set(jobId, { gate: ocrGate, signal: options.signal });
+    return jsonResponse({ jobId, status: 'running' }, 202);
+  }
+  if (pathname.startsWith('/api/jobs/') && pathname !== '/api/jobs/cancel') {
+    const jobId = decodeURIComponent(pathname.slice('/api/jobs/'.length));
+    const entry = globalThis.__mockOcrJobs?.get(jobId);
+    if (!entry) return jsonResponse({ detail: 'Not found' }, 404);
+    if (entry.gate) await waitAbortable(entry.gate, options.signal);
+    return jsonResponse({ jobId, kind: 'ocr', status: 'done', result: overlayProject('NEW OCR', '') });
+  }
   if (pathname === `/api/projects/${project.id}/context-preview`) {
     const request = JSON.parse(options.body); translationPreviewCalls.push(request);
     if (previewFailure === 'network') throw new TypeError('simulated connection failure');
@@ -273,9 +287,12 @@ for (const file of ['groups.js', 'rich-sanitize.js', 'rich-editor.js', 'inline-e
 }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 let failures = 0;
-function check(name, condition) {
+function check(name, condition, detail = '') {
   if (condition) console.log(`PASS: ${name}`);
-  else { failures += 1; console.error(`FAIL: ${name}`); }
+  else {
+    failures += 1;
+    console.error(detail ? `FAIL: ${name} -> ${detail}` : `FAIL: ${name}`);
+  }
 }
 
 (async () => {
@@ -2128,6 +2145,9 @@ function check(name, condition) {
             const u = String(url);
             if (u.endsWith('/state') && options.method === 'PUT') {
               return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => state.project, text: async () => JSON.stringify(state.project) };
+            }
+            if (u.endsWith('/ocr/jobs') && options.method === 'POST') {
+              return { ok: false, status: 404, headers: { get: () => 'application/json' }, json: async () => ({ detail: 'Not found' }) };
             }
             if (u.endsWith('/ocr') && options.method === 'POST') {
               const req = JSON.parse(options.body);
@@ -4629,7 +4649,7 @@ function check(name, condition) {
       const detail = document.getElementById('serverAlertDetail').textContent || '';
       window.fetch = async (url, opts = {}) => {
         const parsed = new URL(url, 'http://127.0.0.1:8765');
-        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.58' });
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.59' });
         return origFetch(url, opts);
       };
       document.getElementById('serverAlertRetry').click();
@@ -4841,10 +4861,13 @@ function check(name, condition) {
             const u = String(url);
             if (u.endsWith('/api/health')) {
               healthProbesDuringRetry += 1;
-              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ name: 'HaSaYa Studio', version: '4.58' }) };
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ name: 'HaSaYa Studio', version: '4.59' }) };
             }
             if (u.endsWith('/state') && options.method === 'PUT') {
               return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => state.project, text: async () => JSON.stringify(state.project) };
+            }
+            if (u.endsWith('/ocr/jobs') && options.method === 'POST') {
+              return { ok: false, status: 404, headers: { get: () => 'application/json' }, json: async () => ({ detail: 'Not found' }) };
             }
             if (u.endsWith('/ocr') && options.method === 'POST') {
               const req = JSON.parse(options.body);
@@ -4918,6 +4941,113 @@ function check(name, condition) {
         && v456LargeBatchCheck.alertShownDuringRetries === false
         && v456LargeBatchCheck.alertHiddenAtEnd === true,
       JSON.stringify(v456LargeBatchCheck),
+    );
+
+    const v459AsyncAndHeartbeatCheck = await vm.runInContext(`
+      (async () => {
+        const origFetch = window.fetch;
+        const origSleep = sleep;
+        const prevProject = JSON.parse(JSON.stringify(state.project));
+        let jobStarts = 0;
+        let pollCalls = 0;
+        let pollNetworkFails = 0;
+        let hbCalls = 0;
+        try {
+          sleep = async () => {};
+          state.project.images = [{
+            id: 'pg-async-1', name: 'async-1.png', file: 'pg-async-1.png',
+            width: 200, height: 120, format: 'PNG', bytes: 100, order: 0,
+            selected: true, approved: false, groupId: null, crop: null, edited: false, blocks: [],
+          }];
+          renderGrid();
+
+          window.fetch = async (url, options = {}) => {
+            const u = String(url);
+            if (u.endsWith('/api/health')) {
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ name: 'HaSaYa Studio', version: '4.59' }) };
+            }
+            if (u.endsWith('/state') && options.method === 'PUT') {
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => state.project };
+            }
+            if (u.endsWith('/ocr/jobs') && options.method === 'POST') {
+              jobStarts += 1;
+              return { ok: true, status: 202, headers: { get: () => 'application/json' }, json: async () => ({ jobId: 'job-v459', status: 'running' }) };
+            }
+            if (u.endsWith('/api/jobs/job-v459')) {
+              pollCalls += 1;
+              if (pollCalls === 2) {
+                pollNetworkFails += 1;
+                throw new TypeError('Failed to fetch');
+              }
+              if (pollCalls < 3) {
+                return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ jobId: 'job-v459', status: 'running' }) };
+              }
+              const doneProj = JSON.parse(JSON.stringify(state.project));
+              doneProj.images[0].ocrCompleted = true;
+              doneProj.images[0].blocks = [{ id: 1, text: 'ASYNC OK', tr: '', enabled: true, bg: 'white', x0: 10, y0: 10, x1: 140, y1: 40, lineH: 24, dir: 'ltr', align: 'center' }];
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ jobId: 'job-v459', status: 'done', result: doneProj }) };
+            }
+            if (u.includes('/content')) {
+              return { ok: true, status: 200, headers: { get: () => 'image/png' }, blob: async () => new window.Blob() };
+            }
+            if (u.endsWith('/rendered')) {
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ ok: true }) };
+            }
+            if (u.endsWith('/api/engines/unload') && options.method === 'POST') {
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ ok: true, memory: { totalRamMb: 80 } }) };
+            }
+            if (u.endsWith('/api/engines/memory')) {
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ totalRamMb: 80, loadedCount: 0, loadedEngines: [] }) };
+            }
+            if (u.endsWith('/api/session/heartbeat')) {
+              hbCalls += 1;
+              if (hbCalls <= 2) throw new TypeError('Failed to fetch');
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ ok: true, active: 1 }) };
+            }
+            return origFetch(url, options);
+          };
+
+          hideServerUnreachable();
+          $('ocrOnlySelected').checked = true;
+          await runOcr();
+          await new Promise((r) => setTimeout(r, 15));
+          const asyncDone = Boolean(state.project.images[0].ocrCompleted);
+
+          // Single transient heartbeat miss must NOT flash #serverAlert; 2nd consecutive miss shows it; 3rd success clears it.
+          await heartbeat();
+          const shownAfterOneMiss = !$('serverAlert').classList.contains('hidden');
+          await heartbeat();
+          const shownAfterTwoMisses = !$('serverAlert').classList.contains('hidden');
+          await heartbeat();
+          const hiddenAfterRecovery = $('serverAlert').classList.contains('hidden');
+
+          return {
+            asyncDone,
+            jobStarts,
+            pollCalls,
+            pollNetworkFails,
+            shownAfterOneMiss,
+            shownAfterTwoMisses,
+            hiddenAfterRecovery,
+          };
+        } finally {
+          window.fetch = origFetch;
+          sleep = origSleep;
+          hideServerUnreachable();
+          adoptProject(prevProject);
+        }
+      })()
+    `, context);
+    check(
+      'v4.59 async OCR job queue recovers from poll Failed to fetch without restarting OCR, and heartbeat uses 2-strike confirmation + auto-recovery',
+      v459AsyncAndHeartbeatCheck.asyncDone === true
+        && v459AsyncAndHeartbeatCheck.jobStarts === 1
+        && v459AsyncAndHeartbeatCheck.pollCalls >= 3
+        && v459AsyncAndHeartbeatCheck.pollNetworkFails === 1
+        && v459AsyncAndHeartbeatCheck.shownAfterOneMiss === false
+        && v459AsyncAndHeartbeatCheck.shownAfterTwoMisses === true
+        && v459AsyncAndHeartbeatCheck.hiddenAfterRecovery === true,
+      JSON.stringify(v459AsyncAndHeartbeatCheck),
     );
   }
 
