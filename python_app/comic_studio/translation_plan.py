@@ -42,7 +42,7 @@ def split_ai_paragraph(text: str, limit: int = MAX_AI_SOURCE_CHARS,
     """
     clean = str(text).replace("\r\n", "\n").replace("\r", "\n").strip()
     if limit < 1:
-        raise ValueError("Source limit must be positive")
+        raise ValueError("سقف حجم متن باید بزرگ‌تر از صفر باشد.")
     sentence_end = re.compile(r"[.!?…。！？؟][\"'”’»）)\]]*\s*$")
     boundaries: list[tuple[int, int]] = []
     for match in re.finditer(r"\n(?:[ \t]*\n)*", clean):
