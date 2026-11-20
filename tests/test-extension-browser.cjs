@@ -89,6 +89,27 @@ const root = path.resolve(__dirname,'../extension');
         });
         assert.ok(menu.equal&&menu.aligned&&menu.solid&&!menu.overflow,JSON.stringify(menu));
         await page.evaluate(()=>{document.getElementById('topMenu').open=false;});
+        assert.ok(await page.$('.menu-guide-link[aria-label="راهنمای افزونه"] svg'));
+        for(const width of [1280,420]){
+          await page.setViewport({width,height:900});
+          await page.evaluate(()=>{
+            document.getElementById('result').classList.remove('hidden');
+            document.getElementById('downloadBtn').classList.remove('hidden');
+            document.getElementById('statusText').textContent='آماده شد! فایل PDF با ۶ صفحه ساخته شد.';
+            document.getElementById('dlLabel').textContent='دانلود PDF (0.1 مگابایت)';
+          });
+          const resultLayout=await page.evaluate(()=>{
+            const stats=document.querySelector('#result .stats').getBoundingClientRect();
+            const button=document.getElementById('downloadBtn').getBoundingClientRect();
+            return {sameRow:Math.abs((stats.top+stats.bottom)/2-(button.top+button.bottom)/2)<2,
+              below:button.top>=stats.bottom,button:button.width,overflow:document.documentElement.scrollWidth>innerWidth};
+          });
+          assert.ok(!resultLayout.overflow&&resultLayout.button<300,JSON.stringify(resultLayout));
+          assert.ok(width>600?resultLayout.sameRow:resultLayout.below,JSON.stringify(resultLayout));
+        }
+        await page.evaluate(()=>{document.getElementById('result').classList.add('hidden');});
+        await page.setViewport({width:1280,height:900});
+
       }
       if(route.startsWith('popup')||route.startsWith('viewer')){
         for(const theme of ['light','dark']){
@@ -169,7 +190,7 @@ const root = path.resolve(__dirname,'../extension');
           assert.equal(layout.danger,'rgb(251, 113, 133)');
           assert.ok(layout.panel.includes(theme==='dark'?'0.082353 0.141176 0.172549':'0.894118 0.92549 0.921569'),JSON.stringify(layout));
           const header=await page.evaluate(()=>{
-            const controls=['.topbar-side .studio-theme-toggle','.topbar-side .top-menu>summary'];
+            const controls=['.topbar-side #studioThemeToggle','.topbar-side .top-menu>summary'];
             return controls.map(selector=>{
               const el=document.querySelector(selector),r=el.getBoundingClientRect(),icon=el.querySelector('svg').getBoundingClientRect();
               return {width:r.width,height:r.height,center:r.top+r.height/2,iconWidth:icon.width,iconHeight:icon.height};

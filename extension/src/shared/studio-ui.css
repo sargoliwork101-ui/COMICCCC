@@ -106,3 +106,16 @@ body .top-menu-panel{background:var(--surface);backdrop-filter:none;box-sizing:b
 .guide-footer{padding:8px 12px;text-align:center;font-size:11px}.guide-footer a,body p a{color:var(--a1)}
 
 .studio-guide-link{text-decoration:none;box-sizing:border-box}.topbar-side .studio-guide-link{width:36px;height:36px}.studio-guide-link svg{width:18px;height:18px}
+
+/* Result summary uses the same compact aligned actions as the workspace. */
+.menu-guide-link{width:36px;height:36px;text-decoration:none}
+body #result{display:grid;grid-template-columns:minmax(0,1fr) max-content;align-items:center;gap:12px;background:var(--surface);border-color:var(--line2);box-shadow:none}
+#result>:is(#statusText,.bar,#failed,#jobHint){grid-column:1/-1}
+#result #statusText{font-size:12px}
+#result .bar{height:6px}
+#result .stats{display:flex;gap:8px;min-width:0}
+#result .stat{flex:0 1 120px;max-width:120px;min-width:0;border-radius:9px;background:var(--surface2);padding:7px 12px}
+#result .stat b{font-size:16px}
+#result #downloadBtn{grid-column:2;width:auto;max-width:none;min-height:34px;padding:7px 14px;white-space:normal;text-align:center;box-sizing:border-box;background:var(--a2);color:#fff;box-shadow:none}
+#result #btnStopTr{width:auto;justify-self:end}
+@media(max-width:600px){body #result{grid-template-columns:minmax(0,1fr)}#result #downloadBtn{grid-column:1;justify-self:start;max-width:100%}#result .stat{flex:1;max-width:none}}
