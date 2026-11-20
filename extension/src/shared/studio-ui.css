@@ -1,6 +1,6 @@
 /* Studio's design tokens. All fonts/assets are packaged with the extension. */
-:root{color-scheme:dark;--bg:#0b0d12;--surface:#10131a;--surface2:#171b25;--surface3:#1f2632;--line:#252b38;--line2:#333b4d;--text:#e8eaf2;--muted:#8a92a6;--faint:#8a92a6;--a1:#8b7bff;--a2:#5e9dff;--grad:linear-gradient(135deg,#8b7bff,#5e9dff);--grad-ok:linear-gradient(135deg,#10b981,#34d399);--danger:#fb7185;--warning:#fbbf24;--shadow:0 18px 50px #0009;--glow:none;--glow-ok:none}
-:root[data-theme=light]{color-scheme:light;--bg:#f3f4f8;--surface:#fff;--surface2:#f0f1f6;--surface3:#e8eaf2;--line:#dfe2eb;--line2:#c9cfdd;--text:#202536;--muted:#667085;--faint:#667085;--shadow:0 18px 50px #24304a22}
+:root{color-scheme:dark;--bg:#0b0d12;--surface:#10131a;--panel:#13161e;--surface2:#171b25;--surface3:#1f2632;--line:#252b38;--line2:#333b4d;--text:#e8eaf2;--muted:#8a92a6;--faint:#8a92a6;--a1:#8b7bff;--a2:#5e9dff;--grad:linear-gradient(135deg,#8b7bff,#5e9dff);--grad-ok:linear-gradient(135deg,#10b981,#34d399);--danger:#fb7185;--warning:#fbbf24;--shadow:0 18px 50px #0009;--glow:none;--glow-ok:none}
+:root[data-theme=light]{color-scheme:light;--bg:#f3f4f8;--surface:#fff;--panel:#fff;--surface2:#f0f1f6;--surface3:#e8eaf2;--line:#dfe2eb;--line2:#c9cfdd;--text:#202536;--muted:#667085;--faint:#667085;--shadow:0 18px 50px #24304a22}
 body{background:radial-gradient(circle at 85% -20%,#29214c33,transparent 38%),var(--bg);color:var(--text);font:13px/1.8 Vazirmatn,Tahoma,sans-serif}
 body :is(button,input,select,textarea){font-family:Vazirmatn,Tahoma,sans-serif}
 select{color-scheme:inherit}
@@ -32,3 +32,24 @@ select{color-scheme:inherit}
 .version-pill{color:var(--a1)}
 :is(.note,.muted,.menu-hint,.mode-hint){color:var(--muted)}
 .mode-btn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px}
+
+/* Viewer action capsules mirror Studio's .selection-actions/.action-group. */
+.toolbar.panel{background:color-mix(in srgb,var(--panel) 94%,transparent);border:1px solid var(--line);border-radius:13px;padding:11px 12px;box-shadow:none}
+.toolbar .toolbar-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.toolbar-actions .studio-action-group{display:inline-flex;align-items:center;flex:0 1 auto;gap:4px;flex-wrap:wrap;padding:4px 6px 4px 7px;border-radius:11px;border:1px solid var(--line2);background:color-mix(in srgb,var(--surface) 74%,var(--surface2));width:auto;min-width:0}
+.toolbar-actions .studio-group-label{flex:0 0 auto;font-size:10px;font-weight:800;color:var(--a2);padding:0 6px 0 4px;border-inline-end:1px solid var(--line2);margin-inline-end:2px;white-space:nowrap}
+.toolbar-actions .studio-action-group .mini{display:inline-flex;align-items:center;justify-content:center;gap:4.5px;padding:4px 8px;font-size:10.5px;line-height:1.5;min-height:27px;border-radius:8px;background:var(--surface2);border:1px solid var(--line2);color:var(--text);box-shadow:none}
+.toolbar-actions .studio-action-group .mini svg{width:14px;height:14px;stroke-width:1.85}
+.toolbar-actions .studio-action-group .mini:hover:not(:disabled){border-color:var(--a1);background:color-mix(in srgb,var(--a1) 12%,var(--surface2))}
+.toolbar-actions .studio-action-group .mini:disabled{opacity:.45;cursor:not-allowed}
+.toolbar-actions .studio-action-group .mini.warn{color:var(--danger)}
+.toolbar-actions .studio-action-group[aria-label="گروه‌بندی صفحات"]{border-color:color-mix(in srgb,#38bdf8 34%,var(--line2));background:color-mix(in srgb,#38bdf8 5%,var(--surface))}
+.toolbar-actions .studio-action-group[aria-label="گروه‌بندی صفحات"] .studio-group-label{color:#38bdf8}
+:root[data-theme=light] .toolbar-actions .studio-action-group[aria-label="گروه‌بندی صفحات"] .studio-group-label{color:#0284c7}
+.toolbar .toolbar-selection-count{display:inline-flex;align-items:center;gap:5px;padding:3.5px 10px;font-size:11px;font-weight:600;line-height:1.8;border-radius:999px;border:1px solid color-mix(in srgb,var(--a1) 42%,var(--line2));background:color-mix(in srgb,var(--a1) 10%,var(--surface2));color:var(--text)}
+.toolbar .toolbar-selection-count::before{content:'';width:7px;height:7px;border-radius:50%;background:var(--a1);flex:none}
+.toolbar .toolbar-menus{margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
+.toolbar .toolbar-menus .tool-menu{width:fit-content;max-width:100%;border-color:var(--line2);border-radius:11px;background:var(--surface2)}
+.toolbar .tool-menu>summary{padding:5px 10px;font-size:10.5px;line-height:1.8}
+.toolbar .tool-menu[open]{width:100%;background:var(--surface)}
+@media(max-width:600px){.toolbar-actions .studio-action-group{flex:1 1 100%}.toolbar .toolbar-selection-count{margin-inline-start:0}}

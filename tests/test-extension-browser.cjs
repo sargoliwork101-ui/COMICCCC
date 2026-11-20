@@ -49,6 +49,32 @@ const root = path.resolve(__dirname,'../extension');
         return {font,different:dark!==light,overflow:document.documentElement.scrollWidth>innerWidth};
       });
       assert.ok(result.font&&result.different&&!result.overflow,route+JSON.stringify(result));
+      if(route.startsWith('viewer')){
+        for(const theme of ['dark','light']){
+          await page.evaluate(theme=>{document.documentElement.dataset.theme=theme;},theme);
+          const layout=await page.evaluate(()=>{
+            const groups=[...document.querySelectorAll('.toolbar-actions .studio-action-group')];
+            const rects=groups.map(el=>el.getBoundingClientRect());
+            const first=groups[0], label=first.querySelector('.studio-group-label'), button=first.querySelector('button');
+            return {tops:rects.map(r=>r.top),heights:rects.map(r=>r.height),
+              inline:Math.abs(label.getBoundingClientRect().top-button.getBoundingClientRect().top)<10,
+              menu:document.querySelector('#groupMenu').getBoundingClientRect().width,
+              toolbar:document.querySelector('.toolbar').getBoundingClientRect().width,
+              panel:getComputedStyle(document.querySelector('.toolbar')).backgroundColor,
+              danger:getComputedStyle(document.querySelector('#btnDeleteSel')).color};
+          });
+          assert.ok(Math.max(...layout.tops)-Math.min(...layout.tops)<2,JSON.stringify(layout));
+          assert.ok(layout.heights.every(h=>h<50)&&layout.inline,JSON.stringify(layout));
+          assert.ok(layout.menu<layout.toolbar/2,JSON.stringify(layout));
+          assert.equal(layout.danger,'rgb(251, 113, 133)');
+          assert.ok(layout.panel.includes(theme==='dark'?'0.0745098 0.0862745 0.117647':'1 1 1'),JSON.stringify(layout));
+        }
+        for(const width of [768,390]){
+          await page.setViewport({width,height:900});
+          assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'viewer toolbar overflow at '+width);
+        }
+      }
+
     }
     const external=[];
     page.on('request',request=>{if(/^https?:/.test(request.url())&&!request.url().startsWith(base+'/'))external.push(request.url());});
