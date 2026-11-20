@@ -37,7 +37,7 @@ const root = path.resolve(__dirname,'../extension');
     browser=await puppeteer.launch({args,executablePath:await chromium.executablePath(),headless:'new'});
     const page=await browser.newPage();
     for(const route of ['popup/popup.html','viewer/viewer.html','ai-settings/settings.html','pdf-import/pdf-import.html']){
-      await page.setViewport({width:route.startsWith('popup')?400:1280,height:900});
+      await page.setViewport({width:route.startsWith('popup')?420:1280,height:900});
       await page.goto(base+'/src/'+route,{waitUntil:'networkidle0'});
       await page.addScriptTag({url:base+'/src/shared/studio-ui.js'});
       await page.evaluate(()=>document.fonts.ready);
@@ -53,7 +53,24 @@ const root = path.resolve(__dirname,'../extension');
         const tools=await page.evaluate(()=>[...document.querySelectorAll('.popup-tool-row button')].map(el=>{
           const r=el.getBoundingClientRect();return {top:r.top,width:r.width,height:r.height};
         }));
-        assert.equal(tools.length,3);assert.ok(tools.every(r=>r.top===tools[0].top&&r.width===44&&r.height===40));
+        assert.equal(tools.length,3);assert.ok(tools.every(r=>r.top===tools[0].top&&Math.abs(r.width-tools[0].width)<1&&r.height===40));
+        const size=await page.evaluate(()=>{
+          const row=document.querySelector('.popup-tool-row').getBoundingClientRect();
+          return {row:row.width,gap:parseFloat(getComputedStyle(document.querySelector('.popup-tool-row')).columnGap),height:document.body.getBoundingClientRect().height};
+        });
+        assert.ok(Math.abs(tools.reduce((n,r)=>n+r.width,0)+2*size.gap-size.row)<1,'tools fill three equal columns');
+        assert.ok(size.height<=600,'default popup must fit Chrome 600px cap: '+JSON.stringify(size));
+        await page.setViewport({width:420,height:Math.ceil(size.height)});
+        assert.ok(await page.evaluate(()=>document.documentElement.scrollHeight<=innerHeight),'default popup must not scroll at content height');
+        const pagedHeight=await page.evaluate(()=>{
+          document.getElementById('scrollModeFields').classList.add('hidden');
+          document.getElementById('pagedModeFields').classList.remove('hidden');
+          return document.body.getBoundingClientRect().height;
+        });
+        assert.ok(pagedHeight<=600,'collapsed paged controls fit Chrome height cap: '+pagedHeight);
+        await page.setViewport({width:420,height:Math.ceil(pagedHeight)});
+        assert.ok(await page.evaluate(()=>document.documentElement.scrollHeight<=innerHeight),'paged popup grows to content without scrolling');
+
         for(const id of ['startBtn','pdfConvertBtn','translatePageBtn']){
           await page.hover('#'+id);
           const tooltip=await page.$eval('#'+id+' [role=tooltip]',el=>{

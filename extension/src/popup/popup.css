@@ -1,4 +1,13 @@
-body { width: 360px; padding: 18px; display: flex; flex-direction: column; gap: 16px; }
+html{height:auto;min-height:0}
+body { width: 420px; height:auto; min-height:0; padding:12px; display:flex; flex-direction:column; gap:10px; }
+body .brand{gap:8px}
+body .brand-logo{width:36px;height:36px;border-radius:10px}
+body .brand-text h1{font-size:16px}
+body .brand-text p{font-size:10px}
+body .studio-section{padding:10px;gap:8px}
+body .field label{margin-bottom:4px}
+body input:is([type=text],[type=number]){padding:7px 10px;font-size:12px}
+body .mode-hint{margin-top:4px;font-size:10px;line-height:1.6}
 #statusText { font-size: 12.5px; line-height: 1.9; white-space: pre-line; font-weight: 500; color: #cfd4e2; }
 
 .mode-seg { display: flex; gap: 5px; background: rgba(255,255,255,.05); border: 1px solid var(--line2); border-radius: 12px; padding: 4px; }
@@ -52,10 +61,13 @@ body { width: 360px; padding: 18px; display: flex; flex-direction: column; gap: 
 #scrollModeFields .mode-hint { margin-top: 6px; }
 
 /* Icon tools use the same local theme tokens as the rest of the extension. */
-.popup-tool-row{display:flex;align-items:center;justify-content:center;gap:10px;padding:6px 0 2px}
-body .popup-tool-row .popup-tool{position:relative;display:inline-flex;align-items:center;justify-content:center;flex:0 0 44px;width:44px;height:40px;min-height:40px;padding:10px;margin:0;border:1px solid var(--line2);border-radius:10px;background:var(--surface2);color:var(--text);box-shadow:none;overflow:visible}
+.popup-tool-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));align-items:center;gap:8px;padding:2px 0}
+body .popup-tool-row .popup-tool{position:relative;display:inline-flex;align-items:center;justify-content:center;width:100%;min-width:0;height:40px;min-height:40px;padding:10px;margin:0;border:1px solid var(--line2);border-radius:10px;background:var(--surface2);color:var(--text);box-shadow:none;overflow:visible}
 body .popup-tool-row .popup-tool>svg{width:18px;height:18px;stroke-width:1.8}
 body .popup-tool-row .popup-tool:hover:not(:disabled){background:color-mix(in srgb,var(--a1) 12%,var(--surface2));border-color:var(--a1);color:var(--a1)}
 body .popup-tool-row .popup-tool:disabled{opacity:.45;cursor:not-allowed}
 .popup-tool-tip{position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);z-index:10;width:max-content;max-width:230px;padding:5px 9px;border-radius:7px;background:var(--surface3);border:1px solid var(--line2);color:var(--text);font:11px/1.8 Vazirmatn,Tahoma,sans-serif;pointer-events:none;opacity:0;visibility:hidden;box-shadow:var(--shadow)}
 .popup-tool:is(:hover,:focus-visible) .popup-tool-tip{opacity:1;visibility:visible}
+
+#startTooltip{left:auto;right:0;transform:none}
+#translateTooltip{left:0;transform:none}
