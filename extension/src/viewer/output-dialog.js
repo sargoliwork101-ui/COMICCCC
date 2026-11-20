@@ -16,12 +16,13 @@
   dialog.addEventListener('close',()=>{settings.open=false;settings.querySelector('summary').focus();});
   window.addEventListener('keydown',e=>{
     if(dialog.open&&e.key==='Escape'){
-      e.preventDefault();e.stopImmediatePropagation();dialog.close();
+      e.preventDefault();e.stopImmediatePropagation();settings.open=false;dialog.close();
     }
   },true);
   kind.onchange=()=>{window.setMode(kind.value);sync();};
   document.getElementById('closeOutputSettings').addEventListener('click',()=>{dialog.close();settings.open=false;});
-  new MutationObserver(sync).observe(document.querySelector('.dock-actions'),{subtree:true,attributes:true,attributeFilter:['disabled']});
+  const observer=new MutationObserver(sync);
+  for(const id of ['buildBtn','saveImgBtn'])observer.observe(document.getElementById(id),{attributes:true,attributeFilter:['disabled']});
   start.onclick=()=>{
     const action=document.getElementById(kind.value==='img'?'saveImgBtn':'buildBtn');
     if(action.disabled)return;

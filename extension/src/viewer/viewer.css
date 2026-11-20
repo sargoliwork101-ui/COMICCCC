@@ -220,7 +220,7 @@ kbd { display: inline-block; padding: 1px 7px; border-radius: 7px; border: 1px s
 .seg-btn { border: 0; background: transparent; color: var(--muted); font: 700 12.5px 'Vazirmatn', sans-serif;
   padding: 7px 16px; border-radius: 10px; cursor: pointer; transition: background .15s, color .15s; }
 .seg-btn:hover { color: var(--text); }
-.seg-btn.active { background: var(--grad); color: #fff; box-shadow: 0 6px 16px -6px rgba(99,115,255,.7); }
+.seg-btn.active { background: var(--grad); color: #fff; box-shadow: none; }
 
 .opts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .output-settings { position: static; margin: 0; }

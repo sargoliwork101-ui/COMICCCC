@@ -90,6 +90,14 @@ const root = path.resolve(__dirname,'../extension');
         assert.ok(menu.equal&&menu.aligned&&menu.solid&&!menu.overflow,JSON.stringify(menu));
         await page.evaluate(()=>{document.getElementById('topMenu').open=false;});
         await page.addScriptTag({url:base+'/src/viewer/output-dialog.js'});
+        const dock=await page.evaluate(()=>{
+          const settings=document.querySelector('#outputSettings>summary').getBoundingClientRect();
+          const build=document.getElementById('buildBtn').getBoundingClientRect();
+          return {sameParent:document.getElementById('outputSettings').parentElement===document.getElementById('buildBtn').parentElement,
+            gap:Math.abs(settings.left-build.right),shadow:getComputedStyle(document.getElementById('modePdf')).boxShadow};
+        });
+        assert.ok(dock.sameParent&&dock.gap<=8&&dock.shadow==='none',JSON.stringify(dock));
+
         for(const width of [1280,420]){
           await page.setViewport({width,height:900});
           await page.evaluate(()=>{document.getElementById('outputSettings').open=true;});

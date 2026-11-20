@@ -142,3 +142,6 @@ body #outputDialog .opts{display:flex;flex-direction:column;gap:9px;margin-top:1
 #outputDialog label[for]{margin:4px 0 0;color:var(--muted)}
 .output-dialog-actions{display:flex;justify-content:flex-end;margin-top:18px;padding-top:12px;border-top:1px solid var(--line)}
 #outputDialog #startOutputDialog{width:auto;min-height:34px;padding:7px 16px}
+
+.dock .seg-btn.active{box-shadow:none}.dock-actions{gap:6px}.dock-actions .output-settings{flex:none}.dock-actions .output-settings>summary{min-height:34px;box-sizing:border-box}
+@media(max-width:600px){.dock-actions{flex-wrap:wrap}.dock-actions .output-settings{flex:0 0 auto}.dock-actions .output-settings>summary{min-width:120px}}
