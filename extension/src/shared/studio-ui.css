@@ -58,3 +58,11 @@ select{color-scheme:inherit}
 .topbar-side :is(.studio-theme-toggle,.top-menu>summary){box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;min-width:36px;flex:none;padding:7px;border-radius:9px;border:1px solid var(--line2);background:var(--surface2);color:var(--text)}
 .topbar-side :is(.studio-theme-toggle,.top-menu>summary)>svg{width:18px;height:18px;stroke-width:1.8}
 .topbar-side .top-menu{display:flex;align-items:center}
+
+/* Compact text-labelled controls; icon-only header targets stay unchanged. */
+body :is(.btn,.mini,.seg-btn){display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:5px 9px;min-height:28px;border-radius:8px;font-size:11px;line-height:1.5}
+body :is(.btn,.mini,.mode-btn,.seg-btn)>svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
+body .mode-btn{padding:6px 4px;gap:4px;font-size:10.5px;line-height:1.5}
+.toolbar-actions .studio-action-group .mini{padding:3px 6px;min-height:25px;font-size:10px;gap:4px}
+body .output-close{display:inline-flex;align-items:center;gap:4px;padding:4px 8px;font-size:11px}
+@media(pointer:coarse){body :is(.btn,.mini,.mode-btn,.seg-btn){min-height:36px}}
