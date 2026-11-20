@@ -14,7 +14,7 @@
       <h1>HASAYA</h1>
       <p>کمیک را به PDF یا تصویر تبدیل کن</p>
     </div>
-    <span class="version-pill">v3.5</span>
+    <span class="version-pill">v3.6</span>
     <button type="button" id="aiSettingsBtn" class="settings-btn" title="تنظیم سرویس، مدل و کلید API برای ترجمه"
       aria-label="تنظیمات API هوش مصنوعی">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
@@ -48,7 +48,7 @@
 
   <div class="field">
     <label for="pdfName">نام فایل خروجی</label>
-    <input type="text" id="pdfName" value="comic" spellcheck="false">
+    <input type="text" id="pdfName" value="HASAYA STUDIO" spellcheck="false">
   </div>
 
   <!-- فقط در حالت اسکرول صفحه نمایش داده می‌شود؛ popup.js با تغییر حالت باز/بسته‌اش می‌کند -->
@@ -104,7 +104,6 @@
   </button>
 
   </section>
-  <details class="studio-help"><summary>کیفیت اصلی و حریم خصوصی OCR</summary><p>بیشترین وضوحی که صفحه در منابع تصویر معرفی کرده انتخاب می‌شود؛ اگر سایت نسخهٔ اصلی را منتشر نکند، افزونه نمی‌تواند آن را بازیابی کند. در خروجی تصاویر، «فرمت اصلی» بدون ویرایش فایل دریافتی را نگه می‌دارد. تبدیل JPEG و ساخت PDF می‌تواند بازکدگذاری داشته باشد.</p><p>OCR محلی Tesseract در Chrome و روی دستگاه شماست، نه در سایت یا برنامهٔ Python. تصویر برای OCR ارسال نمی‌شود؛ ولی متن برای ترجمه به Google/MyMemory یا سرویس AI انتخابی شما فرستاده می‌شود.</p></details>
 
   <div id="extModal" class="ext-modal hidden" role="dialog" aria-modal="true" aria-labelledby="extModalTitle" aria-describedby="extModalMsg">
     <div class="ext-modal-card">

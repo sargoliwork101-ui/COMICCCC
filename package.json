@@ -1,6 +1,6 @@
 {
   "name": "hasaya-chrome-extension",
-  "version": "3.5.0",
+  "version": "3.6.0",
   "private": true,
   "description": "افزونهٔ Chrome HASAYA برای جمع‌آوری تصاویر کمیک و وب‌تون و خروجی PDF/تصویر به‌همراه OCR و ترجمه + برنامهٔ دسکتاپ HaSaYa Studio",
   "scripts": {

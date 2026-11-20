@@ -195,7 +195,7 @@ const MODE_STATUS = {
 };
 
 startBtn.addEventListener('click', async () => {
-  let pdfName = document.getElementById('pdfName').value.trim() || 'comic';
+  let pdfName = document.getElementById('pdfName').value.trim() || 'HASAYA STUDIO';
   if (!pdfName.toLowerCase().endsWith('.pdf')) pdfName += '.pdf';
 
   // سقف صفحات Google Books: صفر/خالی یعنی بدون محدودیت
