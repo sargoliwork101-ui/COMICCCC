@@ -145,3 +145,5 @@ body #outputDialog .opts{display:flex;flex-direction:column;gap:9px;margin-top:1
 
 .dock .seg-btn.active{box-shadow:none}.dock-actions{gap:6px}.dock-actions .output-settings{flex:none}.dock-actions .output-settings>summary{min-height:34px;box-sizing:border-box}
 @media(max-width:600px){.dock-actions{flex-wrap:wrap}.dock-actions .output-settings{flex:0 0 auto}.dock-actions .output-settings>summary{min-width:120px}}
+
+.dock-actions #outputSettings>summary{display:flex;align-items:center;gap:7px;min-width:110px}.dock-actions #outputSettings>summary::after{display:none}.dock-actions #outputSettings>summary svg{width:16px;height:16px}.dock-center:has(>.seg.hidden){display:none}

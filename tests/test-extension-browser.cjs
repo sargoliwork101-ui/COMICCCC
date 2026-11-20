@@ -90,14 +90,13 @@ const root = path.resolve(__dirname,'../extension');
         assert.ok(menu.equal&&menu.aligned&&menu.solid&&!menu.overflow,JSON.stringify(menu));
         await page.evaluate(()=>{document.getElementById('topMenu').open=false;});
         await page.addScriptTag({url:base+'/src/viewer/output-dialog.js'});
-        const dock=await page.evaluate(()=>{
-          const settings=document.querySelector('#outputSettings>summary').getBoundingClientRect();
-          const build=document.getElementById('buildBtn').getBoundingClientRect();
-          return {sameParent:document.getElementById('outputSettings').parentElement===document.getElementById('buildBtn').parentElement,
-            gap:Math.abs(settings.left-build.right),shadow:getComputedStyle(document.getElementById('modePdf')).boxShadow};
-        });
-        assert.ok(dock.sameParent&&dock.gap<=8&&dock.shadow==='none',JSON.stringify(dock));
-
+        const dock=await page.evaluate(()=>({
+          buildVisible:!!document.getElementById('buildBtn').getClientRects().length,
+          modeVisible:!!document.getElementById('modePdf').getClientRects().length,
+          label:document.querySelector('#outputSettings>summary').textContent.trim(),
+          report:!!document.getElementById('reopenResultDialog')
+        }));
+        assert.deepEqual(dock,{buildVisible:false,modeVisible:false,label:'خروجی',report:false});
         for(const width of [1280,420]){
           await page.setViewport({width,height:900});
           await page.evaluate(()=>{document.getElementById('outputSettings').open=true;});
@@ -135,7 +134,7 @@ const root = path.resolve(__dirname,'../extension');
         }
         await page.click('#closeResultDialog');
         assert.equal(await page.$eval('#resultDialog',el=>el.open),false);
-        await page.click('#reopenResultDialog');
+        await page.evaluate(()=>window.openResultDialog());
         assert.equal(await page.$eval('#resultDialog',el=>el.open),true);
         await page.keyboard.press('Escape');
         assert.equal(await page.$eval('#resultDialog',el=>el.open),false);

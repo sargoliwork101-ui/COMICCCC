@@ -18,7 +18,7 @@
         </div>
       </div>
       <div class="topbar-side">
-        <span class="version-pill">نسخهٔ ۳.۲۳</span>
+        <span class="version-pill">نسخهٔ ۳.۲۴</span>
         <details class="top-menu" id="topMenu">
           <summary aria-label="منوی ابزارها" title="پروفایل، OCR و ترجمه">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
@@ -70,7 +70,6 @@
     </section>
 
     </dialog>
-    <button id="reopenResultDialog" class="mini hidden" type="button">نمایش گزارش عملیات</button>
 
     <section class="toolbar panel">
       <div class="toolbar-actions">
@@ -132,7 +131,7 @@
       </div>
 
       <div class="dock-center">
-        <div class="seg" role="group" aria-label="نوع خروجی">
+        <div class="seg hidden" role="group" aria-label="نوع خروجی" aria-hidden="true">
           <button type="button" class="seg-btn active" id="modePdf" aria-pressed="true"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H5v18h14V8zM14 3v5h5M8 12h8M8 16h6"/></svg>خروجی PDF</button>
           <button type="button" class="seg-btn" id="modeImg" aria-pressed="false"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8" cy="8" r="2"/><path d="m3 17 5-5 4 4 4-6 5 7"/></svg>تصاویر جدا</button>
         </div>
@@ -142,7 +141,7 @@
 
       <div class="dock-actions">
       <details class="output-settings" id="outputSettings" data-mode="pdf">
-        <summary>تنظیمات خروجی</summary>
+        <summary><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H5v18h14v-7M14 3v5h5M12 12l9-9m-6 0h6v6"/></svg>خروجی</summary>
         <dialog class="output-panel" id="outputDialog" aria-labelledby="outputDialogTitle">
           <div class="output-panel-heading">
             <strong id="outputDialogTitle">تنظیمات خروجی</strong>
@@ -175,6 +174,7 @@
           <div class="output-dialog-actions"><button id="startOutputDialog" type="button" class="btn">ساخت و دانلود</button></div>
         </dialog>
       </details>
+        <div class="hidden" aria-hidden="true">
         <button id="buildBtn" class="btn" disabled>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z M14 3v5h5"/></svg>
           <span>ساخت PDF</span>
@@ -183,6 +183,7 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
           <span>ذخیرهٔ تصاویر</span>
         </button>
+        </div>
       </div>
     </div>
   </footer>
