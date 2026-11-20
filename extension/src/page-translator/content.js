@@ -98,14 +98,16 @@
   function makeToolbar(state) {
     const style = document.createElement('style');
     style.dataset.wtpdfPageTranslationUi = 'style';
+    const fontUrl = chrome.runtime.getURL?.('assets/fonts/Vazirmatn.woff2');
     style.textContent = `
+      ${fontUrl ? `@font-face{font-family:HasayaDockVazirmatn;src:url(${JSON.stringify(fontUrl)}) format('woff2');font-weight:100 900;font-display:swap;}` : ''}
       [data-wtpdf-page-translation-ui="toolbar"]{position:fixed!important;top:auto!important;bottom:calc(12px + env(safe-area-inset-bottom,0px))!important;
         left:50%!important;right:auto!important;transform:translateX(-50%)!important;z-index:2147483647!important;
         width:fit-content!important;max-width:min(820px,calc(100vw - 24px))!important;max-height:min(42vh,260px);display:grid;
         grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"workflow review" "status status";align-items:center;gap:7px;
-        padding:8px 10px;border-radius:14px;background:linear-gradient(135deg,#18212f 0%,#202d40 100%);
-        color:#f8fafc;border:1px solid #64748b;box-shadow:0 8px 28px #0008;backdrop-filter:blur(12px);
-        font:500 12px/1.4 system-ui,sans-serif;direction:rtl;}
+        padding:8px 10px;border-radius:14px;background:linear-gradient(135deg,#10131a 0%,#171b25 100%);
+        color:#e8eaf2;border:1px solid #333b4d;box-shadow:0 8px 28px #0008;backdrop-filter:blur(12px);
+        font:500 12px/1.4 HasayaDockVazirmatn,Vazirmatn,Tahoma,sans-serif;direction:rtl;}
       [data-wtpdf-page-translation-ui="toolbar"] [data-role="heading"]{display:none;}
       [data-wtpdf-page-translation-ui="toolbar"] [data-role="workflow"]{grid-area:workflow;display:flex;align-items:center;gap:6px;min-width:0;}
       [data-wtpdf-page-translation-ui="toolbar"] [data-role="workflow"] section{position:relative;min-width:0;padding:0;border:0;background:transparent;}
@@ -118,10 +120,10 @@
         padding:5px 8px;border-radius:8px;background:#263449;color:#e2e8f0;font-size:11px;}
       [data-wtpdf-page-translation-ui="toolbar"] [data-role="status"][data-kind="error"]{background:#4a1d2b;color:#fecdd3;}
       [data-wtpdf-page-translation-ui="toolbar"] [data-role="status"][data-kind="success"]{background:#123c32;color:#bbf7d0;}
-      [data-wtpdf-page-translation-ui="toolbar"] button,[data-wtpdf-page-translation-ui="toolbar"] select{font:600 12px/1.4 system-ui,sans-serif;
-        border:1px solid #64748b;border-radius:9px;background:#273449;color:#fff;padding:5px 7px;cursor:pointer;}
+      [data-wtpdf-page-translation-ui="toolbar"] button,[data-wtpdf-page-translation-ui="toolbar"] select{font:600 12px/1.4 HasayaDockVazirmatn,Vazirmatn,Tahoma,sans-serif;
+        border:1px solid #333b4d;border-radius:9px;background:#171b25;color:#fff;padding:5px 7px;cursor:pointer;}
       [data-wtpdf-page-translation-ui="toolbar"] .icon-button{display:inline-flex;align-items:center;justify-content:center;flex:0 0 36px;
-        width:36px;height:36px;padding:0;color:#f8fafc;}
+        width:36px;height:36px;padding:0;color:#e8eaf2;}
       [data-wtpdf-page-translation-ui="toolbar"] .icon-button svg{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:1.8;
         stroke-linecap:round;stroke-linejoin:round;}
       [data-wtpdf-page-translation-ui="toolbar"] [data-action="translate-selected"]{background:#4f46e5;border-color:#818cf8;color:#fff;}
@@ -140,16 +142,16 @@
       .wtpdf-page-translation-has-version-controls{position:relative!important;}
       .wtpdf-page-translation-version-controls{display:inline-flex!important;align-items:center!important;gap:3px!important;
         position:absolute!important;top:0!important;right:0!important;z-index:5!important;direction:ltr!important;
-        padding:2px!important;border:1px solid #64748b!important;border-radius:8px!important;background:#172033ee!important;
+        padding:2px!important;border:1px solid #333b4d!important;border-radius:8px!important;background:#172033ee!important;
         box-shadow:0 2px 8px #0006!important;opacity:0!important;pointer-events:none!important;transition:opacity .15s ease!important;}
       .wtpdf-page-translation-has-version-controls:hover > .wtpdf-page-translation-version-controls,
       .wtpdf-page-translation-has-version-controls:focus-within > .wtpdf-page-translation-version-controls{opacity:1!important;pointer-events:auto!important;}
       .wtpdf-page-translation-version-badge{display:inline-block!important;margin:0!important;padding:4px 10px!important;
-        border:1px solid #64748b!important;border-radius:8px!important;background:#263449!important;color:#f8fafc!important;
-        font:600 clamp(11px,1.05vw,14px)/1.5 system-ui,sans-serif!important;direction:rtl!important;white-space:nowrap!important;}
+        border:1px solid #333b4d!important;border-radius:8px!important;background:#263449!important;color:#e8eaf2!important;
+        font:600 clamp(11px,1.05vw,14px)/1.5 HasayaDockVazirmatn,Vazirmatn,Tahoma,sans-serif!important;direction:rtl!important;white-space:nowrap!important;}
       .wtpdf-page-translation-version-controls button{display:inline-flex!important;align-items:center!important;justify-content:center!important;
-        flex:0 0 20px!important;width:20px!important;height:20px!important;padding:0!important;border:1px solid #64748b!important;border-radius:5px!important;
-        background:#273449!important;color:#fff!important;font:700 12px/1 system-ui,sans-serif!important;cursor:pointer!important;}
+        flex:0 0 20px!important;width:20px!important;height:20px!important;padding:0!important;border:1px solid #333b4d!important;border-radius:5px!important;
+        background:#171b25!important;color:#fff!important;font:700 12px/1 HasayaDockVazirmatn,Vazirmatn,Tahoma,sans-serif!important;cursor:pointer!important;}
       .wtpdf-page-translation-version-controls button:disabled{opacity:.45!important;cursor:not-allowed!important;}
       .wtpdf-page-translation-pickable{outline:2px dashed #fbbf24!important;outline-offset:3px;cursor:pointer!important;}
       .wtpdf-page-translation-pickable:hover{background-color:#fbbf2430!important;}

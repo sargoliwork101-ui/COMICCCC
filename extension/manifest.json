@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "HASAYA",
-  "version": "3.4",
+  "version": "3.5",
   "description": "HASAYA — دانلود کمیک و وب‌تون به‌صورت PDF یا تصاویر جدا، با کیفیت اصلی",
   "permissions": [
     "activeTab",
@@ -35,5 +35,15 @@
   },
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "assets/fonts/Vazirmatn.woff2"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ]
 }

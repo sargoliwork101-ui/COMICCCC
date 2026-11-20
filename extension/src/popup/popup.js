@@ -349,6 +349,39 @@ async function scrapeAndSend(pdfName, mode, opts) {
   // «lazy.png» اغلب نام فایل واقعی سایت است، نه placeholder؛ خود کلمهٔ lazy را به‌تنهایی فیلتر نکن.
   const PLACEHOLDER = /(?:^|[/_.-])(blank|loading|placeholder|spacer|pixel|1x1)(?:[/_.-]|$)/i;
 
+  // URL tokens may contain commas (CDN transforms and data URLs). A comma
+  // separates descriptors/candidates, not every substring inside a URL token.
+  const srcsetEntries = (set) => {
+    const input = String(set || '');
+    const entries = [];
+    let position = 0;
+    while (position < input.length) {
+      while (position < input.length && /[\s,]/.test(input[position])) position++;
+      const start = position;
+      while (position < input.length && !/\s/.test(input[position])) position++;
+      let url = input.slice(start, position);
+      if (!url) break;
+      if (url.endsWith(',')) {
+        url = url.replace(/,+$/, '');
+        if (url) entries.push({url, descriptor: ''});
+        continue;
+      }
+      const descriptorStart = position;
+      let parentheses = 0;
+      while (position < input.length) {
+        const char = input[position];
+        if (char === '(') parentheses++;
+        if (char === ')') parentheses--;
+        if (char === ',' && parentheses <= 0) break;
+        position++;
+      }
+      const descriptor = input.slice(descriptorStart, position).trim();
+      position++;
+      if (!descriptor || /^(?:\d+w|(?:\d+(?:\.\d+)?|\.\d+)x)$/.test(descriptor)) entries.push({url, descriptor});
+    }
+    return entries;
+  };
+
   // میان منبعِ بارگذاری‌شده و گزینه‌های با وضوح بالاتر در صفت‌ها و srcset مقایسه کن.
   const bestSrc = (img) => {
     const toAbsolute = (value) => {
@@ -358,13 +391,6 @@ async function scrapeAndSend(pdfName, mode, opts) {
       try { return new URL(raw, document.baseURI || location.href).href; } catch { return ''; }
     };
     const active = toAbsolute(img.currentSrc || img.src);
-
-    // سایت‌ها معمولاً نسخهٔ اصلی را روی یکی از این صفات نگه می‌دارند و src را به thumbnail می‌دهند.
-    // قبلاً اگر thumbnail لود شده بود، همین ابتدای تابع برگردانده می‌شد و این آدرس‌های بهتر نادیده گرفته می‌شدند.
-    for (const name of ['data-original', 'data-original-src', 'data-full', 'data-full-src', 'data-zoom', 'data-hires', 'data-high-res']) {
-      const original = toAbsolute(img.getAttribute(name));
-      if (original) return original;
-    }
 
     const renderedWidth = img.clientWidth || img.getBoundingClientRect().width || img.naturalWidth || 1000;
     const candidates = [];
@@ -383,23 +409,22 @@ async function scrapeAndSend(pdfName, mode, opts) {
           }
         }
       } catch { /* data/blob URL or malformed URL */ }
-      const pathMatch = String(url).match(/(?:^|[/_-])(?:w|width)[=_-]?(\d{3,5})(?=[/_?.-]|$)/i);
+      const pathMatch = String(url).match(/(?:^|[/_-])(?:w|width)[=_-]?(\d{3,5})(?=[/_,?.-]|$)/i);
       return pathMatch ? Number(pathMatch[1]) : 0;
     };
+    // A labelled original without a size hint retains its semantic priority;
+    // a size-limited "original" must compete with measured/advertised widths.
+    for (const name of ['data-original', 'data-original-src', 'data-full', 'data-full-src', 'data-zoom', 'data-hires', 'data-high-res']) {
+      const original = toAbsolute(img.getAttribute(name));
+      if (original) addCandidate(original, urlResolution(original) || Number.MAX_SAFE_INTEGER, 8);
+    }
+    const densityBase = Math.max(renderedWidth, Number(img.naturalWidth) || 0);
     const parseSet = (set, priority = 0) => {
-      // srcset descriptors (w/x) communicate the actual candidate size; choose the largest available.
-      (set || '').split(',').forEach((part) => {
-        const [value, descriptor] = part.trim().split(/\s+/);
-        if (!value) return;
-        let score = urlResolution(value);
-        if (descriptor && /w$/i.test(descriptor)) {
-          const width = Number.parseFloat(descriptor);
-          if (Number.isFinite(width)) score = Math.max(score, width);
-        } else if (descriptor && /x$/i.test(descriptor)) {
-          const density = Number.parseFloat(descriptor);
-          if (Number.isFinite(density)) score = Math.max(score, density * renderedWidth);
-        }
-        addCandidate(value, score, priority);
+      srcsetEntries(set).forEach(({url, descriptor}) => {
+        let score = urlResolution(url);
+        if (descriptor?.endsWith('w')) score = Math.max(score, Number.parseFloat(descriptor));
+        else if (descriptor?.endsWith('x')) score = Math.max(score, Number.parseFloat(descriptor) * densityBase);
+        addCandidate(url, score, priority);
       });
     };
 
@@ -411,7 +436,7 @@ async function scrapeAndSend(pdfName, mode, opts) {
     }) : [];
     // If the browser selected a <picture><source>, restrict the candidates to that same art direction/format.
     const selectedSource = pictureSources.find((source) =>
-      (source.srcset || source.getAttribute('data-srcset') || '').split(',').some((part) => toAbsolute(part.trim().split(/\s+/)[0]) === active));
+      srcsetEntries(source.srcset || source.getAttribute('data-srcset')).some((entry) => toAbsolute(entry.url) === active));
     if (selectedSource) {
       parseSet(selectedSource.srcset || selectedSource.getAttribute('data-srcset'), 3);
     } else {
@@ -487,7 +512,12 @@ async function scrapeAndSend(pdfName, mode, opts) {
       if (el.tagName === 'IMG') { add(bestSrc(el)); return; }
       if (el.tagName === 'SOURCE') {
         const srcset = el.getAttribute('srcset') || el.getAttribute('data-srcset');
-        if (srcset) { const first = srcset.split(',')[0].trim().split(/\s+/)[0]; add(first); }
+        if (srcset) {
+          const entries = srcsetEntries(srcset);
+          const size = (entry) => Number.parseFloat(entry.descriptor) * (entry.descriptor.endsWith('x') ? 1000 : 1) || 0;
+          entries.sort((a, b) => size(b) - size(a));
+          if (entries.length) add(entries[0].url);
+        }
         return;
       }
       // المان‌های container: هم تصاویر داخلی و هم background-image خودشان

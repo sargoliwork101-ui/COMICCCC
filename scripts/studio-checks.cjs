@@ -1,10 +1,10 @@
 'use strict';
-// Test runner 1.0.0. This file never starts the user's installed Studio/project.
+// Test runner 1.1.0. This file never starts the user's installed Studio/project.
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const ROOT = path.resolve(__dirname, '..');
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 
 function plan({ browser = false, realOcr = false, python, npmCli }) {
   const node = process.execPath;
@@ -21,6 +21,7 @@ function plan({ browser = false, realOcr = false, python, npmCli }) {
     { id: 'extension', command: [node, npmCli, 'test'] },
   ];
   if (browser) suites.push(
+    js('browser-extension', 'tests/test-extension-browser.cjs'),
     js('browser-grid-notices', 'python_app/tests/grid_memory_browser.test.cjs'),
     js('browser-workflow', 'python_app/tests/app_browser.test.cjs'),
   );

@@ -30,6 +30,15 @@ window.document.body.appendChild(img({ src: 'https://cdn.test/small.gif' }, 100,
 const srcset = img({ src: 'https://cdn.test/loading.gif' }, 300, 300);
 srcset.setAttribute('srcset', 'https://cdn.test/set-1x.jpg 1x, https://cdn.test/set-2x.jpg 2x');
 window.document.body.appendChild(srcset);
+// Regressions: stale explicit originals, density-corrected intrinsic width,
+// and commas inside CDN transformation URLs must not pick a smaller source.
+const staleOriginal = img({src:'https://cdn.test/stale-loaded.jpg', 'data-original':'https://cdn.test/original?w=240', srcset:'https://cdn.test/stale-best.jpg 2000w'}, 300, 400);
+window.document.body.appendChild(staleOriginal);
+const densityImage = img({src:'https://cdn.test/density-one.jpg', srcset:'https://cdn.test/density-one.jpg 1x, https://cdn.test/density-two.jpg 2x'}, 800, 1000);
+Object.defineProperty(densityImage, 'clientWidth', {value:200});
+window.document.body.appendChild(densityImage);
+window.document.body.appendChild(img({src:'https://cdn.test/comma-thumb.jpg', srcset:'https://cdn.test/image/upload/w_400,q_auto/book.jpg 400w, https://cdn.test/image/upload/w_2400,q_auto/book.jpg 2400w'}, 300, 400));
+
 // Regression: the browser has already loaded a small src candidate, but a larger responsive file exists.
 const responsiveLoaded = img({ src: 'https://cdn.test/comic-page-300.jpg' }, 300, 420);
 responsiveLoaded.setAttribute('srcset', 'https://cdn.test/comic-page-300.jpg 300w, https://cdn.test/comic-page-1800.jpg 1800w');
@@ -436,10 +445,21 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     urls.includes('https://cdn.test/comic-linked-original.jpg') && !urls.includes('https://cdn.test/comic-linked-thumb.jpg'), urls);
   check('picture source uses its highest candidate',
     urls.includes('https://cdn.test/picture-page-1600.jpg') && !urls.includes('https://cdn.test/picture-page-320.jpg'), urls);
+  check('stale size-limited data-original does not override a larger advertised candidate', urls.includes('https://cdn.test/stale-best.jpg') && !urls.includes('https://cdn.test/original?w=240'));
+  check('density candidates use intrinsic rather than shrunken CSS width', urls.includes('https://cdn.test/density-two.jpg') && !urls.includes('https://cdn.test/density-one.jpg'));
+  check('CDN URLs with commas remain intact when choosing maximum srcset width', urls.includes('https://cdn.test/image/upload/w_2400,q_auto/book.jpg') && !urls.includes('https://cdn.test/comma-thumb.jpg'));
   check('css background collected', urls.includes('https://cdn.test/bg.webp'));
   check('no duplicates', new Set(urls).size === urls.length);
   check('message payload fields', sent[0].type === 'WTPDF_URLS' && sent[0].name === 'comic.pdf' && sent[0].pageUrl === 'https://comic.test/episode/1?x=1');
   check('running flag reset', window.__wtpdfRunning === false);
+
+  const selectedSource = window.document.createElement('source');
+  selectedSource.id = 'source-only-regression';
+  selectedSource.setAttribute('srcset', 'https://cdn.test/selector-small.jpg 300w, https://cdn.test/selector-original.jpg 2400w');
+  window.document.body.appendChild(selectedSource);
+  await window.eval('scrapeAndSend("source.pdf", "scroll", {imageSelector:"#source-only-regression"})');
+  check('manual SOURCE selector chooses maximum width rather than first candidate', sent.at(-1).urls.length === 1 && sent.at(-1).urls[0] === 'https://cdn.test/selector-original.jpg');
+  selectedSource.remove();
 
   // busy guard
   window.__wtpdfRunning = true;

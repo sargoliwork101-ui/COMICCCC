@@ -5,14 +5,14 @@ const os = require('node:os');
 const path = require('node:path');
 const { VERSION, plan, execute, main } = require('../scripts/studio-checks.cjs');
 
-assert.equal(VERSION, '1.0.0');
+assert.equal(VERSION, '1.1.0');
 const options = { python: '/python with spaces/python', npmCli: '/npm with spaces/npm-cli.js' };
 const base = plan(options);
 assert.ok(base.some(suite => suite.id === 'python'));
 assert.ok(!base.some(suite => suite.id.startsWith('browser')));
 assert.ok(!base.some(suite => suite.env?.COMIC_STUDIO_REAL_OCR_MEMORY));
 const full = plan({ ...options, browser: true, realOcr: true });
-assert.equal(full.length, base.length + 3);
+assert.equal(full.length, base.length + 4);
 assert.equal(new Set(full.map(suite => suite.id)).size, full.length);
 assert.ok(full.some(suite => suite.id === 'browser-grid-notices'));
 assert.ok(full.some(suite => suite.id === 'browser-workflow'));
