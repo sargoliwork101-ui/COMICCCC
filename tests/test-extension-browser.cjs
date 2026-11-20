@@ -57,6 +57,16 @@ const root = path.resolve(__dirname,'../extension');
       assert.equal(result.accent,'#15817b','shared light Focus palette: '+route);
       if(route.startsWith('help')){
         await page.addScriptTag({url:base+'/src/help/help.js'});
+        for(const width of [1280,420]){
+          await page.setViewport({width,height:900});
+          const sizes=await page.evaluate(()=>{
+            const input=document.getElementById('helpSearch').getBoundingClientRect();
+            const button=document.getElementById('showAll').getBoundingClientRect();
+            return {input:input.width,button:button.width,height:input.height,overflow:document.documentElement.scrollWidth>innerWidth};
+          });
+          assert.ok(sizes.input>sizes.button*2 && sizes.button<140 && sizes.height>=36 && !sizes.overflow,JSON.stringify(sizes));
+        }
+        await page.setViewport({width:1280,height:900});
         assert.equal(await page.$$eval('section:not([hidden])',els=>els.length),1);
         await page.click('#helpNext');
         assert.equal(await page.$eval('nav a[aria-current=page]',el=>el.hash),'#organize');
