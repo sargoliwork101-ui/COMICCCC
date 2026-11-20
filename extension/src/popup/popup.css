@@ -71,3 +71,29 @@ body .popup-tool-row .popup-tool:disabled{opacity:.45;cursor:not-allowed}
 
 #startTooltip{left:auto;right:0;transform:none}
 #translateTooltip{left:0;transform:none}
+
+body{background:var(--bg)}
+body .brand{padding:3px 0 9px;border-bottom:1px solid var(--line)}
+body .brand-logo{background:color-mix(in srgb,var(--a1) 15%,var(--surface));border:1px solid var(--line2);box-shadow:none}
+body .studio-section{background:transparent;border:0;padding:8px 0;gap:12px}
+body .studio-section-title{color:var(--text);font-size:12px}
+body #homeView{padding-top:9px}
+.focus-hint{font-size:10px;color:var(--muted);margin:0 0 10px}
+#collectionOptions{display:flex;flex-direction:column;gap:12px}
+.focus-actions{display:flex;gap:8px}
+body .focus-actions .btn{width:auto;flex:1;padding:8px;font-size:11px}
+body .focus-actions .ghost{flex:0 0 auto}
+body .mode-seg{padding:4px;background:var(--surface);border-color:var(--line2)}
+body .mode-btn.active{background:var(--surface3);color:var(--a1);box-shadow:none}
+body .popup-tool-row #startBtn{background:var(--a2);color:white;border-color:transparent}
+body .popup-tool-row{padding:4px 0}
+body .popup-tool-row .popup-tool{height:44px}
+body .mode-hint{color:var(--muted)}
+
+body #deepSearch{appearance:none;width:30px;height:18px;background:var(--surface3);border:1px solid var(--line2);border-radius:20px;padding:2px;position:relative;flex:none}
+body #deepSearch::before{content:'';display:block;width:12px;height:12px;background:var(--muted);border-radius:50%;position:absolute;top:2px;left:2px}
+body #deepSearch:checked{background:var(--a2);border-color:var(--a2)}
+body #deepSearch:checked::before{background:white;left:14px}
+/* A compact home must expand for a fixed confirmation dialog in Chrome's popup. */
+body:has(#extModal:not(.hidden)){min-height:360px}
+#extModal .ext-modal-card{max-height:calc(100vh - 32px);overflow-y:auto}

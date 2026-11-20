@@ -216,6 +216,8 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
   vm.runInContext(popupCode, c, { filename: 'popup.js' });
   if (clickStart) {
     w.document.getElementById('startBtn').click();
+    w.document.querySelector('[data-mode=scroll]').click();
+    w.document.getElementById('collectionReview').click();
     w.document.getElementById('extModalOk').click();
     await new Promise((r) => setTimeout(r, 10));
   }
@@ -545,6 +547,8 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     };
     vm.runInContext(popupCode, dom3.getInternalVMContext(), { filename: 'popup.js' });
     w3.document.getElementById('startBtn').click();
+    w3.document.querySelector('[data-mode=scroll]').click();
+    w3.document.getElementById('collectionReview').click();
     w3.document.getElementById('extModalOk').click();
     await new Promise((r) => setTimeout(r, 10));
     check('frame probe runs across all frames', calls[0] && calls[0].target && calls[0].target.allFrames === true, calls[0]);
@@ -567,6 +571,8 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     };
     vm.runInContext(popupCode, dom4.getInternalVMContext(), { filename: 'popup.js' });
     w4.document.getElementById('startBtn').click();
+    w4.document.querySelector('[data-mode=scroll]').click();
+    w4.document.getElementById('collectionReview').click();
     w4.document.getElementById('extModalOk').click();
     await new Promise((r) => setTimeout(r, 10));
     const statusBox = w4.document.getElementById('statusBox');

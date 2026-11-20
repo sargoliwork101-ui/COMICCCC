@@ -1,7 +1,7 @@
-/* Studio's design tokens. All fonts/assets are packaged with the extension. */
-:root{color-scheme:dark;--bg:#0b0d12;--surface:#10131a;--panel:#13161e;--surface2:#171b25;--surface3:#1f2632;--line:#252b38;--line2:#333b4d;--text:#e8eaf2;--muted:#8a92a6;--faint:#8a92a6;--a1:#8b7bff;--a2:#5e9dff;--grad:linear-gradient(135deg,#8b7bff,#5e9dff);--grad-ok:linear-gradient(135deg,#10b981,#34d399);--danger:#fb7185;--warning:#fbbf24;--shadow:0 18px 50px #0009;--glow:none;--glow-ok:none}
-:root[data-theme=light]{color-scheme:light;--bg:#f3f4f8;--surface:#fff;--panel:#fff;--surface2:#f0f1f6;--surface3:#e8eaf2;--line:#dfe2eb;--line2:#c9cfdd;--text:#202536;--muted:#667085;--faint:#667085;--shadow:0 18px 50px #24304a22}
-body{background:radial-gradient(circle at 85% -20%,#29214c33,transparent 38%),var(--bg);color:var(--text);font:13px/1.8 Vazirmatn,Tahoma,sans-serif}
+/* Focus design tokens, approved in the standalone preview. All fonts/assets are packaged with the extension. */
+:root{color-scheme:dark;--bg:#101a20;--surface:#15242c;--panel:#15242c;--surface2:#1c303a;--surface3:#243e47;--line:#243944;--line2:#29404a;--text:#e1eef2;--muted:#829da8;--faint:#829da8;--a1:#6bd7ce;--a2:#218b88;--grad:linear-gradient(135deg,#218b88,#267e7a);--grad-ok:linear-gradient(135deg,#10b981,#34d399);--danger:#fb7185;--warning:#fbbf24;--shadow:0 18px 50px #0009;--glow:none;--glow-ok:none}
+:root[data-theme=light]{--a1:#15817b;--a2:#167f79;color-scheme:light;--bg:#f1f8f8;--surface:#fff;--panel:#fff;--surface2:#e4f0ef;--surface3:#e1eef2;--line:#cee0e0;--line2:#b8d1d2;--text:#203c41;--muted:#6c898d;--faint:#6c898d;--shadow:0 18px 50px #24304a22}
+body{background:radial-gradient(circle at 85% -20%,#218b8810,transparent 38%),var(--bg);color:var(--text);font:13px/1.8 Vazirmatn,Tahoma,sans-serif}
 body :is(button,input,select,textarea){font-family:Vazirmatn,Tahoma,sans-serif}
 select{color-scheme:inherit}
 :is(.panel,.settings-card,.import-card,.studio-section,.card,.box,.output-panel,.tool-menu-body,.top-menu-panel,.modal-card,.ext-modal-card){background:var(--surface);border:1px solid var(--line2);border-radius:12px;color:var(--text)}
@@ -43,9 +43,9 @@ select{color-scheme:inherit}
 .toolbar-actions .studio-action-group .mini:hover:not(:disabled){border-color:var(--a1);background:color-mix(in srgb,var(--a1) 12%,var(--surface2))}
 .toolbar-actions .studio-action-group .mini:disabled{opacity:.45;cursor:not-allowed}
 .toolbar-actions .studio-action-group .mini.warn{color:var(--danger)}
-.toolbar-actions .studio-action-group[aria-label="گروه‌بندی صفحات"]{border-color:color-mix(in srgb,#38bdf8 34%,var(--line2));background:color-mix(in srgb,#38bdf8 5%,var(--surface))}
-.toolbar-actions .studio-action-group[aria-label="گروه‌بندی صفحات"] .studio-group-label{color:#38bdf8}
-:root[data-theme=light] .toolbar-actions .studio-action-group[aria-label="گروه‌بندی صفحات"] .studio-group-label{color:#0284c7}
+.toolbar-actions .studio-action-group[aria-label="گروه‌بندی صفحات"]{border-color:color-mix(in srgb,var(--a1) 34%,var(--line2));background:color-mix(in srgb,var(--a1) 5%,var(--surface))}
+.toolbar-actions .studio-action-group[aria-label="گروه‌بندی صفحات"] .studio-group-label{color:var(--a1)}
+:root[data-theme=light] .toolbar-actions .studio-action-group[aria-label="گروه‌بندی صفحات"] .studio-group-label{color:var(--a1)}
 .toolbar .toolbar-selection-count{display:inline-flex;align-items:center;gap:5px;padding:3.5px 10px;font-size:11px;font-weight:600;line-height:1.8;border-radius:999px;border:1px solid color-mix(in srgb,var(--a1) 42%,var(--line2));background:color-mix(in srgb,var(--a1) 10%,var(--surface2));color:var(--text)}
 .toolbar .toolbar-selection-count::before{content:'';width:7px;height:7px;border-radius:50%;background:var(--a1);flex:none}
 .toolbar .toolbar-menus{margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
@@ -66,3 +66,17 @@ body .mode-btn{padding:6px 4px;gap:4px;font-size:10.5px;line-height:1.5}
 .toolbar-actions .studio-action-group .mini{padding:3px 6px;min-height:25px;font-size:10px;gap:4px}
 body .output-close{display:inline-flex;align-items:center;gap:4px;padding:4px 8px;font-size:11px}
 @media(pointer:coarse){body :is(.btn,.mini,.mode-btn,.seg-btn){min-height:36px}}
+
+/* Focus surfaces apply to all extension workspaces, including dialogs/docks. */
+:is(.brand-logo,.version-pill){box-shadow:none}
+.version-pill{background:color-mix(in srgb,var(--a1) 9%,var(--surface));border-color:var(--line2)}
+:is(.mode-seg,.advanced,.tool-menu,.selected-file,.loading-card){background:var(--surface);border-color:var(--line2)}
+:is(.btn,.mini,.seg-btn,.settings-btn,.update-btn){box-shadow:none}
+:is(.mini.accent,.seg-btn.active){background:color-mix(in srgb,var(--a1) 12%,var(--surface));border-color:var(--a1);color:var(--a1)}
+:is(.mode-btn.active,.btn:not(.ghost):not(.ok)){background:var(--grad);color:#fff}
+:is(.item.selected,.item.selected .tw){border-color:var(--a1)}
+:is(.tick,.bar>div){background:var(--a2)}
+:is(.group-edit-status,.profile-status,.job-hint){color:var(--muted)}
+:is(.top-menu>summary:hover,.top-menu[open]>summary){background:color-mix(in srgb,var(--a1) 12%,var(--surface));border-color:var(--a1)}
+
+.import-header{background:var(--surface);border-color:var(--line)}

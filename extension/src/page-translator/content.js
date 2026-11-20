@@ -4,6 +4,16 @@
   const tools = window.PageTranslationTools;
   if (!tools) return;
 
+  // Keep the injected dock on the same local theme without changing site styles.
+  if (!window.__wtpdfFocusThemeListener && chrome.storage?.onChanged) {
+    window.__wtpdfFocusThemeListener = (changes, area) => {
+      const theme = changes.hasaya_ui_theme?.newValue;
+      const dock = window.__wtpdfPageTranslation?.ui?.toolbar;
+      if (area === 'local' && dock && ['light', 'dark'].includes(theme)) dock.dataset.focusTheme = theme;
+    };
+    chrome.storage.onChanged.addListener(window.__wtpdfFocusThemeListener);
+  }
+
   const JOB_PREFIX = 'WTPDF_PAGE_TRANSLATE_';
   const MAX_TRANSLATION_VERSIONS = 6; // آخرین ترجمه + پنج ترجمهٔ قبلی برای هر پاراگراف
   const toPersianNumber = (value) => String(value).replace(/\d/gu, (digit) => '۰۱۲۳۴۵۶۷۸۹'[Number(digit)]);
@@ -105,8 +115,8 @@
         left:50%!important;right:auto!important;transform:translateX(-50%)!important;z-index:2147483647!important;
         width:fit-content!important;max-width:min(820px,calc(100vw - 24px))!important;max-height:min(42vh,260px);display:grid;
         grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"workflow review" "status status";align-items:center;gap:7px;
-        padding:8px 10px;border-radius:14px;background:linear-gradient(135deg,#10131a 0%,#171b25 100%);
-        color:#e8eaf2;border:1px solid #333b4d;box-shadow:0 8px 28px #0008;backdrop-filter:blur(12px);
+        padding:8px 10px;border-radius:14px;background:linear-gradient(135deg,#101a20 0%,#15242c 100%);
+        color:#e1eef2;border:1px solid #29404a;box-shadow:0 8px 28px #0008;backdrop-filter:blur(12px);
         font:500 12px/1.4 HasayaDockVazirmatn,Vazirmatn,Tahoma,sans-serif;direction:rtl;}
       [data-wtpdf-page-translation-ui="toolbar"] [data-role="heading"]{display:none;}
       [data-wtpdf-page-translation-ui="toolbar"] [data-role="workflow"]{grid-area:workflow;display:flex;align-items:center;gap:6px;min-width:0;}
@@ -117,21 +127,21 @@
         clip:rect(0,0,0,0);white-space:nowrap;border:0;}
       [data-wtpdf-page-translation-ui="toolbar"] [data-role="workflow"] select{width:100%;min-width:0;height:36px;}
       [data-wtpdf-page-translation-ui="toolbar"] [data-role="status"]{grid-area:status;min-width:0;max-height:68px;overflow:auto;
-        padding:5px 8px;border-radius:8px;background:#263449;color:#e2e8f0;font-size:11px;}
+        padding:5px 8px;border-radius:8px;background:#1c303a;color:#e1eef2;font-size:11px;}
       [data-wtpdf-page-translation-ui="toolbar"] [data-role="status"][data-kind="error"]{background:#4a1d2b;color:#fecdd3;}
       [data-wtpdf-page-translation-ui="toolbar"] [data-role="status"][data-kind="success"]{background:#123c32;color:#bbf7d0;}
       [data-wtpdf-page-translation-ui="toolbar"] button,[data-wtpdf-page-translation-ui="toolbar"] select{font:600 12px/1.4 HasayaDockVazirmatn,Vazirmatn,Tahoma,sans-serif;
-        border:1px solid #333b4d;border-radius:9px;background:#171b25;color:#fff;padding:5px 7px;cursor:pointer;}
+        border:1px solid #29404a;border-radius:9px;background:#15242c;color:#fff;padding:5px 7px;cursor:pointer;}
       [data-wtpdf-page-translation-ui="toolbar"] .icon-button{display:inline-flex;align-items:center;justify-content:center;flex:0 0 36px;
-        width:36px;height:36px;padding:0;color:#e8eaf2;}
+        width:36px;height:36px;padding:0;color:#e1eef2;}
       [data-wtpdf-page-translation-ui="toolbar"] .icon-button svg{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:1.8;
         stroke-linecap:round;stroke-linejoin:round;}
-      [data-wtpdf-page-translation-ui="toolbar"] [data-action="translate-selected"]{background:#4f46e5;border-color:#818cf8;color:#fff;}
+      [data-wtpdf-page-translation-ui="toolbar"] [data-action="translate-selected"]{background:#218b88;border-color:#6bd7ce;color:#fff;}
       [data-wtpdf-page-translation-ui="toolbar"] [data-action="pick-toggle"][data-active="true"]{background:#14532d;border-color:#4ade80;color:#bbf7d0;}
       [data-wtpdf-page-translation-ui="toolbar"] [data-action="retry-failed"]{border-color:#a16207;color:#fde68a;}
-      [data-wtpdf-page-translation-ui="toolbar"] button:hover{background:#35445e;}
-      [data-wtpdf-page-translation-ui="toolbar"] [data-action="translate-selected"]:hover{background:#4338ca;}
-      [data-wtpdf-page-translation-ui="toolbar"] button:focus-visible,[data-wtpdf-page-translation-ui="toolbar"] select:focus-visible{outline:2px solid #a5b4fc;outline-offset:2px;}
+      [data-wtpdf-page-translation-ui="toolbar"] button:hover{background:#29404a;}
+      [data-wtpdf-page-translation-ui="toolbar"] [data-action="translate-selected"]:hover{background:#167f79;}
+      [data-wtpdf-page-translation-ui="toolbar"] button:focus-visible,[data-wtpdf-page-translation-ui="toolbar"] select:focus-visible{outline:2px solid #6bd7ce;outline-offset:2px;}
       [data-wtpdf-page-translation-ui="toolbar"] button:disabled,[data-wtpdf-page-translation-ui="toolbar"] select:disabled{opacity:.55;cursor:not-allowed;}
       [data-wtpdf-page-translation-ui="toolbar"] [data-role="review"]{grid-area:review;display:flex;align-items:center;gap:4px;flex-wrap:nowrap;min-width:0;padding:0;border:0;background:transparent;}
       [data-wtpdf-page-translation-ui="toolbar"][data-collapsed="true"]{width:auto!important;max-width:calc(100vw - 16px);grid-template-columns:auto;grid-template-areas:"review";padding:5px;}
@@ -142,16 +152,16 @@
       .wtpdf-page-translation-has-version-controls{position:relative!important;}
       .wtpdf-page-translation-version-controls{display:inline-flex!important;align-items:center!important;gap:3px!important;
         position:absolute!important;top:0!important;right:0!important;z-index:5!important;direction:ltr!important;
-        padding:2px!important;border:1px solid #333b4d!important;border-radius:8px!important;background:#172033ee!important;
+        padding:2px!important;border:1px solid #29404a!important;border-radius:8px!important;background:#101a20ee!important;
         box-shadow:0 2px 8px #0006!important;opacity:0!important;pointer-events:none!important;transition:opacity .15s ease!important;}
       .wtpdf-page-translation-has-version-controls:hover > .wtpdf-page-translation-version-controls,
       .wtpdf-page-translation-has-version-controls:focus-within > .wtpdf-page-translation-version-controls{opacity:1!important;pointer-events:auto!important;}
       .wtpdf-page-translation-version-badge{display:inline-block!important;margin:0!important;padding:4px 10px!important;
-        border:1px solid #333b4d!important;border-radius:8px!important;background:#263449!important;color:#e8eaf2!important;
+        border:1px solid #29404a!important;border-radius:8px!important;background:#1c303a!important;color:#e1eef2!important;
         font:600 clamp(11px,1.05vw,14px)/1.5 HasayaDockVazirmatn,Vazirmatn,Tahoma,sans-serif!important;direction:rtl!important;white-space:nowrap!important;}
       .wtpdf-page-translation-version-controls button{display:inline-flex!important;align-items:center!important;justify-content:center!important;
-        flex:0 0 20px!important;width:20px!important;height:20px!important;padding:0!important;border:1px solid #333b4d!important;border-radius:5px!important;
-        background:#171b25!important;color:#fff!important;font:700 12px/1 HasayaDockVazirmatn,Vazirmatn,Tahoma,sans-serif!important;cursor:pointer!important;}
+        flex:0 0 20px!important;width:20px!important;height:20px!important;padding:0!important;border:1px solid #29404a!important;border-radius:5px!important;
+        background:#15242c!important;color:#fff!important;font:700 12px/1 HasayaDockVazirmatn,Vazirmatn,Tahoma,sans-serif!important;cursor:pointer!important;}
       .wtpdf-page-translation-version-controls button:disabled{opacity:.45!important;cursor:not-allowed!important;}
       .wtpdf-page-translation-pickable{outline:2px dashed #fbbf24!important;outline-offset:3px;cursor:pointer!important;}
       .wtpdf-page-translation-pickable:hover{background-color:#fbbf2430!important;}
@@ -160,6 +170,10 @@
       [data-wtpdf-translation-status="partial"]:not(.wtpdf-page-translation-picked){outline:2px solid #fbbf24!important;outline-offset:3px;}
       [data-wtpdf-translation-status="failed"]:not(.wtpdf-page-translation-picked){outline:2px solid #f87171!important;outline-offset:3px;}
       [data-wtpdf-translation-status="translating"]:not(.wtpdf-page-translation-picked){outline:2px solid #93c5fd!important;outline-offset:3px;}
+      [data-wtpdf-page-translation-ui="toolbar"][data-focus-theme="light"]{background:#f1f8f8;color:#203c41;border-color:#cee0e0;}
+      [data-wtpdf-page-translation-ui="toolbar"][data-focus-theme="light"] :is(button,select){background:#fff;color:#203c41;border-color:#b8d1d2;}
+      [data-wtpdf-page-translation-ui="toolbar"][data-focus-theme="light"] [data-action="translate-selected"]{background:#167f79;color:#fff;border-color:#15817b;}
+      [data-wtpdf-page-translation-ui="toolbar"][data-focus-theme="light"] [data-role="status"]:not([data-kind="error"]):not([data-kind="success"]){background:#e4f0ef;color:#203c41;}
       @media(max-width:640px){[data-wtpdf-page-translation-ui="toolbar"]{bottom:calc(8px + env(safe-area-inset-bottom,0px))!important;
         width:calc(100vw - 16px)!important;grid-template-columns:minmax(0,1fr);grid-template-areas:"workflow" "review" "status";gap:5px;padding:7px;}
         [data-wtpdf-page-translation-ui="toolbar"] [data-role="workflow"]{width:100%;gap:5px;}
@@ -172,6 +186,13 @@
     `;
     const toolbar = document.createElement('div');
     toolbar.dataset.wtpdfPageTranslationUi = 'toolbar';
+    toolbar.dataset.focusTheme = window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    try {
+      Promise.resolve(chrome.storage?.local?.get(['hasaya_ui_theme'])).then(saved => {
+        if (['light', 'dark'].includes(saved?.hasaya_ui_theme)) toolbar.dataset.focusTheme = saved.hasaya_ui_theme;
+      }).catch(() => {});
+    } catch { /* local theme is optional; OCR/document data is not read */ }
+
     toolbar.setAttribute('role', 'region');
     toolbar.setAttribute('aria-label', 'انتخاب، ترجمه و بازبینی متن صفحه');
     const heading = document.createElement('div');

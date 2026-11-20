@@ -51,12 +51,43 @@ for (const [id, label] of [['startBtn', 'شروع و پیش‌نمایش تصا�
     event.preventDefault();
     event.stopImmediatePropagation();
     if (button.disabled || popupConfirmationPending) return;
+    if (id === 'startBtn') { openCollectionView(); return; }
     const approved = await window.extConfirm(`شما «${label}» را انتخاب کرده‌اید. مطمئن هستید می‌خواهید ادامه دهید؟`);
     if (!approved || button.disabled) return;
     approvedPopupTool = button;
     try { button.click(); } finally { approvedPopupTool = null; }
   }, true);
 }
+
+function openCollectionView() {
+  document.getElementById('homeView').classList.add('hidden');
+  document.getElementById('collectionView').classList.remove('hidden');
+  document.querySelector('#modeSeg .mode-btn').focus();
+}
+document.getElementById('collectionBack').addEventListener('click', () => {
+  document.getElementById('collectionView').classList.add('hidden');
+  document.getElementById('homeView').classList.remove('hidden');
+  document.getElementById('startBtn').focus();
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !popupConfirmationPending && !document.getElementById('collectionView').classList.contains('hidden')) {
+    document.getElementById('collectionBack').click();
+  }
+});
+document.getElementById('collectionReview').addEventListener('click', async () => {
+  const review = document.getElementById('collectionReview');
+  if (review.disabled || popupConfirmationPending) return;
+  const labels = {scroll:'اسکرول صفحه', auto:'ورق‌زدن خودکار', manual:'ورق‌زدن دستی'};
+  const name = document.getElementById('pdfName').value.trim() || 'HASAYA STUDIO';
+  const limit = Number.parseInt(document.getElementById('pageLimit').value, 10);
+  const detail = collectMode === 'scroll'
+    ? 'جستجوی عمیق: ' + (document.getElementById('deepSearch').checked ? 'روشن' : 'خاموش')
+    : 'حداکثر صفحات: ' + (limit > 0 ? limit : 'همهٔ صفحات');
+  const approved = await window.extConfirm(`شروع و پیش‌نمایش تصاویر\nروش: ${labels[collectMode]}\nنام خروجی: ${name}\n${detail}\nمطمئن هستید می‌خواهید شروع کنید؟`);
+  if (!approved || startBtn.disabled) return;
+  approvedPopupTool = startBtn;
+  try { startBtn.click(); } finally { approvedPopupTool = null; }
+});
 
 const startBtn = document.getElementById('startBtn');
 const pdfConvertBtn = document.getElementById('pdfConvertBtn');
@@ -243,7 +274,12 @@ if (modeSeg) {
     const btn = ev.target.closest('.mode-btn');
     if (!btn) return;
     collectMode = btn.dataset.mode || 'scroll';
-    modeSeg.querySelectorAll('.mode-btn').forEach((b) => b.classList.toggle('active', b === btn));
+    modeSeg.querySelectorAll('.mode-btn').forEach((b) => {
+      b.classList.toggle('active', b === btn);
+      b.setAttribute('aria-pressed', String(b === btn));
+    });
+    document.getElementById('collectionOptions').classList.remove('hidden');
+    document.getElementById('collectionReview').disabled = false;
     applyModeFields(collectMode);
   });
 }

@@ -12,9 +12,9 @@
     <span class="brand-logo"><img src="../../assets/icons/icon128.png" alt=""></span>
     <div class="brand-text">
       <h1>HASAYA</h1>
-      <p>کمیک را به PDF یا تصویر تبدیل کن</p>
+
     </div>
-    <span class="version-pill">v3.12</span>
+    <span class="version-pill">v3.13</span>
     <button type="button" id="aiSettingsBtn" class="settings-btn" title="تنظیم سرویس، مدل و کلید API برای ترجمه"
       aria-label="تنظیمات API هوش مصنوعی">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
@@ -34,18 +34,41 @@
   </div>
   <div id="updateStatus" class="update-status hidden" role="status" aria-live="polite"></div>
 
-  <section class="studio-section" aria-labelledby="collectSectionTitle">
-    <h2 class="studio-section-title" id="collectSectionTitle"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8" cy="8" r="1"/><path d="m3 17 5-5 4 4 3-3 6 6"/></svg>جمع‌آوری و تنظیمات تصویر</h2>
+  <div class="box hidden" id="statusBox">
+    <div id="statusText"></div>
+  </div>
+
+  <section id="homeView" class="studio-section" aria-labelledby="actionSectionTitle">
+    <h2 class="studio-section-title" id="actionSectionTitle"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H6v18h12V7zM14 3v5h5M8 13h8M8 17h6"/></svg>ابزارها و خروجی</h2>
+  <div class="popup-tool-row" role="group" aria-label="ابزارها و خروجی">
+  <button id="startBtn" class="btn popup-tool" type="button" aria-label="شروع و پیش‌نمایش تصاویر" aria-describedby="startTooltip">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5M4 20h16"/></svg>
+    <span class="popup-tool-tip" role="tooltip" id="startTooltip">شروع و پیش‌نمایش تصاویر</span>
+  </button>
+  <button id="pdfConvertBtn" class="btn ghost popup-tool" aria-label="تبدیل PDF به تصویر" aria-describedby="pdfTooltip" type="button" title="انتخاب PDF و تبدیل صفحه‌های آن به تصویر در زبانهٔ جدا">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 14h8M8 17h6"/></svg>
+    <span class="popup-tool-tip" role="tooltip" id="pdfTooltip">تبدیل PDF به تصویر</span>
+  </button>
+  <button id="translatePageBtn" class="btn ghost popup-tool" aria-label="ترجمهٔ همین صفحه" aria-describedby="translateTooltip" type="button" title="کپی صفحه را باز می‌کند؛ پاراگراف‌ها و موتور ترجمه را خودتان انتخاب می‌کنید"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h12M9 3v2M5 5c0 5 4 8 8 10M13 5c0 5-4 8-10 10m11 6 4-10 4 10m-6-3h4"/></svg>
+    <span class="popup-tool-tip" role="tooltip" id="translateTooltip">ترجمهٔ همین صفحه</span>
+  </button>
+  </div>
+
+  </section>
+
+  <section id="collectionView" class="studio-section hidden" aria-labelledby="collectSectionTitle">
+    <h2 class="studio-section-title" id="collectSectionTitle"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8" cy="8" r="1"/><path d="m3 17 5-5 4 4 3-3 6 6"/></svg>با کدام روش جمع‌آوری کنم؟</h2>
   <div class="field">
-    <label>روش جمع‌آوری تصاویر</label>
+    <p class="focus-hint">روش مناسب سایت را انتخاب کنید؛ هنوز کاری شروع نشده است.</p>
     <div class="mode-seg" id="modeSeg" role="group" aria-label="روش جمع‌آوری تصاویر">
-      <button type="button" class="mode-btn active" data-mode="scroll" title="اسکرول خودکار تا انتهای صفحه؛ مناسب کمیک و وب‌تون تودرتو"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5h8M8 19h8M12 3v18m-3-3 3 3 3-3"/></svg>اسکرول صفحه</button>
-      <button type="button" class="mode-btn" data-mode="auto" title="خود افزونه روی مثلث یا دکمهٔ صفحهٔ بعدی کلیک می‌کند؛ مناسب کتاب‌های صفحه‌ای مثل Google Books"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h7l2 2 2-2h7v16h-7l-2 2-2-2H3zM12 6v16"/></svg>ورق‌زدن خودکار</button>
-      <button type="button" class="mode-btn" data-mode="manual" title="خودت روی صفحهٔ بعدی کلیک می‌کنی و افزونه هر تصویر تازه را خودش برمی‌دارد؛ با دکمهٔ «تمام شد» پایان می‌دهی"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 13V5a2 2 0 0 1 4 0v7-3a2 2 0 0 1 4 0v3a2 2 0 0 1 4 0v5l-3 5H8l-5-7a2 2 0 0 1 3-2l2 2"/></svg>ورق‌زدن دستی</button>
+      <button type="button" class="mode-btn" data-mode="scroll" aria-pressed="false" title="اسکرول خودکار تا انتهای صفحه؛ مناسب کمیک و وب‌تون تودرتو"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5h8M8 19h8M12 3v18m-3-3 3 3 3-3"/></svg>اسکرول صفحه</button>
+      <button type="button" class="mode-btn" data-mode="auto" aria-pressed="false" title="خود افزونه روی مثلث یا دکمهٔ صفحهٔ بعدی کلیک می‌کند؛ مناسب کتاب‌های صفحه‌ای مثل Google Books"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h7l2 2 2-2h7v16h-7l-2 2-2-2H3zM12 6v16"/></svg>ورق‌زدن خودکار</button>
+      <button type="button" class="mode-btn" data-mode="manual" aria-pressed="false" title="خودت روی صفحهٔ بعدی کلیک می‌کنی و افزونه هر تصویر تازه را خودش برمی‌دارد؛ با دکمهٔ «تمام شد» پایان می‌دهی"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 13V5a2 2 0 0 1 4 0v7-3a2 2 0 0 1 4 0v3a2 2 0 0 1 4 0v5l-3 5H8l-5-7a2 2 0 0 1 3-2l2 2"/></svg>ورق‌زدن دستی</button>
     </div>
     <p class="mode-hint">اسکرول برای کمیک‌های تودرتو؛ ورق‌زدن برای سایت‌های صفحه‌ای که با کلیک روی مثلث عوض می‌شوند.</p>
   </div>
 
+  <div id="collectionOptions" class="hidden">
   <div class="field">
     <label for="pdfName">نام فایل خروجی</label>
     <input type="text" id="pdfName" value="HASAYA STUDIO" spellcheck="false">
@@ -83,28 +106,8 @@
     </details>
   </div>
 
-  </section>
-
-  <div class="box hidden" id="statusBox">
-    <div id="statusText"></div>
   </div>
-
-  <section class="studio-section" aria-labelledby="actionSectionTitle">
-    <h2 class="studio-section-title" id="actionSectionTitle"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H6v18h12V7zM14 3v5h5M8 13h8M8 17h6"/></svg>ابزارها و خروجی</h2>
-  <div class="popup-tool-row" role="group" aria-label="ابزارها و خروجی">
-  <button id="startBtn" class="btn popup-tool" type="button" aria-label="شروع و پیش‌نمایش تصاویر" aria-describedby="startTooltip">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5M4 20h16"/></svg>
-    <span class="popup-tool-tip" role="tooltip" id="startTooltip">شروع و پیش‌نمایش تصاویر</span>
-  </button>
-  <button id="pdfConvertBtn" class="btn ghost popup-tool" aria-label="تبدیل PDF به تصویر" aria-describedby="pdfTooltip" type="button" title="انتخاب PDF و تبدیل صفحه‌های آن به تصویر در زبانهٔ جدا">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 14h8M8 17h6"/></svg>
-    <span class="popup-tool-tip" role="tooltip" id="pdfTooltip">تبدیل PDF به تصویر</span>
-  </button>
-  <button id="translatePageBtn" class="btn ghost popup-tool" aria-label="ترجمهٔ همین صفحه" aria-describedby="translateTooltip" type="button" title="کپی صفحه را باز می‌کند؛ پاراگراف‌ها و موتور ترجمه را خودتان انتخاب می‌کنید"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h12M9 3v2M5 5c0 5 4 8 8 10M13 5c0 5-4 8-10 10m11 6 4-10 4 10m-6-3h4"/></svg>
-    <span class="popup-tool-tip" role="tooltip" id="translateTooltip">ترجمهٔ همین صفحه</span>
-  </button>
-  </div>
-
+  <div class="focus-actions"><button id="collectionBack" class="btn ghost" type="button">انصراف</button><button id="collectionReview" class="btn" type="button" disabled>بررسی و تأیید انتخاب</button></div>
   </section>
 
   <div id="extModal" class="ext-modal hidden" role="dialog" aria-modal="true" aria-labelledby="extModalTitle" aria-describedby="extModalMsg">

@@ -42,18 +42,20 @@ const root = path.resolve(__dirname,'../extension');
       await page.addScriptTag({url:base+'/src/shared/studio-ui.js'});
       await page.evaluate(()=>document.fonts.ready);
       const result=await page.evaluate(()=>{
+        document.documentElement.dataset.theme='dark';
         const dark=getComputedStyle(document.body).color;
         const font=document.fonts.check('13px Vazirmatn');
         document.getElementById('studioThemeToggle').click();
         const light=getComputedStyle(document.body).color;
-        return {font,different:dark!==light,overflow:document.documentElement.scrollWidth>innerWidth};
+        return {font,different:dark!==light,overflow:document.documentElement.scrollWidth>innerWidth,accent:getComputedStyle(document.documentElement).getPropertyValue('--a1').trim()};
       });
       assert.ok(result.font&&result.different&&!result.overflow,route+JSON.stringify(result));
+      assert.equal(result.accent,'#15817b','shared light Focus palette: '+route);
       if(route.startsWith('popup')){
         const tools=await page.evaluate(()=>[...document.querySelectorAll('.popup-tool-row button')].map(el=>{
           const r=el.getBoundingClientRect();return {top:r.top,width:r.width,height:r.height};
         }));
-        assert.equal(tools.length,3);assert.ok(tools.every(r=>r.top===tools[0].top&&Math.abs(r.width-tools[0].width)<1&&r.height===40));
+        assert.equal(tools.length,3);assert.ok(tools.every(r=>r.top===tools[0].top&&Math.abs(r.width-tools[0].width)<1&&r.height===44));
         const size=await page.evaluate(()=>{
           const row=document.querySelector('.popup-tool-row').getBoundingClientRect();
           return {row:row.width,gap:parseFloat(getComputedStyle(document.querySelector('.popup-tool-row')).columnGap),height:document.body.getBoundingClientRect().height};
@@ -62,15 +64,6 @@ const root = path.resolve(__dirname,'../extension');
         assert.ok(size.height<=600,'default popup must fit Chrome 600px cap: '+JSON.stringify(size));
         await page.setViewport({width:420,height:Math.ceil(size.height)});
         assert.ok(await page.evaluate(()=>document.documentElement.scrollHeight<=innerHeight),'default popup must not scroll at content height');
-        const pagedHeight=await page.evaluate(()=>{
-          document.getElementById('scrollModeFields').classList.add('hidden');
-          document.getElementById('pagedModeFields').classList.remove('hidden');
-          return document.body.getBoundingClientRect().height;
-        });
-        assert.ok(pagedHeight<=600,'collapsed paged controls fit Chrome height cap: '+pagedHeight);
-        await page.setViewport({width:420,height:Math.ceil(pagedHeight)});
-        assert.ok(await page.evaluate(()=>document.documentElement.scrollHeight<=innerHeight),'paged popup grows to content without scrolling');
-
         for(const id of ['startBtn','pdfConvertBtn','translatePageBtn']){
           await page.hover('#'+id);
           const tooltip=await page.$eval('#'+id+' [role=tooltip]',el=>{
@@ -78,6 +71,32 @@ const root = path.resolve(__dirname,'../extension');
           });
           assert.ok(tooltip.visible&&tooltip.fits,JSON.stringify(tooltip));
         }
+      }
+      if(route.startsWith('popup')){
+        await page.setViewport({width:420,height:600});
+        await page.evaluate(()=>{
+          window.chrome={storage:{local:{get:async()=>({})}},runtime:{getURL:v=>v}};
+        });
+        await page.addScriptTag({url:base+'/src/popup/popup.js'});
+        await page.click('#pdfConvertBtn');
+        const confirmHeight=await page.$eval('body',el=>el.getBoundingClientRect().height);
+        assert.ok(confirmHeight>=360&&confirmHeight<=600,'small home expands for confirmation');
+        await page.setViewport({width:420,height:Math.ceil(confirmHeight)});
+        assert.ok(await page.$eval('#extModalOk',el=>{const r=el.getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight;}),'confirmation must fit compact popup');
+        await page.keyboard.press('Escape');
+        await page.setViewport({width:420,height:600});
+        await page.click('#startBtn');
+        assert.ok(await page.$eval('#collectionReview',el=>el.disabled));
+        for(const mode of ['scroll','auto','manual']){
+          await page.click('[data-mode="'+mode+'"]');
+          const layout=await page.evaluate(()=>({height:document.body.getBoundingClientRect().height,overflow:document.documentElement.scrollWidth>innerWidth,deep:document.getElementById('scrollModeFields').getBoundingClientRect().height>0}));
+          assert.equal(layout.deep,mode==='scroll');assert.ok(layout.height<=600&&!layout.overflow,JSON.stringify(layout));
+          await page.click('#collectionReview');
+          assert.ok(await page.$eval('#extModal',el=>!el.classList.contains('hidden')));
+          await page.keyboard.press('Escape');
+        }
+        await page.click('#collectionBack');
+        assert.ok(await page.$eval('#collectionView',el=>el.getBoundingClientRect().height===0));
       }
       if(route.startsWith('viewer')){
         for(const theme of ['dark','light']){
@@ -97,7 +116,7 @@ const root = path.resolve(__dirname,'../extension');
           assert.ok(layout.heights.every(h=>h<50)&&layout.inline,JSON.stringify(layout));
           assert.ok(layout.menu<layout.toolbar/2,JSON.stringify(layout));
           assert.equal(layout.danger,'rgb(251, 113, 133)');
-          assert.ok(layout.panel.includes(theme==='dark'?'0.0745098 0.0862745 0.117647':'1 1 1'),JSON.stringify(layout));
+          assert.ok(layout.panel.includes(theme==='dark'?'0.082353 0.141176 0.172549':'1 1 1'),JSON.stringify(layout));
           const header=await page.evaluate(()=>{
             const controls=['.topbar-side .studio-theme-toggle','.topbar-side .top-menu>summary'];
             return controls.map(selector=>{

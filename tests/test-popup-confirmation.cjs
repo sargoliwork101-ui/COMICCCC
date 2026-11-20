@@ -18,7 +18,43 @@ const tick = () => new Promise(resolve => setTimeout(resolve, 10));
     const tool = d.getElementById(id), modal = d.getElementById('extModal'), cancel = d.getElementById('extModalCancel'), ok = d.getElementById('extModalOk');
     assert.ok(tool.getAttribute('aria-label'));
     assert.ok(d.getElementById(tool.getAttribute('aria-describedby')).matches('[role=tooltip]'));
-    tool.focus();tool.click();await tick();
+    assert.ok(d.getElementById('collectionView').classList.contains('hidden'));
+    assert.ok(!d.querySelector('.brand p'), 'obsolete subtitle removed');
+    const activate = () => {
+      tool.click();
+      if (id === 'startBtn') {
+        assert.equal(effects,0,'opening collection settings must not query/inject');
+        assert.ok(modal.classList.contains('hidden'),'start opens settings, not confirmation');
+        d.querySelector('[data-mode=scroll]').click();
+        d.getElementById('collectionReview').focus();
+        d.getElementById('collectionReview').click();
+      }
+    };
+    if (id === 'startBtn') {
+      tool.click();
+      assert.ok(d.getElementById('collectionReview').disabled);
+      assert.ok(d.getElementById('collectionOptions').classList.contains('hidden'));
+      d.querySelector('[data-mode=scroll]').click();
+      d.getElementById('deepSearch').checked = true;
+      d.getElementById('collectionReview').click();
+      assert.ok(d.getElementById('extModalMsg').textContent.includes('جستجوی عمیق: روشن'));
+      cancel.click();await tick();
+      for (const mode of ['auto','manual']) {
+        d.querySelector('[data-mode='+mode+']').click();
+        d.getElementById('pageLimit').value = '12';
+        assert.ok(d.getElementById('scrollModeFields').classList.contains('hidden'));
+        assert.ok(!d.getElementById('pagedModeFields').classList.contains('hidden'));
+        d.getElementById('collectionReview').click();
+        assert.ok(!d.getElementById('extModalMsg').textContent.includes('جستجوی عمیق'));
+        assert.ok(d.getElementById('extModalMsg').textContent.includes('حداکثر صفحات: 12'));
+        cancel.click();await tick();
+      }
+      d.getElementById('collectionBack').click();
+      assert.ok(d.getElementById('collectionView').classList.contains('hidden'));
+      assert.ok(!d.getElementById('homeView').classList.contains('hidden'));
+      assert.equal(effects,0,'all method settings and cancellations must have zero execution side effects');
+    }
+    tool.focus();activate();await tick();
     assert.equal(effects,0,id+' must wait for approval');
     assert.ok(!modal.classList.contains('hidden'));
     assert.ok(d.getElementById('extModalMsg').textContent.includes(tool.getAttribute('aria-label')));
@@ -29,11 +65,11 @@ const tick = () => new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(d.activeElement,cancel);
     tool.click(); // Rapid second click must not install another pending action.
     cancel.click();await tick();assert.equal(effects,0);
-    assert.equal(d.activeElement,tool);
-    tool.click();d.dispatchEvent(new w.KeyboardEvent('keydown',{key:'Escape',bubbles:true}));await tick();
+    assert.equal(d.activeElement,id === 'startBtn' ? d.getElementById('collectionReview') : tool);
+    activate();d.dispatchEvent(new w.KeyboardEvent('keydown',{key:'Escape',bubbles:true}));await tick();
     assert.equal(effects,0,'Escape cancels');assert.ok(modal.classList.contains('hidden'));
-    tool.click();modal.click();await tick();assert.equal(effects,0,'backdrop cancels');
-    tool.click();ok.click();await tick();
+    activate();modal.click();await tick();assert.equal(effects,0,'backdrop cancels');
+    activate();ok.click();await tick();
     assert.ok(effects>0,id+' executes after approval');
     const count=effects;ok.click();await tick();assert.equal(effects,count,'no stale confirmation handlers');
     dom.window.close();
