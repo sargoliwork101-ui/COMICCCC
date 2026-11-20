@@ -99,6 +99,28 @@ uvicorn.run(create_app(), host='127.0.0.1', port=${port}, log_level='error')
     const selected = await page.evaluate(() => state.project.images[0].selected);
     await page.click('#grid .tw > img');
     assert.notEqual(await page.evaluate(() => state.project.images[0].selected), selected, 'unloading/reloading must preserve click-to-select');
+    const notices = await page.evaluate(() => {
+      toast('POST /api/private/ocr — HTTP 503: out of memory', true);
+      const toastElement = document.getElementById('toast');
+      const dark = getComputedStyle(toastElement);
+      const darkBackground = dark.backgroundColor;
+      const blur = dark.backdropFilter;
+      const translucent = dark.backgroundColor.includes('/ 0.9') || /rgba\([^)]*, 0\.9\)/.test(dark.backgroundColor);
+      const localized = toastElement.textContent.includes('حافظه') && !toastElement.textContent.includes('out of memory');
+      const original = noticeTechnicalText(toastElement).includes('out of memory');
+      document.body.classList.add('light');
+      const lightBackground = getComputedStyle(toastElement).backgroundColor;
+      document.body.classList.remove('light');
+      showReportDialog('خطا در تشخیص متن', ['POST /api/private/ocr — HTTP 503: Service Unavailable']);
+      const report = document.getElementById('jobReportDialog');
+      const consistent = report.classList.contains('app-modal-dialog') && getComputedStyle(report).backdropFilter !== 'none';
+      const reportPersian = document.getElementById('jobReportBody').textContent.includes('در دسترس نیست');
+      const copiedReport = noticeTechnicalText(document.getElementById('jobReportBody')).includes('Service Unavailable');
+      document.getElementById('jobReportOkBtn').click();
+      return {localized, original, blur, translucent, differentThemes: darkBackground !== lightBackground, consistent, reportPersian, copiedReport};
+    });
+    assert.ok(notices.localized && notices.original && notices.blur !== 'none' && notices.translucent && notices.differentThemes && notices.consistent && notices.reportPersian && notices.copiedReport, JSON.stringify(notices));
+    console.log('PASS: real Chromium notices are Persian, theme-aware glass, with original copyable diagnostics');
     console.log('PASS: 36-page real grid releases offscreen sources, reloads full-resolution originals, and preserves selection');
   } finally {
     if (browser) await browser.close();

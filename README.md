@@ -18,7 +18,7 @@
 - `extension/assets/`: آیکون‌ها و فونت‌های بسته‌بندی‌شده.
 - `extension/vendor/`: وابستگی‌های محلی jsPDF، Tesseract و PDF.js.
 - `tests/`: تست‌های رگرسیون و بررسی یکپارچگی مسیرها.
-- `python_app/`: برنامهٔ مستقل **HaSaYa Studio** (نسخهٔ `4.58`) برای OCR، ترجمه و ویرایش متن در تصویرها و اسناد؛ خروجی PDF، ZIP تصویر، DOCX، PPTX و TXT (راهنمای کامل در `python_app/README.md`).
+- `python_app/`: برنامهٔ مستقل **HaSaYa Studio** (نسخهٔ `4.59`) برای OCR، ترجمه و ویرایش متن در تصویرها و اسناد؛ خروجی PDF، ZIP تصویر، DOCX، PPTX و TXT (راهنمای کامل در `python_app/README.md`).
 
 ## امکانات
 

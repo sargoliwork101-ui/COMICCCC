@@ -634,3 +634,51 @@ body.auth-locked #mainwrap,body.auth-locked #dock,body.auth-locked #menuBtn,body
 .server-alert-actions{display:flex;align-items:center;gap:8px;flex:none}
 .server-alert-actions .bt{font-size:11.5px;padding:6px 12px}
 .server-alert-actions .icon{font-size:19px;line-height:1;padding:2px 8px;color:var(--muted)}
+
+/* v4.59 — one accessible, theme-aware glass surface for application notices.
+   Opaque fallback remains readable without backdrop-filter or transparency. */
+:is(.app-modal-dialog,.app-report-dialog,#toast,.server-alert,.auth-error-msg,.auth-gate-notice,.storage-warning-banner,.engine-hw-warn,.engine-update-banner,.classic-modal-error){
+  color:var(--text);font-family:Vazirmatn,Tahoma,sans-serif;direction:rtl;text-align:start;
+  background-color:var(--surface-2);box-shadow:var(--shadow);overflow-wrap:anywhere;
+}
+.app-report-dialog{max-height:85vh;overflow:auto}
+.app-report-dialog .modal-card{max-width:none!important}
+.app-report-dialog #jobReportBody{white-space:pre-wrap;overflow-wrap:anywhere}
+.app-report-dialog .modal-card>div:last-child{gap:8px;flex-wrap:wrap}
+:is(.app-modal-dialog,.app-report-dialog)::backdrop{background:#080b1666;backdrop-filter:blur(5px);-webkit-backdrop-filter:blur(5px)}
+@supports ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){
+  :is(.app-modal-dialog,.app-report-dialog,#toast,.server-alert,.auth-error-msg,.auth-gate-notice,.storage-warning-banner,.engine-hw-warn,.engine-update-banner,.classic-modal-error){
+    background:linear-gradient(145deg,color-mix(in srgb,var(--a1) 7%,transparent),transparent 65%),color-mix(in srgb,var(--surface-2) 90%,transparent);
+    backdrop-filter:blur(20px) saturate(125%);-webkit-backdrop-filter:blur(20px) saturate(125%);
+  }
+}
+#toast.toast-error,.auth-error-msg{border-color:color-mix(in srgb,var(--danger) 70%,var(--line-2))}
+#toast.toast-warn,.engine-hw-warn,.storage-warning-banner{border-color:color-mix(in srgb,var(--warning) 65%,var(--line-2))}
+@media(prefers-reduced-transparency:reduce),(forced-colors:active){
+  :is(.app-modal-dialog,.app-report-dialog,#toast,.server-alert,.auth-error-msg,.auth-gate-notice,.storage-warning-banner,.engine-hw-warn,.engine-update-banner,.classic-modal-error){background:var(--surface-2);backdrop-filter:none;-webkit-backdrop-filter:none}
+  :is(.app-modal-dialog,.app-report-dialog)::backdrop{backdrop-filter:none;-webkit-backdrop-filter:none}
+}
+
+/* Inline error/status panels use the same surface, not a second native popup. */
+:is(#aiStatus,#ocrStatus,#translationStatus,#translationPreviewError,#modelTestResult,#resourcesStatus,#responseRepairStatus,#pendingStatus)[data-technical-message]:not(:empty){
+  padding:9px 12px;border:1px solid var(--line-2);border-radius:10px;
+  background-color:var(--surface-2);color:var(--text);direction:rtl;overflow-wrap:anywhere;
+}
+@supports ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){
+  :is(#aiStatus,#ocrStatus,#translationStatus,#translationPreviewError,#modelTestResult,#resourcesStatus,#responseRepairStatus,#pendingStatus)[data-technical-message]:not(:empty){
+    background:color-mix(in srgb,var(--surface-2) 90%,transparent);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  }
+}
+@media(prefers-reduced-transparency:reduce),(forced-colors:active){
+  :is(#aiStatus,#ocrStatus,#translationStatus,#translationPreviewError,#modelTestResult,#resourcesStatus,#responseRepairStatus,#pendingStatus)[data-technical-message]:not(:empty){background:var(--surface-2);backdrop-filter:none;-webkit-backdrop-filter:none}
+}
+
+@supports ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){
+  #toast:is(.toast-error,.toast-warn){background:linear-gradient(145deg,color-mix(in srgb,var(--a1) 7%,transparent),transparent 65%),color-mix(in srgb,var(--surface-2) 90%,transparent)}
+}
+@media(prefers-reduced-transparency:reduce),(forced-colors:active){
+  #toast:is(.toast-error,.toast-warn){background:var(--surface-2)}
+}
+
+#toast.show{pointer-events:auto}
+#toast .notice-copy{display:inline-flex;margin-inline-start:10px;padding:3px 8px;font-size:11px}

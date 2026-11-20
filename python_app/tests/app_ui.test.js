@@ -402,7 +402,7 @@ function check(name, condition) {
   check('repeated text reuse can be disabled and saved', aiSaveRequests.at(-1).reuse_repeated === false && !$('aiReuseRepeated').checked);
   check('successful settings save closes the dialog', !$('aiDialog').open);
   $('aiBtn').click(); await sleep(20); aiSaveFailure = true; $('saveAiBtn').click(); await sleep(20);
-  check('settings server failure keeps the dialog open and offers a copyable HTTP error', $('aiDialog').open && $('aiStatus').textContent.includes('HTTP 503') && !$('copyAiError').classList.contains('hidden') && !$('saveAiBtn').disabled);
+  check('settings server failure keeps the dialog open and offers a copyable HTTP error', $('aiDialog').open && $('aiStatus').textContent.includes('کد 503') && $('aiStatus').dataset.technicalMessage.includes('HTTP 503') && !$('copyAiError').classList.contains('hidden') && !$('saveAiBtn').disabled);
   aiSaveFailure = false;
   const beforeInvalidSave = aiSaveRequests.length;
   const timeoutInput = $('aiProfiles').querySelector('.ai-profile-timeout_seconds'); timeoutInput.value = '4'; timeoutInput.dispatchEvent(new window.Event('input', {bubbles:true}));
@@ -740,7 +740,7 @@ function check(name, condition) {
   previewFailure = 'server';
   $('translationSkill').value = 'new guidance'; $('translationSkill').dispatchEvent(new window.Event('input', {bubbles:true}));
   $('translationPreviewConfirm').click(); await sleep(20);
-  check('preview refresh errors remain visible and copyable with HTTP details', $('translationPreviewDialog').open && $('translationPreviewError').textContent.includes('HTTP 503') && $('translationPreviewError').textContent.includes('simulated preview outage') && !$('copyTranslationPreviewError').classList.contains('hidden') && $('translationPreviewConfirm').textContent.includes('به‌روزرسانی') && translationCalls.length === sendsBeforePreparationFailure);
+  check('preview refresh errors remain visible and copyable with HTTP details', $('translationPreviewDialog').open && $('translationPreviewError').textContent.includes('کد 503') && !$('translationPreviewError').textContent.includes('simulated preview outage') && $('translationPreviewError').dataset.technicalMessage.includes('HTTP 503') && $('translationPreviewError').dataset.technicalMessage.includes('simulated preview outage') && !$('copyTranslationPreviewError').classList.contains('hidden') && $('translationPreviewConfirm').textContent.includes('به‌روزرسانی') && translationCalls.length === sendsBeforePreparationFailure);
   $('translationPreviewCancel').click(); previewFailure = null; vm.runInContext("state.ai.provider = 'free'", context);
 
   const stalePreviewCallsBefore = translationPreviewCalls.length;
@@ -2177,7 +2177,7 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.58 processes 32 OCR pages in order without mid-batch engine recycling, places each page before the next, reuses grid images, and clears preview bitmaps',
+      'v4.59 processes 32 OCR pages in order without mid-batch engine recycling, places each page before the next, reuses grid images, and clears preview bitmaps',
       v399PerPageCheck.img1Reused === true
         && v399PerPageCheck.sequence === Array.from({length: 32}, (_, i) => `ocr:pg-${i + 1}:keep=${i < 31} -> placed:pg-${i + 1}`).join(' -> ')
         && v399PerPageCheck.hadPreviewSrc === true
@@ -2186,7 +2186,36 @@ function check(name, condition) {
     );
   }
 
-  // v4.58: offscreen image eviction must preserve metadata, click handlers,
+  // v4.59: localize presentation without destroying copyable diagnostics.
+  {
+    const noticeCheck = vm.runInContext(`
+      (() => {
+        const input = 'POST /api/projects/private-id/ocr — HTTP 503: PP-OCR worker exited: 73';
+        const before = new Error(input);
+        toast(before.message, true);
+        const element = document.getElementById('toast');
+        const safe = localizeToastMessage('Failed to fetch').includes('عدم برقراری');
+        const memory = localizeToastMessage('out of memory').includes('حافظه');
+        const disk = localizeToastMessage('No space left on device').includes('دیسک');
+        const access = localizeToastMessage('Permission denied').includes('دسترسی');
+        const timeout = localizeToastMessage('request timed out').includes('زمان انتظار');
+        const unknown = localizeToastMessage('Unexpected native diagnostic').includes('گزارش');
+        const originalPreserved = noticeTechnicalText(element) === input && before.message === input;
+        const output = element.textContent;
+        element.textContent = 'وضعیت تازه';
+        const noStaleCopy = noticeTechnicalText(element) === 'وضعیت تازه';
+        setNoticeText(element, '<img src=x onerror=alert(1)>');
+        const noMarkup = !element.querySelector('img');
+        toast('هشدار: فضای ذخیره‌سازی کم است');
+        return safe && memory && disk && access && timeout && unknown && originalPreserved
+          && output.includes('کد 503') && output.includes('کد خروج 73')
+          && !output.includes('/api/') && noMarkup && noStaleCopy;
+      })()
+    `, context);
+    check('v4.59 Persian notices preserve exact technical diagnostics, error semantics and text-only safety', noticeCheck);
+  }
+
+  // v4.59: offscreen image eviction must preserve metadata, click handlers,
   // reloads, and ignore observer callbacks queued by an older grid/project.
   {
     const result = await vm.runInContext(`
@@ -2235,7 +2264,7 @@ function check(name, condition) {
         }
       })()
     `, context);
-    check('v4.58 bounds grid pixel ownership to visible pages, preserves reload/click metadata, and ignores stale/detached callbacks', result);
+    check('v4.59 bounds grid pixel ownership to visible pages, preserves reload/click metadata, and ignores stale/detached callbacks', result);
   }
 
   // v4.00: Version 4.00 + Optional Custom Storage & Downloads Directory Settings UI (#storageBtn, #modelsStorageBtn, #storageDialog)
@@ -2325,7 +2354,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas426: verText.includes('۴.۵۸'),
+            verHas426: verText.includes('۴.۵۹'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2344,7 +2373,7 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.30 displays version 4.58 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      'v4.00/v4.30 displays version 4.59 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
       v400StorageCheck.verHas426 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
@@ -4566,7 +4595,7 @@ function check(name, condition) {
           && helpModes.features.some((f) => f.includes('دانلود خودکار فایل زبان فارسی') && f.includes('fas'))
         );
         const verText = document.querySelector('.brand .ver')?.textContent || '';
-        return { helpHasV427Table, helpHasV428AutoLang, verHas428: verText.includes('۴.۵۸') };
+        return { helpHasV427Table, helpHasV428AutoLang, verHas428: verText.includes('۴.۵۹') };
       })()
     `, context);
     check(
@@ -4683,7 +4712,7 @@ function check(name, condition) {
       const detail = document.getElementById('serverAlertDetail').textContent || '';
       window.fetch = async (url, opts = {}) => {
         const parsed = new URL(url, 'http://127.0.0.1:8765');
-        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.58' });
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.59' });
         return origFetch(url, opts);
       };
       document.getElementById('serverAlertRetry').click();
@@ -4697,7 +4726,7 @@ function check(name, condition) {
     'v4.30 shows a Persian recovery banner when the local app stops answering and the retry button clears it',
     v430AlertCheck.visible === true
       && /ارتباط با برنامه/.test(v430AlertCheck.text)
-      && v430AlertCheck.detail === 'simulated outage'
+      && /عملیات کامل نشد/.test(v430AlertCheck.detail)
       && v430AlertCheck.hiddenAfterRetry === true,
     JSON.stringify(v430AlertCheck),
   );
