@@ -89,11 +89,13 @@ const root = path.resolve(__dirname,'../extension');
         });
         assert.ok(menu.equal&&menu.aligned&&menu.solid&&!menu.overflow,JSON.stringify(menu));
         await page.evaluate(()=>{document.getElementById('topMenu').open=false;});
+        await page.addScriptTag({url:base+'/src/viewer/result-dialog.js'});
         assert.ok(await page.$('.menu-guide-link[aria-label="راهنمای افزونه"] svg'));
         for(const width of [1280,420]){
           await page.setViewport({width,height:900});
           await page.evaluate(()=>{
             document.getElementById('result').classList.remove('hidden');
+            window.openResultDialog();
             document.getElementById('downloadBtn').classList.remove('hidden');
             document.getElementById('statusText').textContent='آماده شد! فایل PDF با ۶ صفحه ساخته شد.';
             document.getElementById('dlLabel').textContent='دانلود PDF (0.1 مگابایت)';
@@ -107,6 +109,12 @@ const root = path.resolve(__dirname,'../extension');
           assert.ok(!resultLayout.overflow&&resultLayout.button<300,JSON.stringify(resultLayout));
           assert.ok(width>600?resultLayout.sameRow:resultLayout.below,JSON.stringify(resultLayout));
         }
+        await page.click('#closeResultDialog');
+        assert.equal(await page.$eval('#resultDialog',el=>el.open),false);
+        await page.click('#reopenResultDialog');
+        assert.equal(await page.$eval('#resultDialog',el=>el.open),true);
+        await page.keyboard.press('Escape');
+        assert.equal(await page.$eval('#resultDialog',el=>el.open),false);
         await page.evaluate(()=>{document.getElementById('result').classList.add('hidden');});
         await page.setViewport({width:1280,height:900});
 

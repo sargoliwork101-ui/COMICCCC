@@ -1853,6 +1853,7 @@ async function onBuild() {
 
   const result = $('result');
   result.classList.remove('hidden', 'done');
+  window.openResultDialog?.();
   $('downloadBtn').classList.add('hidden');
   $('failed').innerText = '';
   $('sPages').innerText = '0';
@@ -2039,6 +2040,7 @@ async function onSaveImages() {
   refreshSummary();
   const result = $('result');
   result.classList.remove('hidden', 'done');
+  window.openResultDialog?.();
   $('downloadBtn').classList.add('hidden');
   $('failed').innerText = '';
   $('sPages').innerText = '0';

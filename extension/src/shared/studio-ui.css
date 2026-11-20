@@ -119,3 +119,11 @@ body #result{display:grid;grid-template-columns:minmax(0,1fr) max-content;align-
 #result #downloadBtn{grid-column:2;width:auto;max-width:none;min-height:34px;padding:7px 14px;white-space:normal;text-align:center;box-sizing:border-box;background:var(--a2);color:#fff;box-shadow:none}
 #result #btnStopTr{width:auto;justify-self:end}
 @media(max-width:600px){body #result{grid-template-columns:minmax(0,1fr)}#result #downloadBtn{grid-column:1;justify-self:start;max-width:100%}#result .stat{flex:1;max-width:none}}
+
+#resultDialog{width:min(680px,calc(100vw - 32px));max-height:85vh;box-sizing:border-box;overflow:auto;padding:16px;border:1px solid var(--line2);border-radius:14px;background:var(--surface);color:var(--text);box-shadow:var(--shadow)}
+#resultDialog::backdrop{background:rgba(6,17,24,.68);backdrop-filter:blur(4px)}
+.result-dialog-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+.result-dialog-head h2{font-size:15px;margin:0;color:var(--a1)}
+#resultDialog #result{margin:0;padding:0;border:0;border-radius:0}
+#closeResultDialog{width:32px;height:32px;font-size:22px;flex:none}
+#reopenResultDialog{margin-bottom:10px;width:auto}
