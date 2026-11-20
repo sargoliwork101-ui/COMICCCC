@@ -1,10 +1,10 @@
 {
   "name": "hasaya-chrome-extension",
-  "version": "3.15.0",
+  "version": "3.16.0",
   "private": true,
   "description": "افزونهٔ Chrome HASAYA برای جمع‌آوری تصاویر کمیک و وب‌تون و خروجی PDF/تصویر به‌همراه OCR و ترجمه + برنامهٔ دسکتاپ HaSaYa Studio",
   "scripts": {
-    "test": "node tests/test-extension-studio-ui.cjs && node tests/test-popup-confirmation.cjs && node tests/test-paths.js && node tests/test-smoke.js && node tests/test-ai-translate.js && node tests/test-ai-settings.js && node tests/test-page-translation.js && node tests/test-page-translation-content.js && node tests/test-popup.js && node tests/test-background.js && node tests/test-pdf-import.js && node tests/test-pdf-import-store.js && node tests/test-dom.js && node tests/test-errors.js && node tests/test-interact.js && node tests/test-navigation.js && node tests/test-gbooks-background.js && node tests/test-gbooks-popup.js && node tests/test-update.js",
+    "test": "node tests/test-extension-help.cjs && node tests/test-extension-studio-ui.cjs && node tests/test-popup-confirmation.cjs && node tests/test-paths.js && node tests/test-smoke.js && node tests/test-ai-translate.js && node tests/test-ai-settings.js && node tests/test-page-translation.js && node tests/test-page-translation-content.js && node tests/test-popup.js && node tests/test-background.js && node tests/test-pdf-import.js && node tests/test-pdf-import-store.js && node tests/test-dom.js && node tests/test-errors.js && node tests/test-interact.js && node tests/test-navigation.js && node tests/test-gbooks-background.js && node tests/test-gbooks-popup.js && node tests/test-update.js",
     "test:extension-browser": "node tests/test-extension-browser.cjs",
     "test:studio": "node scripts/studio-checks.cjs",
     "test:tester": "node tests/test-studio-checks.cjs",

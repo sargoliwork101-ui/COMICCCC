@@ -40,7 +40,7 @@ const root = path.resolve(__dirname,'../extension');
     args.push('--disable-gpu');
     browser=await puppeteer.launch({args,executablePath:await chromium.executablePath(),headless:'new'});
     const page=await browser.newPage();
-    for(const route of ['popup/popup.html','viewer/viewer.html','ai-settings/settings.html','pdf-import/pdf-import.html']){
+    for(const route of ['popup/popup.html','viewer/viewer.html','ai-settings/settings.html','pdf-import/pdf-import.html','help/help.html']){
       await page.setViewport({width:route.startsWith('popup')?420:1280,height:900});
       await page.goto(base+'/src/'+route,{waitUntil:'networkidle0'});
       await page.addScriptTag({url:base+'/src/shared/studio-ui.js'});
@@ -55,6 +55,19 @@ const root = path.resolve(__dirname,'../extension');
       });
       assert.ok(result.font&&result.different&&!result.overflow,route+JSON.stringify(result));
       assert.equal(result.accent,'#15817b','shared light Focus palette: '+route);
+      if(route.startsWith('viewer')){
+        await page.evaluate(()=>{document.getElementById('topMenu').open=true;});
+        const menu=await page.evaluate(()=>{
+          const a=document.getElementById('saveProfileBtn').getBoundingClientRect();
+          const b=document.getElementById('restoreProfileBtn').getBoundingClientRect();
+          const panel=document.querySelector('.top-menu-panel');
+          return {equal:Math.abs(a.width-b.width)<1,aligned:Math.abs(a.top-b.top)<1,
+            solid:getComputedStyle(panel).backdropFilter==='none',
+            overflow:panel.scrollWidth>panel.clientWidth};
+        });
+        assert.ok(menu.equal&&menu.aligned&&menu.solid&&!menu.overflow,JSON.stringify(menu));
+        await page.evaluate(()=>{document.getElementById('topMenu').open=false;});
+      }
       if(route.startsWith('popup')||route.startsWith('viewer')){
         for(const theme of ['light','dark']){
           const modal=await page.evaluate(theme=>{
@@ -203,6 +216,6 @@ const root = path.resolve(__dirname,'../extension');
     assert.ok(requests.some(url=>url.includes('/vendor/ocr/lang/eng.traineddata.gz')));
     assert.ok(requests.some(url=>url.includes('/vendor/ocr/core/')));
     assert.deepEqual(external,[],'OCR must not request a third-party website');
-    console.log('PASS: real Chromium renders four pages, confirmations and all three injected collection UIs in Focus light/dark; real local Tesseract reads pixels');
+    console.log('PASS: real Chromium renders five pages including the guide, organized menu, confirmations and all three injected collection UIs in Focus light/dark; real local Tesseract reads pixels');
   }finally{if(browser)await browser.close();await new Promise(resolve=>server.close(resolve));}
 })().catch(error=>{console.error(error);process.exitCode=1;});

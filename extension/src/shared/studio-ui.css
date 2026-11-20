@@ -92,3 +92,15 @@ body .output-close{display:inline-flex;align-items:center;gap:4px;padding:4px 8p
 :root[data-theme=light] :is(.update-status.ok,.status:not(.error),.import-status.success,.profile-status.ok,.ai-profile-status.ok){color:#047857}
 html{scrollbar-color:var(--line2) var(--bg)}
 ::-webkit-scrollbar-thumb{background:var(--line2)}
+
+/* Structured, solid menu: no gallery text bleeding through the tools. */
+body .top-menu-panel{background:var(--surface);backdrop-filter:none;box-sizing:border-box;padding:14px;gap:14px}
+.top-menu-section{min-width:0}.top-menu-title .studio-icon{width:18px;height:18px;flex:none}
+.profile-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.profile-actions .mini{width:100%;min-height:34px;white-space:normal}
+.profile-actions #deleteProfileBtn{grid-column:1/-1}
+.top-menu-ocr{display:flex;flex-direction:column;align-items:stretch;gap:8px}
+.top-menu-ocr .check{display:flex;align-items:center;gap:8px;margin:0;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--surface2)}
+.top-menu-ocr .check input{flex:none;accent-color:var(--a2)}
+.top-menu-ocr .mini{width:100%;min-height:34px}
+.guide-footer{padding:8px 12px;text-align:center;font-size:11px}.guide-footer a,body p a{color:var(--a1)}

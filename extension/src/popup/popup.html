@@ -14,7 +14,7 @@
       <h1>HASAYA</h1>
 
     </div>
-    <span class="version-pill">v3.15</span>
+    <span class="version-pill">v3.16</span>
     <button type="button" id="aiSettingsBtn" class="settings-btn" title="تنظیم سرویس، مدل و کلید API برای ترجمه"
       aria-label="تنظیمات API هوش مصنوعی">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
@@ -80,7 +80,7 @@
       <input type="checkbox" id="deepSearch">
       <span>جستجوی عمیق</span>
     </label>
-    <p class="mode-hint">به‌صورت پیش‌فرض فقط تصاویر اصلی کمیک جمع می‌شوند؛ با تیک‌زدن این گزینه همهٔ تصاویر صفحه (ریز و درشت، شامل بنر و آیکون) با روش کامل بررسی می‌شوند.</p>
+    <p class="mode-hint">تصاویر کوچک و جانبی هم بررسی شوند. <a href="../help/help.html#collect" target="_blank" rel="noopener">راهنما</a></p>
   </div>
 
   <!-- این کنترل‌ها فقط در حالت‌های ورق‌زدن خودکار/دستی نمایش داده می‌شوند (روی هر سایتی)؛ popup.js بر اساس حالت انتخابی بازشان می‌کند -->
@@ -93,8 +93,7 @@
 
     <details class="advanced">
       <summary>تنظیمات پیشرفته — انتخابگر دستی المان از F12</summary>
-      <p class="mode-hint">وقتی افزونه خودش دکمهٔ بعدی یا تصاویر را پیدا نمی‌کند، آدرس المان را از DevTools بدهید:
-        روی المان صفحه راست‌کلیک ← <b>Inspect</b> ← در پنل درخت DOM روی المان راست‌کلیک ← <b>Copy</b> ← <b>Copy selector</b>.</p>
+      <p class="mode-hint">اگر تشخیص خودکار جواب نداد، انتخابگر CSS وارد کنید. <a href="../help/help.html#collect" target="_blank" rel="noopener">راهنما</a></p>
       <div class="field">
         <label for="nextSelector">انتخابگر CSS دکمهٔ صفحهٔ بعدی (اختیاری)</label>
         <input type="text" id="nextSelector" dir="ltr" spellcheck="false" placeholder='مثال: button[aria-label="Next page"]'>
@@ -125,5 +124,6 @@
   <script src="update-channel.js"></script>
   <script src="update.js"></script>
   <script src="../shared/studio-ui.js"></script>
+<footer class="guide-footer"><a href="../help/help.html" target="_blank" rel="noopener">راهنمای کامل افزونه</a></footer>
 </body>
 </html>

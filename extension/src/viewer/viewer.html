@@ -18,18 +18,18 @@
         </div>
       </div>
       <div class="topbar-side">
-        <span class="version-pill">نسخهٔ ۳.۱۵</span>
+        <span class="version-pill">نسخهٔ ۳.۱۶</span>
         <details class="top-menu" id="topMenu">
           <summary aria-label="منوی ابزارها" title="پروفایل، OCR و ترجمه">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
           </summary>
           <div class="top-menu-panel" role="menu">
             <section class="top-menu-section">
-              <h2 class="top-menu-title"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h13l3 3v15H4zM8 3v6h8V3M8 21v-8h8v8"/></svg>پروژه و پروفایل</h2>
-              <p class="menu-hint">چیدمان، ترتیب، انتخاب‌ها، گروه‌ها، کراپ‌ها و تنظیمات خروجی این صفحه ذخیره و بعداً بازیابی می‌شود.</p>
+              <h2 class="top-menu-title"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h13l3 3v15H4zM8 3v6h8V3M8 21v-8h8v8"/></svg>ذخیره و بازیابی چیدمان</h2>
+              <p class="menu-hint">چیدمان و تنظیمات این صفحه را ذخیره یا بازیابی کنید. <a href="../help/help.html#organize" target="_blank" rel="noopener">راهنما</a></p>
               <div class="profile-actions">
-                <button class="mini accent" id="saveProfileBtn" disabled><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h13l3 3v15H4zM8 3v6h8V3M8 21v-8h8v8"/></svg>ذخیرهٔ پروفایل</button>
-                <button class="mini" id="restoreProfileBtn" disabled><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 3-5 5 5 5M3 8h10a7 7 0 0 1 0 14"/></svg>بازیابی پروفایل</button>
+                <button class="mini accent" id="saveProfileBtn" disabled><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h13l3 3v15H4zM8 3v6h8V3M8 21v-8h8v8"/></svg>ذخیرهٔ چیدمان</button>
+                <button class="mini" id="restoreProfileBtn" disabled><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 3-5 5 5 5M3 8h10a7 7 0 0 1 0 14"/></svg>بازیابی چیدمان</button>
                 <button class="mini warn hidden" id="deleteProfileBtn"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V3h8v3M5 6l1 15h12l1-15M10 10v7m4-7v7"/></svg>حذف پروفایل</button>
               </div>
               <span id="profileStatus" class="profile-status" role="status">هنوز پروفایلی ذخیره نشده است.</span>
@@ -37,13 +37,14 @@
             <section class="top-menu-section">
               <h2 class="top-menu-title"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5M8 8h8m-4 0v8m-3 0h6"/></svg>خواندن متن و ترجمه</h2>
               <div class="top-menu-ocr">
-                <label class="check" title="کنتراست محلی فقط روی نسخهٔ موقت OCR اعمال می‌شود؛ تصویر اصلی و خروجی تغییر نمی‌کند"><input type="checkbox" id="trContrast" checked><span>افزایش کنتراست فقط برای OCR</span></label>
-      <label class="check" title="با خاموش‌کردن این گزینه، OCR و ترجمه غیرفعال می‌شود و تصویرها به نسخهٔ اصلی برمی‌گردند"><input type="checkbox" id="ocrEnabled" checked><span>فعال‌بودن OCR</span></label>
+                <label class="check" title="کنتراست محلی فقط روی نسخهٔ موقت OCR اعمال می‌شود؛ تصویر اصلی و خروجی تغییر نمی‌کند"><input type="checkbox" id="trContrast" checked><span>کنتراست بهتر برای خواندن متن</span></label>
+      <label class="check" title="با خاموش‌کردن این گزینه، OCR و ترجمه غیرفعال می‌شود و تصویرها به نسخهٔ اصلی برمی‌گردند"><input type="checkbox" id="ocrEnabled" checked><span>خواندن متن (OCR) فعال</span></label>
                 <button class="mini accent" id="btnTranslate" disabled><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h12M9 3v2M5 5c0 5 4 8 8 10M13 5c0 5-4 8-10 10m11 6 4-10 4 10m-6-3h4"/></svg>ترجمهٔ متن تصاویر به فارسی</button>
                 <button class="mini hidden" id="btnTxt"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H6v18h12V7zM14 3v5h5M8 13h8M8 17h6"/></svg>ذخیرهٔ متن‌ها (TXT)</button>
                 <button class="mini warn hidden" id="btnRetry"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M4 12a8 8 0 0 0 14 6"/></svg>تلاش مجدد برای ناموفق‌ها</button>
               </div>
             </section>
+            <section class="top-menu-section"><h2 class="top-menu-title">راهنما</h2><a href="../help/help.html" target="_blank" rel="noopener">آموزش کار با افزونه</a></section>
           </div>
         </details>
       </div>
@@ -99,7 +100,7 @@
         <details class="tool-menu" id="groupMenu">
           <summary>مدیریت گروه‌ها</summary>
           <div class="tool-menu-body">
-            <p class="menu-hint">شمارهٔ روی تصویر ترتیب فعلی کارت‌هاست؛ برای تغییر ترتیب کارت را روی لبهٔ کارت دیگر رها کنید. کارت را روی <b>وسط کارت دیگر</b> رها کنید تا گروه شوند؛ رهاکردن روی لبه فقط ترتیب را عوض می‌کند. برای تغییر چیدمان داخلی یک گروه، کارت عضو گروه را روی <b>لبهٔ کارت دیگری از همان گروه</b> رها کنید تا فقط همان کارت داخل گروه جابه‌جا شود. برای خارج‌کردن یک کارت از گروه، آن را بکشید و در <b>فضای خالی شبکه</b> (بیرون از کارت‌ها) رها کنید. با «ویرایش» اعضا را تغییر دهید و با × گروه را حذف کنید.</p>
+            <p class="menu-hint">لبهٔ کارت: جابه‌جایی؛ وسط کارت: گروه‌بندی؛ فضای خالی: خروج از گروه. <a href="../help/help.html#organize" target="_blank" rel="noopener">راهنما</a></p>
             <div class="group-manager"><strong>گروه‌های ساخته‌شده</strong><div id="groupList" class="group-list"><span class="group-empty">هنوز گروهی نساخته‌اید.</span></div></div>
           </div>
         </details>
@@ -187,7 +188,7 @@
         <option value="jpn">日本語 (ژاپنی)</option>
         <option value="chi_sim">中文 (چینی ساده)</option>
       </select>
-      <p id="ocrMethodNote" class="note">تشخیص متن با موتور محلی Tesseract داخل Chrome روی همین دستگاه انجام می‌شود؛ تصویر برای OCR به سایت یا برنامهٔ Python ارسال نمی‌شود. فقط متن برای ترجمه به سرویس آنلاین انتخابی فرستاده می‌شود. OCR با یک روش صفحه‌بندی انجام می‌شود؛ تنظیم‌های افزایش کنتراست و دقت بالاتر فقط روی تصویر موقت OCR اثر دارند.</p>
+      <p id="ocrMethodNote" class="note">OCR محلی Tesseract با یک روش صفحه‌بندی؛ فقط متن برای ترجمه آنلاین ارسال می‌شود. <a href="../help/help.html#ocr" target="_blank" rel="noopener">راهنمای OCR</a></p>
       <label class="check"><input type="checkbox" id="trOnlySel" checked><span>فقط تصاویر انتخاب‌شده</span></label>
       <label class="check" title="اگر خاموش باشد، متن اصلی پاک نمی‌شود و ترجمه با حاشیه روی تصویر قرار می‌گیرد"><input type="checkbox" id="trErase" checked><span>پاک‌کردن متن اصلی زیر ترجمه</span></label>
       <label class="check" title="یک روش خواندن اضافه برای متن سفید با حاشیه روی نقاشی؛ حدود ۴۰٪ کندتر"><input type="checkbox" id="trPrecise" checked><span>دقت بالاتر (کندتر)</span></label>
@@ -207,7 +208,7 @@
           <div id="aiProfileList" class="ai-profile-list"></div>
           <button id="trAiAddProfile" class="mini" type="button"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v16M4 12h16"/></svg>افزودن API</button>
           <p class="ai-help"><a id="trAiKeyHelp" href="https://aistudio.google.com/api-keys" target="_blank" rel="noopener noreferrer">ساخت کلید در Google AI Studio</a> · کلیدها فقط در حافظهٔ محلی همین مرورگر ذخیره می‌شوند.</p>
-          <p class="note">«تست» هر ردیف یک جملهٔ ثابت را واقعاً ترجمه می‌کند تا دریافت پاسخ مدل هم بررسی شود؛ متن کمیک یا صفحه ارسال نمی‌شود. کلیدها به‌ترتیب امتحان می‌شوند؛ در خطای شبکه یا پایان مهلت، کلیدهای دیگر دوباره آزموده نمی‌شوند تا انتظار بی‌دلیل نشود. درخواست‌ها با شبکهٔ Chrome فرستاده می‌شوند؛ عبورشان از VPN افزونه‌ای به روش و تنظیمات همان VPN بستگی دارد و تضمین‌شده نیست. اگر تا ۶۰ ثانیه پاسخی نرسد، درخواست متوقف می‌شود. در Gemini، سهمیه برای هر پروژه حساب می‌شود.</p>
+          <p class="note">زبان تصویر را درست انتخاب کنید؛ ترجمه به اینترنت نیاز دارد. <a href="../help/help.html#ocr" target="_blank" rel="noopener">راهنما</a></p>
           <label for="trAiModel">نام مدل در سرویس انتخاب‌شده</label>
           <input id="trAiModel" type="text" dir="ltr" value="gemini-flash-latest" spellcheck="false">
           <label for="trAiSkill">Skill / راهنمای سبک ترجمه</label>
@@ -217,7 +218,7 @@
           <p id="trAiError" class="ai-error" role="alert"></p>
         </div>
       </details>
-      <p class="note">زبان را درست انتخاب کنید؛ اگر زبان اشتباه باشد چیزی خوانده نمی‌شود. ترجمه به اینترنت نیاز دارد. دقت خواندن متن روی فونت‌های خیلی تزیینی یا متن روی نقاشی کمتر است؛ همه‌چیز را می‌توانید بعداً ویرایش کنید.</p>
+      <p class="note">زبان تصویر را درست انتخاب کنید؛ ترجمه به اینترنت نیاز دارد. <a href="../help/help.html#ocr" target="_blank" rel="noopener">راهنما</a></p>
       <div class="modal-actions">
         <button id="trStart" class="btn"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>شروع ترجمه</button>
         <button id="trClose" class="btn ghost"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg>انصراف</button>
@@ -274,7 +275,7 @@
     <div class="crop-body">
       <div id="cropStage" class="crop-stage" tabindex="0" aria-label="ناحیهٔ انتخاب برش؛ Enter برای اعمال"><img id="cropImg" alt=""><div id="cropSelection"><i class="crop-handle nw" data-handle="nw"></i><i class="crop-handle n" data-handle="n"></i><i class="crop-handle ne" data-handle="ne"></i><i class="crop-handle e" data-handle="e"></i><i class="crop-handle se" data-handle="se"></i><i class="crop-handle s" data-handle="s"></i><i class="crop-handle sw" data-handle="sw"></i><i class="crop-handle w" data-handle="w"></i></div></div>
     </div>
-    <p class="crop-help">برای برش تازه، از نقطهٔ دلخواه کلیک کنید و تا محل پایان بکشید. داخل کادر را برای جابه‌جایی بکشید و دستگیره‌ها را برای تغییر اندازه بکشید. Enter یا «اعمال برش» تغییر را ثبت می‌کند.</p>
+    <p class="crop-help">لبهٔ کارت: جابه‌جایی؛ وسط کارت: گروه‌بندی؛ فضای خالی: خروج از گروه. <a href="../help/help.html#organize" target="_blank" rel="noopener">راهنما</a></p>
   </div>
 
   <div id="lightbox" class="hidden">
@@ -307,5 +308,6 @@
   <script src="viewer.js"></script>
   <script src="trans.js"></script>
   <script src="../shared/studio-ui.js"></script>
+<footer class="guide-footer"><a href="../help/help.html" target="_blank" rel="noopener">راهنمای کامل افزونه</a></footer>
 </body>
 </html>
