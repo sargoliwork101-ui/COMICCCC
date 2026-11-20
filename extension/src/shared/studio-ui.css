@@ -53,3 +53,8 @@ select{color-scheme:inherit}
 .toolbar .tool-menu>summary{padding:5px 10px;font-size:10.5px;line-height:1.8}
 .toolbar .tool-menu[open]{width:100%;background:var(--surface)}
 @media(max-width:600px){.toolbar-actions .studio-action-group{flex:1 1 100%}.toolbar .toolbar-selection-count{margin-inline-start:0}}
+
+/* Equal header hit targets and glyph sizes for menu and theme. */
+.topbar-side :is(.studio-theme-toggle,.top-menu>summary){box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;min-width:36px;flex:none;padding:7px;border-radius:9px;border:1px solid var(--line2);background:var(--surface2);color:var(--text)}
+.topbar-side :is(.studio-theme-toggle,.top-menu>summary)>svg{width:18px;height:18px;stroke-width:1.8}
+.topbar-side .top-menu{display:flex;align-items:center}

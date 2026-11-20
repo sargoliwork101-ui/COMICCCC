@@ -68,6 +68,17 @@ const root = path.resolve(__dirname,'../extension');
           assert.ok(layout.menu<layout.toolbar/2,JSON.stringify(layout));
           assert.equal(layout.danger,'rgb(251, 113, 133)');
           assert.ok(layout.panel.includes(theme==='dark'?'0.0745098 0.0862745 0.117647':'1 1 1'),JSON.stringify(layout));
+          const header=await page.evaluate(()=>{
+            const controls=['.topbar-side .studio-theme-toggle','.topbar-side .top-menu>summary'];
+            return controls.map(selector=>{
+              const el=document.querySelector(selector),r=el.getBoundingClientRect(),icon=el.querySelector('svg').getBoundingClientRect();
+              return {width:r.width,height:r.height,center:r.top+r.height/2,iconWidth:icon.width,iconHeight:icon.height};
+            });
+          });
+          assert.deepEqual(header[0],header[1],'header menu/theme targets and glyphs must match');
+          assert.equal(header[0].width,36);
+          assert.equal(header[0].iconWidth,18);
+
         }
         for(const width of [768,390]){
           await page.setViewport({width,height:900});
