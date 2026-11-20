@@ -10,7 +10,7 @@
 .preview-note{padding:10px 16px;background:var(--surface2);border:1px dashed var(--a1);border-radius:10px;margin:12px auto;max-width:1120px;color:var(--text);font-size:12px}
 .toolbar{position:sticky;top:8px;z-index:40;background:var(--surface)!important}
 .toolbar .toolbar-menus{display:flex;align-items:center;justify-content:space-between;gap:10px}
-.preview-output{order:2;min-width:110px;min-height:34px!important;font-size:12px!important}
+.preview-export-group{display:flex;align-items:center;gap:8px;margin-inline-start:auto;flex:none}.preview-output{min-width:110px;min-height:34px!important;font-size:12px!important}
 .preview-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:16px;margin-top:16px}
 .preview-card{height:300px;border:1px solid var(--line2);border-radius:12px;background:var(--surface);padding:12px;box-sizing:border-box}
 .preview-page{height:230px;margin-top:12px;background:linear-gradient(145deg,#24444d,#15272e);display:grid;place-items:center;color:var(--muted);border:1px solid var(--line2);border-radius:6px;font-size:22px}
@@ -34,7 +34,7 @@
           <div class="top-menu-panel" role="menu">
             <section class="top-menu-section">
               <h2 class="top-menu-title"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h13l3 3v15H4zM8 3v6h8V3M8 21v-8h8v8"/></svg>ذخیره و بازیابی چیدمان</h2>
-              <p class="menu-hint">چیدمان و تنظیمات این صفحه را ذخیره یا بازیابی کنید. <a class="context-guide-link" href="../help/help.html#organize" target="_blank" rel="noopener" aria-label="راهنمای ذخیره و بازیابی چیدمان" title="راهنمای ذخیره و بازیابی چیدمان"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 .5c0 1.5-2.5 1.5-2.5 3.5m0 3h.01"/></svg></a></p>
+              <p class="menu-hint">چیدمان و تنظیمات این صفحه را ذخیره یا بازیابی کنید. <a class="context-guide-link" href="/extension/src/help/help.html#organize" target="_blank" rel="noopener" aria-label="راهنمای ذخیره و بازیابی چیدمان" title="راهنمای ذخیره و بازیابی چیدمان"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 .5c0 1.5-2.5 1.5-2.5 3.5m0 3h.01"/></svg></a></p>
               <div class="profile-actions">
                 <button class="mini accent" id="saveProfileBtn" disabled><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h13l3 3v15H4zM8 3v6h8V3M8 21v-8h8v8"/></svg>ذخیرهٔ چیدمان</button>
                 <button class="mini" id="restoreProfileBtn" disabled><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 3-5 5 5 5M3 8h10a7 7 0 0 1 0 14"/></svg>بازیابی چیدمان</button>
@@ -58,7 +58,7 @@
     </div>
   </header>
 
-  <aside class="preview-note">پیش‌نمایش جای دکمه — افزونه تغییری نکرده است. «خروجی» روبه‌روی «مدیریت گروه‌ها»؛ برای امتحان ثابت‌ماندن نوار، صفحه را اسکرول کنید. دکمهٔ پایین فعلاً باقی است.</aside><main class="wrap">
+  <aside class="preview-note">پیش‌نمایش جای دکمه — افزونه تغییری نکرده است. «خروجی» در ردیف اول، کنار تعداد انتخاب‌ها؛ برای امتحان ثابت‌ماندن نوار، صفحه را اسکرول کنید. دکمهٔ پایین فعلاً باقی است.</aside><main class="wrap">
     <dialog id="resultDialog" aria-labelledby="resultDialogTitle">
       <div class="result-dialog-head"><h2 id="resultDialogTitle">گزارش عملیات</h2><button id="closeResultDialog" class="mini" type="button" aria-label="بستن گزارش" title="بستن گزارش">×</button></div>
     <section id="result" class="panel hidden">
@@ -99,7 +99,7 @@
         <button class="mini" id="btnUngroupPage" disabled><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="18" height="8" rx="1"/></svg>لغو گروهِ انتخاب‌ها</button>
         <span id="groupEditStatus" class="group-edit-status hidden" role="status" aria-live="polite"></span>
         </div>
-        <span id="toolbarSelectionCount" class="toolbar-selection-count">۸۳ انتخاب</span>
+        <div class="preview-export-group"><span id="toolbarSelectionCount" class="toolbar-selection-count">۸۳ انتخاب</span><button class="mini accent preview-output" type="button"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H5v18h14v-7M14 3v5h5M12 12l9-9m-6 0h6v6"/></svg>خروجی</button></div>
       </div>
       <div class="toolbar-status hidden">
         <span id="loadText">در حال دریافت تصاویر...</span>
@@ -107,11 +107,11 @@
       </div>
       <div id="loadErrors" class="load-errors hidden" role="status"></div>
       <button id="btnRetryAll" class="mini warn hidden" type="button"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M4 12a8 8 0 0 0 14 6"/></svg>تلاش مجدد برای همهٔ ناموفق‌ها</button>
-      <div class="toolbar-menus"><button class="mini accent preview-output" type="button"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H5v18h14v-7M14 3v5h5M12 12l9-9m-6 0h6v6"/></svg>خروجی</button>
+      <div class="toolbar-menus">
         <details class="tool-menu" id="groupMenu">
           <summary>مدیریت گروه‌ها</summary>
           <div class="tool-menu-body">
-            <p class="menu-hint">لبهٔ کارت: جابه‌جایی؛ وسط کارت: گروه‌بندی؛ فضای خالی: خروج از گروه. <a href="../help/help.html#organize" target="_blank" rel="noopener">راهنما</a></p>
+            <p class="menu-hint">لبهٔ کارت: جابه‌جایی؛ وسط کارت: گروه‌بندی؛ فضای خالی: خروج از گروه. <a href="/extension/src/help/help.html#organize" target="_blank" rel="noopener" aria-label="راهنمای این بخش" title="راهنمای این بخش"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 .5c0 1.5-2.5 1.5-2.5 3.5m0 3h.01"/></svg></a></p>
             <div class="group-manager"><strong>گروه‌های ساخته‌شده</strong><div id="groupList" class="group-list"><span class="group-empty">هنوز گروهی نساخته‌اید.</span></div></div>
           </div>
         </details>
@@ -207,7 +207,7 @@
         <option value="jpn">日本語 (ژاپنی)</option>
         <option value="chi_sim">中文 (چینی ساده)</option>
       </select>
-      <p id="ocrMethodNote" class="note">OCR محلی Tesseract با یک روش صفحه‌بندی؛ فقط متن برای ترجمه آنلاین ارسال می‌شود. <a href="../help/help.html#ocr" target="_blank" rel="noopener">راهنمای OCR</a></p>
+      <p id="ocrMethodNote" class="note">OCR محلی Tesseract با یک روش صفحه‌بندی؛ فقط متن برای ترجمه آنلاین ارسال می‌شود. <a href="/extension/src/help/help.html#ocr" target="_blank" rel="noopener" aria-label="راهنمای این بخش" title="راهنمای این بخش"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 .5c0 1.5-2.5 1.5-2.5 3.5m0 3h.01"/></svg></a></p>
       <label class="check"><input type="checkbox" id="trOnlySel" checked><span>فقط تصاویر انتخاب‌شده</span></label>
       <label class="check" title="اگر خاموش باشد، متن اصلی پاک نمی‌شود و ترجمه با حاشیه روی تصویر قرار می‌گیرد"><input type="checkbox" id="trErase" checked><span>پاک‌کردن متن اصلی زیر ترجمه</span></label>
       <label class="check" title="یک روش خواندن اضافه برای متن سفید با حاشیه روی نقاشی؛ حدود ۴۰٪ کندتر"><input type="checkbox" id="trPrecise" checked><span>دقت بالاتر (کندتر)</span></label>
@@ -227,7 +227,7 @@
           <div id="aiProfileList" class="ai-profile-list"></div>
           <button id="trAiAddProfile" class="mini" type="button"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v16M4 12h16"/></svg>افزودن API</button>
           <p class="ai-help"><a id="trAiKeyHelp" href="https://aistudio.google.com/api-keys" target="_blank" rel="noopener noreferrer">ساخت کلید در Google AI Studio</a> · کلیدها فقط در حافظهٔ محلی همین مرورگر ذخیره می‌شوند.</p>
-          <p class="note">زبان تصویر را درست انتخاب کنید؛ ترجمه به اینترنت نیاز دارد. <a href="../help/help.html#ocr" target="_blank" rel="noopener">راهنما</a></p>
+          <p class="note">زبان تصویر را درست انتخاب کنید؛ ترجمه به اینترنت نیاز دارد. <a href="/extension/src/help/help.html#ocr" target="_blank" rel="noopener" aria-label="راهنمای این بخش" title="راهنمای این بخش"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 .5c0 1.5-2.5 1.5-2.5 3.5m0 3h.01"/></svg></a></p>
           <label for="trAiModel">نام مدل در سرویس انتخاب‌شده</label>
           <input id="trAiModel" type="text" dir="ltr" value="gemini-flash-latest" spellcheck="false">
           <label for="trAiSkill">Skill / راهنمای سبک ترجمه</label>
@@ -237,7 +237,7 @@
           <p id="trAiError" class="ai-error" role="alert"></p>
         </div>
       </details>
-      <p class="note">زبان تصویر را درست انتخاب کنید؛ ترجمه به اینترنت نیاز دارد. <a href="../help/help.html#ocr" target="_blank" rel="noopener">راهنما</a></p>
+      <p class="note">زبان تصویر را درست انتخاب کنید؛ ترجمه به اینترنت نیاز دارد. <a href="/extension/src/help/help.html#ocr" target="_blank" rel="noopener" aria-label="راهنمای این بخش" title="راهنمای این بخش"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 .5c0 1.5-2.5 1.5-2.5 3.5m0 3h.01"/></svg></a></p>
       <div class="modal-actions">
         <button id="trStart" class="btn"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>شروع ترجمه</button>
         <button id="trClose" class="btn ghost"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg>انصراف</button>
@@ -294,7 +294,7 @@
     <div class="crop-body">
       <div id="cropStage" class="crop-stage" tabindex="0" aria-label="ناحیهٔ انتخاب برش؛ Enter برای اعمال"><img id="cropImg" alt=""><div id="cropSelection"><i class="crop-handle nw" data-handle="nw"></i><i class="crop-handle n" data-handle="n"></i><i class="crop-handle ne" data-handle="ne"></i><i class="crop-handle e" data-handle="e"></i><i class="crop-handle se" data-handle="se"></i><i class="crop-handle s" data-handle="s"></i><i class="crop-handle sw" data-handle="sw"></i><i class="crop-handle w" data-handle="w"></i></div></div>
     </div>
-    <p class="crop-help">لبهٔ کارت: جابه‌جایی؛ وسط کارت: گروه‌بندی؛ فضای خالی: خروج از گروه. <a href="../help/help.html#organize" target="_blank" rel="noopener">راهنما</a></p>
+    <p class="crop-help">لبهٔ کارت: جابه‌جایی؛ وسط کارت: گروه‌بندی؛ فضای خالی: خروج از گروه. <a href="/extension/src/help/help.html#organize" target="_blank" rel="noopener" aria-label="راهنمای این بخش" title="راهنمای این بخش"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 .5c0 1.5-2.5 1.5-2.5 3.5m0 3h.01"/></svg></a></p>
   </div>
 
   <div id="lightbox" class="hidden">
