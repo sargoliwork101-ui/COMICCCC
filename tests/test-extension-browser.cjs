@@ -55,6 +55,18 @@ const root = path.resolve(__dirname,'../extension');
       });
       assert.ok(result.font&&result.different&&!result.overflow,route+JSON.stringify(result));
       assert.equal(result.accent,'#15817b','shared light Focus palette: '+route);
+      if(route.startsWith('help')){
+        await page.addScriptTag({url:base+'/src/help/help.js'});
+        assert.equal(await page.$$eval('section:not([hidden])',els=>els.length),1);
+        await page.click('#helpNext');
+        assert.equal(await page.$eval('nav a[aria-current=page]',el=>el.hash),'#organize');
+        await page.type('#helpSearch','عبارتناموجود۱۲۳');
+        assert.equal(await page.$eval('#helpEmpty',el=>el.hidden),false);
+        await page.click('#showAll');
+        assert.equal(await page.$$eval('section:not([hidden])',els=>els.length),8);
+      } else {
+        assert.ok(await page.$('.studio-guide-link[aria-label="راهنمای افزونه"]'));
+      }
       if(route.startsWith('viewer')){
         await page.evaluate(()=>{document.getElementById('topMenu').open=true;});
         const menu=await page.evaluate(()=>{
@@ -76,7 +88,7 @@ const root = path.resolve(__dirname,'../extension');
             const bg=getComputedStyle(root.querySelector('.ext-modal-card')).backgroundColor;
             root.classList.add('hidden');return bg;
           },theme);
-          assert.equal(modal,theme==='light'?'rgb(255, 255, 255)':'rgb(21, 36, 44)','Focus confirmation surface');
+          assert.equal(modal,theme==='light'?'rgb(228, 236, 235)':'rgb(21, 36, 44)','Focus confirmation surface');
         }
       }
 
@@ -145,7 +157,7 @@ const root = path.resolve(__dirname,'../extension');
           assert.ok(layout.heights.every(h=>h<50)&&layout.inline,JSON.stringify(layout));
           assert.ok(layout.menu<layout.toolbar/2,JSON.stringify(layout));
           assert.equal(layout.danger,'rgb(251, 113, 133)');
-          assert.ok(layout.panel.includes(theme==='dark'?'0.082353 0.141176 0.172549':'1 1 1'),JSON.stringify(layout));
+          assert.ok(layout.panel.includes(theme==='dark'?'0.082353 0.141176 0.172549':'0.894118 0.92549 0.921569'),JSON.stringify(layout));
           const header=await page.evaluate(()=>{
             const controls=['.topbar-side .studio-theme-toggle','.topbar-side .top-menu>summary'];
             return controls.map(selector=>{
@@ -192,7 +204,7 @@ const root = path.resolve(__dirname,'../extension');
             font:document.fonts.check('13px HasayaCollectionVazirmatn')};
         });
         assert.equal(appearance.theme,theme);
-        assert.equal(appearance.background,theme==='light'?'rgb(255, 255, 255)':'rgb(21, 36, 44)');
+        assert.equal(appearance.background,theme==='light'?'rgb(228, 236, 235)':'rgb(21, 36, 44)');
         assert.equal(appearance.text,theme==='light'?'rgb(32, 60, 65)':'rgb(225, 238, 242)');
         if(mode!=='manual')assert.equal(appearance.spinner,theme==='light'?'rgb(21, 129, 123)':'rgb(107, 215, 206)');
         assert.equal(appearance.body,'rgb(250, 240, 230)','site theme must remain untouched');

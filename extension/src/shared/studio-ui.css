@@ -1,6 +1,6 @@
 /* Focus design tokens, approved in the standalone preview. All fonts/assets are packaged with the extension. */
 :root{color-scheme:dark;--bg:#101a20;--surface:#15242c;--panel:#15242c;--surface2:#1c303a;--surface3:#243e47;--line:#243944;--line2:#29404a;--text:#e1eef2;--muted:#829da8;--faint:#829da8;--a1:#6bd7ce;--a2:#218b88;--grad:linear-gradient(135deg,#218b88,#267e7a);--grad-ok:linear-gradient(135deg,#10b981,#34d399);--danger:#fb7185;--warning:#fbbf24;--shadow:0 18px 50px #0009;--glow:none;--glow-ok:none}
-:root[data-theme=light]{--a1:#15817b;--a2:#167f79;color-scheme:light;--bg:#f1f8f8;--surface:#fff;--panel:#fff;--surface2:#e4f0ef;--surface3:#e1eef2;--line:#cee0e0;--line2:#b8d1d2;--text:#203c41;--muted:#6c898d;--faint:#6c898d;--shadow:0 18px 50px #24304a22}
+:root[data-theme=light]{--a1:#15817b;--a2:#167f79;color-scheme:light;--bg:#d8e3e2;--surface:#e4eceb;--panel:#e4eceb;--surface2:#ccdcd9;--surface3:#c1d3d0;--line:#cee0e0;--line2:#b8d1d2;--text:#203c41;--muted:#506c70;--faint:#506c70;--shadow:0 18px 50px #24304a22}
 body{background:radial-gradient(circle at 85% -20%,#218b8810,transparent 38%),var(--bg);color:var(--text);font:13px/1.8 Vazirmatn,Tahoma,sans-serif}
 body :is(button,input,select,textarea){font-family:Vazirmatn,Tahoma,sans-serif}
 select{color-scheme:inherit}
@@ -104,3 +104,5 @@ body .top-menu-panel{background:var(--surface);backdrop-filter:none;box-sizing:b
 .top-menu-ocr .check input{flex:none;accent-color:var(--a2)}
 .top-menu-ocr .mini{width:100%;min-height:34px}
 .guide-footer{padding:8px 12px;text-align:center;font-size:11px}.guide-footer a,body p a{color:var(--a1)}
+
+.studio-guide-link{text-decoration:none;box-sizing:border-box}.topbar-side .studio-guide-link{width:36px;height:36px}.studio-guide-link svg{width:18px;height:18px}

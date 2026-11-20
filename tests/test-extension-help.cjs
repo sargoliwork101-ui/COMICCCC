@@ -11,7 +11,7 @@ assert.match(help.body.textContent,/فقط متن برای ترجمه/);
 for(const file of ['viewer/viewer.html','popup/popup.html','ai-settings/settings.html','pdf-import/pdf-import.html','help/help.html']){
  const doc=new JSDOM(fs.readFileSync(path.join(base,file),'utf8')).window.document;
  const links=[...doc.querySelectorAll(file==='help/help.html'?'nav a':'a[href*="help.html"]')];
- assert.ok(links.length,file);
+ assert.ok(links.length || fs.readFileSync(path.join(base,'shared/studio-ui.js'),'utf8').includes('studio-guide-link'),file);
  for(const a of links){
   const [rel,hash]=a.getAttribute('href').split('#');
   assert.ok(fs.existsSync(path.resolve(base,path.dirname(file),rel)),file+': '+rel);

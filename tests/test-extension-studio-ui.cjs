@@ -41,7 +41,7 @@ const root = path.join(__dirname, '../extension');
   for (const id of ['modePdf','modeImg','btnRetry','edClose','cropApply','extModalOk']) assert.ok(viewer.querySelector('#'+id+' svg'),id);
   assert.notEqual(viewer.querySelector('#btnAll svg').innerHTML,viewer.querySelector('#btnNone svg').innerHTML);
   const css = fs.readFileSync(path.join(root,'src/shared/studio-ui.css'),'utf8');
-  assert.ok(css.includes('--bg:#101a20') && css.includes('--bg:#f1f8f8'));
+  assert.ok(css.includes('--bg:#101a20') && css.includes('--bg:#d8e3e2'));
   assert.ok(css.includes('prefers-reduced-transparency') && css.includes('focus-visible'));
   // Same packaged font as Studio, not just the same family label.
   assert.ok(fs.readFileSync(path.join(root,'assets/fonts/Vazirmatn.woff2')).equals(

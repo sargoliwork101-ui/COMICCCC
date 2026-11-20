@@ -170,10 +170,10 @@
       [data-wtpdf-translation-status="partial"]:not(.wtpdf-page-translation-picked){outline:2px solid #fbbf24!important;outline-offset:3px;}
       [data-wtpdf-translation-status="failed"]:not(.wtpdf-page-translation-picked){outline:2px solid #f87171!important;outline-offset:3px;}
       [data-wtpdf-translation-status="translating"]:not(.wtpdf-page-translation-picked){outline:2px solid #93c5fd!important;outline-offset:3px;}
-      [data-wtpdf-page-translation-ui="toolbar"][data-focus-theme="light"]{background:#f1f8f8;color:#203c41;border-color:#cee0e0;}
-      [data-wtpdf-page-translation-ui="toolbar"][data-focus-theme="light"] :is(button,select){background:#fff;color:#203c41;border-color:#b8d1d2;}
+      [data-wtpdf-page-translation-ui="toolbar"][data-focus-theme="light"]{background:#d8e3e2;color:#203c41;border-color:#cee0e0;}
+      [data-wtpdf-page-translation-ui="toolbar"][data-focus-theme="light"] :is(button,select){background:#e4eceb;color:#203c41;border-color:#b8d1d2;}
       [data-wtpdf-page-translation-ui="toolbar"][data-focus-theme="light"] [data-action="translate-selected"]{background:#167f79;color:#fff;border-color:#15817b;}
-      [data-wtpdf-page-translation-ui="toolbar"][data-focus-theme="light"] [data-role="status"]:not([data-kind="error"]):not([data-kind="success"]){background:#e4f0ef;color:#203c41;}
+      [data-wtpdf-page-translation-ui="toolbar"][data-focus-theme="light"] [data-role="status"]:not([data-kind="error"]):not([data-kind="success"]){background:#ccdcd9;color:#203c41;}
       @media(max-width:640px){[data-wtpdf-page-translation-ui="toolbar"]{bottom:calc(8px + env(safe-area-inset-bottom,0px))!important;
         width:calc(100vw - 16px)!important;grid-template-columns:minmax(0,1fr);grid-template-areas:"workflow" "review" "status";gap:5px;padding:7px;}
         [data-wtpdf-page-translation-ui="toolbar"] [data-role="workflow"]{width:100%;gap:5px;}
