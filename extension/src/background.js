@@ -217,7 +217,6 @@ if (chrome.tabs && chrome.tabs.onRemoved && typeof chrome.tabs.onRemoved.addList
 }
 
 const WEBPAGE_TRANSLATION_SETTINGS_KEY = 'gemini_translation_settings_v1';
-const WEBPAGE_TRANSLATION_CONSENT_KEY = 'wtpdf_page_translation_consent_v1';
 const WEBPAGE_AI_PROVIDERS = new Set(['gemini', 'openai', 'openrouter', 'avalai']);
 const WEBPAGE_ENTRY_ID = /^p\d{6}(?:-s\d{3})?$/;
 const WEBPAGE_MAX_ENTRIES = 20;
@@ -248,8 +247,10 @@ function webpageAiConfig(settings, providerOverride = '') {
   const provider = WEBPAGE_AI_PROVIDERS.has(providerOverride) ? providerOverride : savedProvider;
   const providerData = settings && settings.providers && settings.providers[provider];
   let profiles = providerData && Array.isArray(providerData.profiles) ? providerData.profiles : [];
-  if (!profiles.length && provider === 'gemini' && !settings.providers) {
-    if (Array.isArray(settings.profiles)) profiles = settings.profiles;
+  if (!profiles.length && provider === 'gemini') {
+    // تنظیمات قدیمی کلید را در سطح بالا نگه می‌داشت؛ اگر فرمت جدید پروفایل خالی دارد،
+    // کلید سطح بالا را هم بررسی کن تا Gemini از فهرست نیفتد.
+    if (Array.isArray(settings.profiles) && settings.profiles.length) profiles = settings.profiles;
     else if (typeof settings.apiKey === 'string' && settings.apiKey.trim()) {
       profiles = [{ name: 'کلید اصلی', apiKey: settings.apiKey }];
     }
@@ -284,17 +285,14 @@ function configuredWebpageAiEngines(settings) {
 
 async function translateWebpageBatch(rawEntries, requestedEngine = '') {
   const entries = validateWebpageEntries(rawEntries);
-  const stored = await chrome.storage.local.get([WEBPAGE_TRANSLATION_SETTINGS_KEY, WEBPAGE_TRANSLATION_CONSENT_KEY]);
-  if (stored[WEBPAGE_TRANSLATION_CONSENT_KEY] !== true) {
-    throw new Error('برای ترجمه، ابتدا در پنجرهٔ افزونه تیک رضایت به ارسال متن انتخاب‌شده را فعال کنید.');
-  }
+  const stored = await chrome.storage.local.get([WEBPAGE_TRANSLATION_SETTINGS_KEY]);
   const settings = stored[WEBPAGE_TRANSLATION_SETTINGS_KEY] || {};
   let engine, providerOverride = '';
   if (!requestedEngine) {
-    engine = ['auto', 'google', 'mymemory', 'ai'].includes(settings.engine)
-      ? settings.engine : (settings.enabled === true ? 'ai' : 'auto');
+    engine = ['google', 'mymemory', 'ai'].includes(settings.engine)
+      ? settings.engine : (settings.enabled === true ? 'ai' : 'google');
     if (engine === 'ai') providerOverride = settings.provider || 'gemini';
-  } else if (['auto', 'google', 'mymemory'].includes(requestedEngine)) {
+  } else if (['google', 'mymemory'].includes(requestedEngine)) {
     engine = requestedEngine;
   } else if (typeof requestedEngine === 'string' && requestedEngine.startsWith('ai:') &&
       WEBPAGE_AI_PROVIDERS.has(requestedEngine.slice(3))) {
@@ -329,8 +327,7 @@ async function translateWebpageBatch(rawEntries, requestedEngine = '') {
       if (result && result.ok && result.text) translations.push({ id: entry.id, text: result.text });
     }
   }));
-  const provider = engine === 'mymemory' ? 'MyMemory'
-    : engine === 'google' ? 'Google Translate' : 'Google Translate / MyMemory';
+  const provider = engine === 'mymemory' ? 'MyMemory' : 'Google Translate';
   return { ok: true, provider, engine, translations };
 }
 
@@ -369,13 +366,10 @@ function waitForTranslationTabComplete(tab) {
 }
 
 async function createTranslatedPageCopy(sourceTabId, engine) {
-  const stored = await chrome.storage.local.get([WEBPAGE_TRANSLATION_CONSENT_KEY, WEBPAGE_TRANSLATION_SETTINGS_KEY]);
-  if (stored[WEBPAGE_TRANSLATION_CONSENT_KEY] !== true) {
-    throw new Error('ابتدا در پنجرهٔ افزونه، اجازهٔ ارسال متن انتخاب‌شده را فعال کنید.');
-  }
+  const stored = await chrome.storage.local.get([WEBPAGE_TRANSLATION_SETTINGS_KEY]);
   if (!Number.isSafeInteger(sourceTabId) || sourceTabId < 0) throw new Error('صفحهٔ فعالی برای ترجمه پیدا نشد.');
   const availableAiEngines = configuredWebpageAiEngines(stored[WEBPAGE_TRANSLATION_SETTINGS_KEY] || {});
-  const validEngines = ['auto', 'google', 'mymemory', ...availableAiEngines.map((item) => item.value)];
+  const validEngines = ['google', 'mymemory', ...availableAiEngines.map((item) => item.value)];
   if (!validEngines.includes(engine)) {
     throw new Error('برای نمایش این سرویس در فهرست، ابتدا مدل و کلید API آن را در تنظیمات وارد کنید.');
   }

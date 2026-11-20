@@ -61,6 +61,7 @@
           status: 'pending',
           lastAttempt: new Map(),
           lastAttemptSources: new Map(),
+          lastEngine: null,
           failedPartIds: new Set()
         };
         byBlock.set(block, group);
@@ -76,7 +77,7 @@
   }
 
   const PAGE_FREE_ENGINE_OPTIONS = [
-    ['auto', 'Google؛ اگر نشد MyMemory'], ['google', 'فقط Google Translate'], ['mymemory', 'فقط MyMemory']
+    ['google', 'فقط Google Translate'], ['mymemory', 'فقط MyMemory']
   ];
   const AI_PROVIDER_LABELS = {
     gemini: 'Google Gemini', openai: 'OpenAI', openrouter: 'OpenRouter', avalai: 'AvalAI'
@@ -100,7 +101,7 @@
     style.textContent = `
       [data-wtpdf-page-translation-ui="toolbar"]{position:fixed!important;top:auto!important;bottom:calc(12px + env(safe-area-inset-bottom,0px))!important;
         left:50%!important;right:auto!important;transform:translateX(-50%)!important;z-index:2147483647!important;
-        width:min(820px,calc(100vw - 24px))!important;max-height:min(42vh,260px);display:grid;
+        width:fit-content!important;max-width:min(820px,calc(100vw - 24px))!important;max-height:min(42vh,260px);display:grid;
         grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"workflow review" "status status";align-items:center;gap:7px;
         padding:8px 10px;border-radius:14px;background:linear-gradient(135deg,#18212f 0%,#202d40 100%);
         color:#f8fafc;border:1px solid #64748b;box-shadow:0 8px 28px #0008;backdrop-filter:blur(12px);
@@ -143,9 +144,9 @@
         box-shadow:0 2px 8px #0006!important;opacity:0!important;pointer-events:none!important;transition:opacity .15s ease!important;}
       .wtpdf-page-translation-has-version-controls:hover > .wtpdf-page-translation-version-controls,
       .wtpdf-page-translation-has-version-controls:focus-within > .wtpdf-page-translation-version-controls{opacity:1!important;pointer-events:auto!important;}
-      .wtpdf-page-translation-version-badge{display:inline-block!important;max-width:200px!important;margin:0!important;padding:1px 5px!important;
-        border-radius:6px!important;color:#f8fafc!important;
-        font:600 9px/1.5 system-ui,sans-serif!important;direction:rtl!important;white-space:nowrap!important;overflow:hidden!important;text-overflow:ellipsis!important;}
+      .wtpdf-page-translation-version-badge{display:inline-block!important;margin:0!important;padding:4px 10px!important;
+        border:1px solid #64748b!important;border-radius:8px!important;background:#263449!important;color:#f8fafc!important;
+        font:600 clamp(11px,1.05vw,14px)/1.5 system-ui,sans-serif!important;direction:rtl!important;white-space:nowrap!important;}
       .wtpdf-page-translation-version-controls button{display:inline-flex!important;align-items:center!important;justify-content:center!important;
         flex:0 0 20px!important;width:20px!important;height:20px!important;padding:0!important;border:1px solid #64748b!important;border-radius:5px!important;
         background:#273449!important;color:#fff!important;font:700 12px/1 system-ui,sans-serif!important;cursor:pointer!important;}
@@ -162,7 +163,8 @@
         [data-wtpdf-page-translation-ui="toolbar"] [data-role="workflow"]{width:100%;gap:5px;}
         [data-wtpdf-page-translation-ui="toolbar"] [data-role="engine-section"]{flex:1 1 110px;max-width:none;}
         [data-wtpdf-page-translation-ui="toolbar"] [data-role="review"]{justify-content:center;}
-        [data-wtpdf-page-translation-ui="toolbar"] [data-role="status"]{max-height:54px;font-size:10px;}}
+        [data-wtpdf-page-translation-ui="toolbar"] [data-role="status"]{max-height:54px;font-size:10px;}
+        .wtpdf-page-translation-version-badge{font-size:10px!important;padding:2px 7px!important;max-width:170px!important;overflow:hidden!important;text-overflow:ellipsis!important;}}
       @media(max-width:360px){[data-wtpdf-page-translation-ui="toolbar"] .icon-button{flex-basis:32px;width:32px;height:34px;}
         [data-wtpdf-page-translation-ui="toolbar"] [data-role="workflow"]{gap:4px;}}
     `;
@@ -176,7 +178,7 @@
     title.textContent = 'ترجمهٔ صفحه';
     const hint = document.createElement('span');
     hint.dataset.role = 'hint';
-    hint.textContent = 'متن دلخواه را روی صفحه انتخاب کنید؛ بعد موتور را برگزینید و ترجمه را شروع کنید.';
+    hint.textContent = 'روی متن دلخواه کلیک کنید تا انتخاب شود، بعد موتور را برگزینید و ترجمه را شروع کنید.';
     heading.append(title, hint);
 
     const workflow = document.createElement('div');
@@ -249,6 +251,18 @@
   }
 
   function updateVersionBadge(group) {
+    if (group.versions.length <= 1) {
+      // بدون ترجمهٔ ذخیره‌شده، کادر نسخه‌ها روی این پاراگراف نمایش داده نمی‌شود
+      if (group.versionControls && group.versionControls.isConnected) {
+        group.versionControls.remove();
+      }
+      group.versionControls = null;
+      group.versionPrev = null;
+      group.versionBadge = null;
+      group.versionNext = null;
+      group.block.classList.remove('wtpdf-page-translation-has-version-controls');
+      return;
+    }
     if (!group.versionControls || !group.versionControls.isConnected) {
       group.block.classList.add('wtpdf-page-translation-has-version-controls');
       const controls = document.createElement('span');
@@ -290,11 +304,11 @@
   }
 
   function updateEngineOptions(state, availableAiEngines) {
-    const current = state.translationEngine || 'auto';
+    const current = state.translationEngine || 'google';
     state.availableAiEngines = Array.isArray(availableAiEngines) ? availableAiEngines : [];
     state.engineOptions = buildPageEngineOptions(state.availableAiEngines);
     state.engineLabels = Object.fromEntries(state.engineOptions.map(({ value, label }) => [value, label]));
-    state.translationEngine = Object.hasOwn(state.engineLabels, current) ? current : 'auto';
+    state.translationEngine = Object.hasOwn(state.engineLabels, current) ? current : 'google';
     if (!state.ui || !state.ui.engineSelect) return;
     state.ui.engineSelect.replaceChildren(...state.engineOptions.map(({ value, label }) => {
       const option = document.createElement('option');
@@ -327,7 +341,7 @@
   }
 
   function setTranslationEngine(state, engine) {
-    state.translationEngine = Object.hasOwn(state.engineLabels, engine) ? engine : 'auto';
+    state.translationEngine = Object.hasOwn(state.engineLabels, engine) ? engine : 'google';
     if (state.ui && state.ui.engineSelect) state.ui.engineSelect.value = state.translationEngine;
   }
 
@@ -406,14 +420,35 @@
     setGroupVersion(group, group.activeVersion + amount);
   }
 
+  // خطاهای فنی مرورگر را به پیام فارسی و قابل‌فهم تبدیل می‌کند تا کاربر بداند چه کند.
+  function friendlyPageError(message) {
+    const text = String(message || '');
+    if (/Extension context invalidated/i.test(text)) {
+      return 'افزونه تازه‌بارگذاری شده است؛ صفحه را تازه‌سازی کنید و دوباره تلاش کنید.';
+    }
+    if (/Could not establish connection|message port closed|Receiving end does not exist/i.test(text)) {
+      return 'ارتباط با افزونه برقرار نشد؛ صفحه را تازه‌سازی کنید و دوباره تلاش کنید.';
+    }
+    return text;
+  }
+
   async function translateSelected(state, retryOnly = false) {
     if (state.running || state.pickMode) return;
-    const selected = state.groups.filter((group) => state.selectedGroups.has(group.id) &&
-      (!retryOnly || (group.failedPartIds && group.failedPartIds.size)));
+    const picked = state.groups.filter((group) => state.selectedGroups.has(group.id));
+    // پاراگرافی که با همین موتور کامل ترجمه شده، دوباره به سرویس فرستاده نمی‌شود
+    // (ترجمهٔ تکراری با همان موتور نتیجهٔ یکسان می‌دهد و هزینهٔ API دارد).
+    // با موتور متفاوت، ترجمهٔ دوباره مجاز است تا نسخهٔ جدید برای مقایسه ساخته شود.
+    const selected = picked.filter((group) => retryOnly
+      ? (group.failedPartIds && group.failedPartIds.size)
+      : !(group.status === 'translated' && group.lastEngine === state.translationEngine));
     if (!selected.length) {
-      state.ui.status.textContent = retryOnly
-        ? 'در پاراگراف‌های انتخاب‌شده بخش ناموفقی برای تلاش دوباره نیست.'
-        : 'برای ترجمه، روی پاراگراف‌های دلخواه کلیک کنید و انتخاب را پایان دهید.';
+      if (!retryOnly && picked.length && picked.every((group) => group.status === 'translated' && group.lastEngine === state.translationEngine)) {
+        state.ui.status.textContent = 'این پاراگراف‌ها با همین موتور قبلاً ترجمه شده‌اند و دوباره ارسال نمی‌شوند؛ برای نسخهٔ جدید، موتور دیگری برگزینید.';
+      } else {
+        state.ui.status.textContent = retryOnly
+          ? 'در پاراگراف‌های انتخاب‌شده بخش ناموفقی برای تلاش دوباره نیست.'
+          : 'برای ترجمه، روی پاراگراف‌های دلخواه کلیک کنید و انتخاب را پایان دهید.';
+      }
       return;
     }
     const selectedIds = new Set(selected.map((group) => group.id));
@@ -431,7 +466,7 @@
     if (!entries.length) {
       selected.forEach((group) => { group.status = 'failed'; });
       refreshGroupStatuses(state);
-      state.ui.status.textContent = 'بخش تازه‌ای برای ارسال پیدا نشد؛ ترجمه‌های قبلی حفظ شده‌اند.';
+      state.ui.status.textContent = 'بخش جدیدی برای ارسال پیدا نشد؛ ترجمه‌های قبلی سر جایشان هستند.';
       refreshToolbarControls(state);
       return;
     }
@@ -476,7 +511,7 @@
             batchErrors.push(`${engineLabel}: ${toPersianNumber(expectedIds.size - received)} متن از این بسته در پاسخ نبود.`);
           }
         } catch (error) {
-          batchErrors.push(error && error.message ? error.message : 'خطای ارتباط با سرویس ترجمه');
+          batchErrors.push(friendlyPageError(error && error.message ? error.message : 'خطای ارتباط با سرویس ترجمه'));
         }
         sendProgress(state.jobId, 'working', { completed: index + 1, total: batches.length, textNodes: entries.length });
       }
@@ -494,6 +529,7 @@
         group.failedPartIds = new Set(expectedParts.filter((part) => !group.lastAttempt.has(part.id)).map((part) => part.id));
         if (translatedParts === expectedParts.length && expectedParts.length) {
           group.status = 'translated'; completedParagraphs++;
+          group.lastEngine = state.translationEngine;
         } else if (translatedParts) {
           group.status = 'partial'; partialParagraphs++;
         } else {
@@ -561,7 +597,7 @@
     refreshToolbarControls(state);
   }
 
-  function initializePage(jobId, engine = 'auto', availableAiEngines = []) {
+  function initializePage(jobId, engine = 'google', availableAiEngines = []) {
     const current = window.__wtpdfPageTranslation;
     if (current && current.records && current.records.length) {
       updateEngineOptions(current, availableAiEngines);
@@ -571,11 +607,11 @@
     }
     const records = tools.collectTextNodes(document.body, document);
     const groups = buildGroups(records);
-    if (!groups.length) return { ok: false, error: 'متن قابل‌انتخابی در این صفحه پیدا نشد.' };
+    if (!groups.length) return { ok: false, error: 'در این صفحه متن قابل انتخابی پیدا نشد.' };
     groups.forEach(updateVersionBadge);
     const state = {
       running: false, records, groups, groupByBlock: new Map(groups.map((group) => [group.block, group])),
-      jobId: String(jobId || ''), selectedGroups: new Set(), translationEngine: 'auto',
+      jobId: String(jobId || ''), selectedGroups: new Set(), translationEngine: 'google',
       pickMode: false, pickClickHandler: null, pickKeyHandler: null, ui: null,
       engineOptions: [], engineLabels: {}, availableAiEngines: []
     };
@@ -608,7 +644,7 @@
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message) return undefined;
     if (message.type === 'WTPDF_PAGE_TRANSLATE_START') {
-      sendResponse(initializePage(String(message.jobId || ''), message.engine || 'auto', message.availableAiEngines || []));
+      sendResponse(initializePage(String(message.jobId || ''), message.engine || 'google', message.availableAiEngines || []));
       return false;
     }
     if (message.type === 'WTPDF_PAGE_TRANSLATE_OPEN_SELECTION') {

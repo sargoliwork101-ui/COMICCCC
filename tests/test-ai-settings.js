@@ -54,7 +54,7 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
     $('aiEnabled').checked && $('profiles').querySelector('input[type=password]').value === 'secret-existing' && $('skill').value === 'ترجمهٔ روان');
   check('legacy AI setting is migrated to the selected page translation engine', $('pageEngine').value === 'ai');
   check('translation engine choices include Google, MyMemory, and the selected AI service',
-    [...$('pageEngine').options].map((option) => option.value).join(',') === 'auto,google,mymemory,ai');
+    [...$('pageEngine').options].map((option) => option.value).join(',') === 'google,mymemory,ai');
   check('provider choices include all services supported by the extension',
     [...$('provider').options].map((option) => option.value).join(',') === 'gemini,openai,openrouter,avalai');
   $('provider').value = 'gemini';

@@ -18,11 +18,15 @@ def test_v429_resource_budget_limits_cpu_and_ram_and_survives_a_restart(tmp_path
     monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
     resources._CACHE = None
 
-    # Automatic mode keeps the existing behaviour (nothing is limited yet).
+    # Automatic mode reserves CPU headroom (introduced after v4.29).
+    # This test used to assert the older all-cores policy, despite the current
+    # implementation deliberately leaving cores for the OS and browser.
     summary = resources.budget_summary()
     assert summary["mode"] == "auto"
-    assert summary["allowedCores"] == summary["cpuCores"]
-    assert cpu_core_count() == max(1, int(os.cpu_count() or 1))
+    cores = max(1, int(os.cpu_count() or 1))
+    expected_auto = 1 if cores == 1 else cores - 1 if cores <= 4 else max(2, round(cores * 0.7))
+    assert summary["allowedCores"] == expected_auto
+    assert cpu_core_count() == expected_auto
 
     with _client() as client:
         response = client.get("/api/resources")

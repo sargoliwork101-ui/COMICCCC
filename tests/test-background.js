@@ -104,7 +104,7 @@ function bootBackground(initialStorage, translationApis = {}) {
     check('failed tab creation leaves no orphan job', ![...b.store.keys()].some((k) => k.startsWith('job_')));
   }
 
-  // 4. page text cannot be sent until the user has saved explicit consent in the popup
+  // 4. webpage text is translated without any stored consent flag (the consent checkbox was removed)
   {
     let translateCalls = 0;
     const b = bootBackground({}, {
@@ -115,14 +115,14 @@ function bootBackground(initialStorage, translationApis = {}) {
     b.listeners.message({ type: 'WTPDF_TRANSLATE_PAGE_BATCH', entries: [{ id: 'p000001', text: 'Private text.' }] },
       { tab: { id: 19, url: 'https://example.test/' } }, (result) => { response = result; });
     await new Promise((resolve) => setTimeout(resolve, 10));
-    check('webpage translation is blocked until consent is stored',
-      response && response.ok === false && /ارسال متن/.test(response.error) && translateCalls === 0, response);
+    check('webpage translation runs without a stored consent flag',
+      response && response.ok === true && translateCalls === 1, response);
   }
 
   // 5. webpage text is translated only through the explicit extension message and uses the configured route
   {
     const calls = [];
-    const b = bootBackground({ wtpdf_page_translation_consent_v1: true }, {
+    const b = bootBackground({}, {
       TranslateTools: { translate: async (text, sourceLang, _fetchFn, engine) => {
         calls.push({ text, sourceLang, engine });
         return { ok: true, text: `FA:${text}` };
@@ -135,10 +135,10 @@ function bootBackground(initialStorage, translationApis = {}) {
     }, { tab: { id: 18, url: 'https://example.test/article' } }, (result) => { response = result; });
     await new Promise((resolve) => setTimeout(resolve, 10));
     check('page translation keeps async response open and defaults to free translation', keepOpen === true &&
-      calls.length === 1 && calls[0].text === 'Hello world.' && calls[0].sourceLang === 'auto' && calls[0].engine === 'auto');
+      calls.length === 1 && calls[0].text === 'Hello world.' && calls[0].sourceLang === 'auto' && calls[0].engine === 'google');
     check('free page translation returns only the translated text keyed by its source ID',
       response && response.ok === true && response.translations[0].id === 'p000001' &&
-      response.translations[0].text === 'FA:Hello world.' && response.provider === 'Google Translate / MyMemory', response);
+      response.translations[0].text === 'FA:Hello world.' && response.provider === 'Google Translate', response);
   }
   {
     const calls = [];
@@ -146,7 +146,7 @@ function bootBackground(initialStorage, translationApis = {}) {
       engine: 'ai', enabled: false, provider: 'openai', skill: 'web style',
       providers: { openai: { model: 'gpt-web', profiles: [{ name: 'Saved', apiKey: 'private-key' }] } }
     };
-    const b = bootBackground({ wtpdf_page_translation_consent_v1: true, gemini_translation_settings_v1: settings }, {
+    const b = bootBackground({ gemini_translation_settings_v1: settings }, {
       TranslateTools: { translate: async () => { throw new Error('free fallback must not run'); } },
       AiTranslateTools: {
         translateWithFailover: async (options) => {
@@ -169,10 +169,10 @@ function bootBackground(initialStorage, translationApis = {}) {
   {
     const calls = [];
     const settings = {
-      engine: 'auto', provider: 'gemini',
+      engine: 'google', provider: 'gemini',
       providers: { openrouter: { model: 'openrouter/model-x', profiles: [{ name: 'Routed', apiKey: 'router-secret' }] } }
     };
-    const b = bootBackground({ wtpdf_page_translation_consent_v1: true, gemini_translation_settings_v1: settings }, {
+    const b = bootBackground({ gemini_translation_settings_v1: settings }, {
       TranslateTools: { translate: async () => { throw new Error('explicit AI selection must not use free translation'); } },
       AiTranslateTools: { translateWithFailover: async (options) => {
         calls.push(options);
@@ -191,7 +191,7 @@ function bootBackground(initialStorage, translationApis = {}) {
   }
   {
     const calls = [];
-    const b = bootBackground({ wtpdf_page_translation_consent_v1: true, gemini_translation_settings_v1: { engine: 'mymemory', enabled: false } }, {
+    const b = bootBackground({ gemini_translation_settings_v1: { engine: 'mymemory', enabled: false } }, {
       TranslateTools: { translate: async (text, sourceLang, _fetchFn, engine) => {
         calls.push({ text, sourceLang, engine });
         return { ok: true, text: 'ترجمهٔ Google' };
@@ -208,7 +208,7 @@ function bootBackground(initialStorage, translationApis = {}) {
   }
   {
     const calls = [];
-    const b = bootBackground({ wtpdf_page_translation_consent_v1: true, gemini_translation_settings_v1: { engine: 'mymemory', enabled: false } }, {
+    const b = bootBackground({ gemini_translation_settings_v1: { engine: 'mymemory', enabled: false } }, {
       TranslateTools: { translate: async (text, sourceLang, _fetchFn, engine) => {
         calls.push({ text, sourceLang, engine });
         return { ok: true, text: 'ترجمهٔ MyMemory' };
@@ -225,7 +225,7 @@ function bootBackground(initialStorage, translationApis = {}) {
   }
   {
     let translateCalls = 0;
-    const b = bootBackground({ wtpdf_page_translation_consent_v1: true }, {
+    const b = bootBackground({}, {
       TranslateTools: { translate: async () => { translateCalls++; return { ok: true, text: 'x' }; } },
       AiTranslateTools: {}
     });
@@ -239,7 +239,7 @@ function bootBackground(initialStorage, translationApis = {}) {
 
   // 6. the popup launches a translated copy directly, without an intermediate consent page
   {
-    const b = bootBackground({ wtpdf_page_translation_consent_v1: true });
+    const b = bootBackground({});
     const calls = { duplicate: [], inject: [], send: [], update: [] };
     b.chrome.tabs.get = async (id) => ({ id, status: 'complete', url: 'https://example.test/story' });
     b.chrome.tabs.duplicate = async (id) => { calls.duplicate.push(id); return { id: 44, status: 'complete', url: 'https://example.test/story' }; };
@@ -263,7 +263,6 @@ function bootBackground(initialStorage, translationApis = {}) {
   }
   {
     const b = bootBackground({
-      wtpdf_page_translation_consent_v1: true,
       gemini_translation_settings_v1: {
         providers: { openai: { model: 'gpt-configured', profiles: [{ name: 'Ready', apiKey: 'must-not-leak' }] } }
       }
@@ -282,7 +281,7 @@ function bootBackground(initialStorage, translationApis = {}) {
       !JSON.stringify(calls.send[0]).includes('must-not-leak') && response && response.ok);
   }
   {
-    const b = bootBackground({ wtpdf_page_translation_consent_v1: true });
+    const b = bootBackground({});
     let duplicateCalls = 0, response = null;
     b.chrome.tabs.duplicate = async () => { duplicateCalls++; return { id: 45, status: 'complete' }; };
     b.listeners.message({ type: 'WTPDF_PAGE_TRANSLATE_CREATE_COPY', tabId: 19, engine: 'ai:gemini' },
@@ -292,13 +291,43 @@ function bootBackground(initialStorage, translationApis = {}) {
       duplicateCalls === 0 && response && !response.ok && /کلید API/.test(response.error));
   }
   {
-    const b = bootBackground({});
-    let duplicateCalls = 0, response = null;
-    b.chrome.tabs.duplicate = async () => { duplicateCalls++; return { id: 45, status: 'complete' }; };
-    b.listeners.message({ type: 'WTPDF_PAGE_TRANSLATE_CREATE_COPY', tabId: 19, engine: 'auto' },
+    // تنظیمات قدیمی کلید Gemini را در سطح بالا نگه می‌داشت؛ اگر فرمت جدید
+    // providers وجود دارد ولی پروفایل Gemini خالی است، کلید سطح بالا باید پیدا شود.
+    const b = bootBackground({
+      gemini_translation_settings_v1: {
+        providers: { openai: { model: 'gpt-configured', profiles: [{ name: 'Ready', apiKey: 'openai-key' }] } },
+        apiKey: 'legacy-gemini-key', model: 'gemini-2.5-flash'
+      }
+    });
+    const calls = { send: [], duplicate: 0 };
+    b.chrome.tabs.get = async (id) => ({ id, status: 'complete', url: 'https://example.test/' });
+    b.chrome.tabs.duplicate = async () => { calls.duplicate++; return { id: 48, status: 'complete', url: 'https://example.test/' }; };
+    b.chrome.tabs.sendMessage = async (_id, message) => { calls.send.push(message); return { ok: true, paragraphs: 1 }; };
+    b.chrome.tabs.update = async () => {};
+    b.chrome.scripting.executeScript = async () => [];
+    let response = null;
+    b.listeners.message({ type: 'WTPDF_PAGE_TRANSLATE_CREATE_COPY', tabId: 19, engine: 'ai:gemini' },
       { id: 'ext', url: 'chrome-extension://ext/src/popup/popup.html' }, (result) => { response = result; });
     await new Promise((resolve) => setTimeout(resolve, 10));
-    check('copy is not opened before the one-time privacy consent is saved', duplicateCalls === 0 && response && !response.ok);
+    check('legacy top-level Gemini key is found when new-format providers exist but Gemini profiles are empty',
+      calls.duplicate === 1 && response && response.ok &&
+      calls.send[0].availableAiEngines.some((item) => item.value === 'ai:gemini') &&
+      !JSON.stringify(calls.send[0]).includes('legacy-gemini-key'), { calls, response });
+  }
+  {
+    const b = bootBackground({});
+    const calls = { duplicate: [], inject: [], send: [] };
+    b.chrome.tabs.get = async (id) => ({ id, status: 'complete', url: 'https://example.test/story' });
+    b.chrome.tabs.duplicate = async (id) => { calls.duplicate.push(id); return { id: 47, status: 'complete', url: 'https://example.test/story' }; };
+    b.chrome.tabs.sendMessage = async (id, message) => { calls.send.push({ id, message }); return { ok: true, paragraphs: 2 }; };
+    b.chrome.tabs.update = async () => {};
+    b.chrome.scripting.executeScript = async (details) => { calls.inject.push(details); return []; };
+    let response = null;
+    b.listeners.message({ type: 'WTPDF_PAGE_TRANSLATE_CREATE_COPY', tabId: 19, engine: 'google' },
+      { id: 'ext', url: 'chrome-extension://ext/src/popup/popup.html' }, (result) => { response = result; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    check('translated copy opens without any stored consent flag',
+      calls.duplicate[0] === 19 && calls.inject.length === 1 && response && response.ok && response.paragraphs === 2, { calls, response });
   }
 
   // 7. unrelated messages are ignored (no return value, no throw)

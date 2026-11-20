@@ -554,3 +554,29 @@ def test_custom_translation_skill_is_sent_in_exact_system_instruction(tmp_path, 
     assert service.translate('Hello', 'eng', provider, ['Hello'], '') == 'سلام'
     no_skill = captured[1]['systemInstruction']['parts'][0]['text'] if provider == 'gemini' else captured[1]['messages'][0]['content']
     assert 'Additional translation guidance' not in no_skill and 'Never merge, split' in no_skill
+
+
+def test_tracked_client_sends_browser_user_agent(monkeypatch, tmp_path):
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    service = TranslationService()
+    with service._tracked_client(timeout=10) as client:
+        ua = client.headers.get('user-agent', '')
+        assert 'Mozilla/5.0' in ua
+        assert 'python-httpx' not in ua.lower()
+
+
+def test_google_translate_429_falls_back_to_clients5(monkeypatch, tmp_path):
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    service = TranslationService()
+    calls = []
+
+    class FakeClient:
+        def get(self, url, params=None):
+            calls.append(url)
+            if 'translate.googleapis.com' in url:
+                return httpx.Response(429, request=httpx.Request('GET', url))
+            return httpx.Response(200, json=[['سلام', 'en']], request=httpx.Request('GET', url))
+
+    result = service._google_translate_request(FakeClient(), 'Hello', 'en', 'fa')
+    assert result == 'سلام'
+    assert len(calls) == 2 and 'clients5.google.com' in calls[1]

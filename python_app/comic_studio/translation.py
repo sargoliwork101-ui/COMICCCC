@@ -344,6 +344,16 @@ def _normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
         key = str(raw.get("api_key") or "").strip()
         if key:
             target["profiles"] = [{"id": "legacy", "name": "کلید اصلی", "api_key": key, **_profile_policy({})}]
+    if isinstance(stored_providers, dict):
+        # تنظیمات قدیمی کلید را در سطح بالا نگه می‌داشت؛ اگر فرمت جدید پروفایل
+        # Gemini خالی است، کلید سطح بالا را هم بررسی کن تا Gemini از فهرست نیفتد.
+        gemini_profiles = providers["gemini"]["profiles"]
+        if not any(profile.get("api_key") for profile in gemini_profiles):
+            key = str(raw.get("api_key") or "").strip()
+            if key:
+                providers["gemini"]["profiles"] = [
+                    {"id": "legacy", "name": "کلید اصلی", "api_key": key, **_profile_policy({})}
+                ]
 
     provider = str(raw.get("provider") or "free").strip().lower()
     if provider not in {"free", "local", *AI_PROVIDERS}:
@@ -715,6 +725,9 @@ class TranslationService:
         timeout = kwargs.get("timeout")
         if isinstance(timeout, (int, float)):
             kwargs["timeout"] = httpx.Timeout(timeout, connect=AI_CONNECT_TIMEOUT)
+        headers = dict(kwargs.get("headers") or {})
+        headers.setdefault("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+        kwargs["headers"] = headers
         client = httpx.Client(**kwargs)
         with self._clients_lock:
             self._active_clients.add(client)
@@ -1260,12 +1273,7 @@ class TranslationService:
                     return normalized_same
                 with self._tracked_client(timeout=profile['timeout_seconds'], follow_redirects=True) as client:
                     if name == 'google':
-                        response = client.get('https://translate.googleapis.com/translate_a/single', params={'client':'gtx','sl':google_sl,'tl':tl,'dt':'t','q':text})
-                        response.raise_for_status(); payload = response.json()
-                        try:
-                            translated = ''.join(str(part[0] or '') for part in (payload[0] or [])).strip()
-                        except (IndexError, TypeError, KeyError) as exc:
-                            raise TranslationError('Google Translate پاسخ نامعتبر برگرداند.') from exc
+                        translated = self._google_translate_request(client, text, google_sl, tl)
                     else:
                         response = client.get('https://api.mymemory.translated.net/get', params={'q':text,'langpair':f"{source.split('-')[0]}|{mm_target}"})
                         response.raise_for_status(); payload = response.json()
@@ -1347,6 +1355,32 @@ class TranslationService:
                 translated_parts.append(self._free_query(client, query, source) if tl == "fa" else self._free_query(client, query, source, tl))
         return " ".join(part.strip() for part in translated_parts if part.strip()).strip()
 
+    def _google_translate_request(self, client: httpx.Client, text: str, google_sl: str, tl: str) -> str:
+        response = client.get(
+            "https://translate.googleapis.com/translate_a/single",
+            params={"client": "gtx", "sl": google_sl, "tl": tl, "dt": "t", "q": text},
+        )
+        if response.status_code == 429:
+            alt = client.get(
+                "https://clients5.google.com/translate_a/t",
+                params={"client": "dict-chrome-ex", "sl": google_sl, "tl": tl, "q": text},
+            )
+            alt.raise_for_status()
+            payload = alt.json()
+            if isinstance(payload, list) and payload:
+                first = payload[0]
+                if isinstance(first, list):
+                    return str(first[0] or "").strip()
+                if isinstance(first, str):
+                    return first.strip()
+            raise TranslationError("Google Translate پاسخ نامعتبر برگرداند.")
+        response.raise_for_status()
+        payload = response.json()
+        try:
+            return "".join(str(part[0] or "") for part in (payload[0] or [])).strip()
+        except (IndexError, TypeError, KeyError) as exc:
+            raise TranslationError("Google Translate پاسخ نامعتبر برگرداند.") from exc
+
     def _free_query(self, client: httpx.Client, text: str, source: str, target_language: str = "fa") -> str:
         tl = normalize_target_language(target_language)
         same_pair = source.split("-")[0].lower() == tl.split("-")[0].lower()
@@ -1354,13 +1388,7 @@ class TranslationService:
         mm_target = "zh-CN" if tl == "zh-CN" else tl.split("-")[0]
         errors = []
         try:
-            response = client.get(
-                "https://translate.googleapis.com/translate_a/single",
-                params={"client": "gtx", "sl": google_sl, "tl": tl, "dt": "t", "q": text},
-            )
-            response.raise_for_status()
-            payload = response.json()
-            translated = "".join(part[0] or "" for part in (payload[0] or [])).strip()
+            translated = self._google_translate_request(client, text, google_sl, tl)
             if translated:
                 return translated
             errors.append("Google returned no translation")

@@ -105,8 +105,8 @@ async function loadSettings() {
     const stored = await chrome.storage.local.get(SETTINGS_KEY);
     const settings = stored[SETTINGS_KEY] || {};
     $('aiEnabled').checked = settings.enabled === true;
-    const savedEngine = ['auto', 'google', 'mymemory', 'ai'].includes(settings.engine)
-      ? settings.engine : (settings.enabled === true ? 'ai' : 'auto');
+    const savedEngine = ['google', 'mymemory', 'ai'].includes(settings.engine)
+      ? settings.engine : (settings.enabled === true ? 'ai' : 'google');
     $('pageEngine').value = savedEngine;
     updateEngineFields();
     const providerStore = settings.providers && typeof settings.providers === 'object' ? settings.providers : null;
@@ -117,10 +117,20 @@ async function loadSettings() {
       let profiles = Array.isArray(legacy ? settings.profiles : raw.profiles)
         ? (legacy ? settings.profiles : raw.profiles).map((profile) => makeProfile(profile && profile.name, profile && profile.apiKey, profile && profile.id))
         : [];
-      if (legacy && !profiles.length && typeof settings.apiKey === 'string' && settings.apiKey.trim()) {
-        profiles = [makeProfile('کلید اصلی', settings.apiKey)];
+      let usedLegacyProfiles = legacy;
+      if (provider === 'gemini' && !profiles.length) {
+        // تنظیمات قدیمی کلید را در سطح بالا نگه می‌داشت؛ اگر فرمت جدید پروفایل خالی دارد،
+        // کلید سطح بالا را هم بررسی کن تا در صفحهٔ تنظیمات دیده شود و با ذخیره به فرمت جدید بیاید.
+        if (Array.isArray(settings.profiles) && settings.profiles.length) {
+          profiles = settings.profiles.map((profile) => makeProfile(profile && profile.name, profile && profile.apiKey, profile && profile.id));
+          usedLegacyProfiles = true;
+        } else if (typeof settings.apiKey === 'string' && settings.apiKey.trim()) {
+          profiles = [makeProfile('کلید اصلی', settings.apiKey)];
+          usedLegacyProfiles = true;
+        }
       }
-      const model = legacy ? settings.model : raw.model;
+      const model = (legacy || usedLegacyProfiles) && !(typeof raw.model === 'string' && raw.model.trim())
+        ? settings.model : raw.model;
       const savedModel = typeof model === 'string' && model.trim() ? model.trim() : AiTranslateTools.DEFAULT_MODELS[provider];
       state.providerData[provider] = {
         model: provider === 'gemini' && savedModel === 'gemini-2.5-flash'
@@ -140,7 +150,7 @@ async function loadSettings() {
       };
     }
     $('skill').value = AiTranslateTools.DEFAULT_SKILL;
-    $('pageEngine').value = 'auto';
+    $('pageEngine').value = 'google';
     updateEngineFields();
     showProvider('gemini');
   }

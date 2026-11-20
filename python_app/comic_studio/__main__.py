@@ -265,6 +265,10 @@ def run_server(host: str, port: int, listening_socket: socket.socket | None = No
 
 
 def main() -> None:
+    if len(sys.argv) == 3 and sys.argv[1] == "--rapid-worker":
+        from .rapid_process import worker_main
+        worker_main(sys.argv[2])
+        return
     _ensure_std_streams()
     parser = argparse.ArgumentParser(description="HaSaYa Studio")
     parser.add_argument("--host", default="127.0.0.1")

@@ -477,6 +477,37 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     check('sampleBg detects two-color red/green border as non-uniform', sampled.uniform === false, sampled);
   }
 
+  // viaGoogle / viaMyMemory direct edge cases (exported but only tested indirectly before)
+  {
+    const googleOk = async () => ({ ok: true, json: async () => [[['سلام', 'hello']]] });
+    const text = await TranslateTools.viaGoogle('hello', 'en', googleOk, 5000);
+    check('viaGoogle joins the response parts into the translated text', text === 'سلام', text);
+    let googleErr = null;
+    try { await TranslateTools.viaGoogle('hello', 'en', async () => ({ ok: false, status: 500 }), 5000); }
+    catch (error) { googleErr = error; }
+    check('viaGoogle throws on a non-OK HTTP status', googleErr && /HTTP 500/.test(googleErr.message), googleErr && googleErr.message);
+    let googleEmpty = null;
+    try { await TranslateTools.viaGoogle('hello', 'en', async () => ({ ok: true, json: async () => [[]] }), 5000); }
+    catch (error) { googleEmpty = error; }
+    check('viaGoogle throws on an empty translation', googleEmpty && googleEmpty.message === 'empty', googleEmpty && googleEmpty.message);
+
+    const memoryOk = async () => ({ ok: true, json: async () => ({ responseData: { translatedText: 'سلام' } }) });
+    const memoryText = await TranslateTools.viaMyMemory('hello', 'en-US', memoryOk, 5000);
+    check('viaMyMemory returns the translated text and strips the region from the language pair', memoryText === 'سلام', memoryText);
+    let memoryWarn = null;
+    try { await TranslateTools.viaMyMemory('hello', 'en', async () => ({ ok: true, json: async () => ({ responseData: { translatedText: 'MYMEMORY WARNING: YOU USED ALL AVAILABLE FREE TRANSLATIONS' } }) }), 5000); }
+    catch (error) { memoryWarn = error; }
+    check('viaMyMemory rejects quota warning text as a failure', memoryWarn && memoryWarn.message === 'mymemory', memoryWarn && memoryWarn.message);
+  }
+
+  // OCR language table sanity
+  {
+    check('OCR LANGS covers English, Korean, Japanese and Simplified Chinese with source codes',
+      OcrTools.LANGS.eng.sl === 'en' && OcrTools.LANGS.kor.sl === 'ko' &&
+      OcrTools.LANGS.jpn.sl === 'ja' && OcrTools.LANGS.jpn.cjk === true &&
+      OcrTools.LANGS.chi_sim.sl === 'zh-CN' && OcrTools.LANGS.chi_sim.cjk === true, OcrTools.LANGS);
+  }
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL TESTS PASSED');
   process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error('TEST CRASH:', e); process.exit(2); });

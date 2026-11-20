@@ -30,6 +30,7 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
           requests.push(message);
           translationRun++;
           if (responseMode === 'fail') return { ok: false, error: 'test service failure' };
+          if (responseMode === 'invalidated') throw new Error('Extension context invalidated.');
           if (responseMode === 'empty') return { ok: true, provider: 'Google Translate', translations: [] };
           const entries = responseMode === 'partial'
             ? message.entries.filter((entry) => !/world/.test(entry.text))
@@ -95,23 +96,21 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
     dockCollapsed && toolbar.dataset.collapsed === 'false' && dockToggle.getAttribute('aria-expanded') === 'true' &&
     dockToggle.getAttribute('aria-label') === 'جمع‌کردن نوار ابزار');
   check('only configured AI providers and their exact model names appear in the page menu',
-    [...toolbar.querySelectorAll('[data-role="translation-engine"] option')].map((option) => option.value).join(',') === 'auto,google,mymemory,ai:openai' &&
+    [...toolbar.querySelectorAll('[data-role="translation-engine"] option')].map((option) => option.value).join(',') === 'google,mymemory,ai:openai' &&
     toolbar.querySelector('[data-role="translation-engine"] option[value="ai:openai"]').textContent.includes('gpt-test') &&
     !toolbar.querySelector('[data-role="translation-engine"]').textContent.includes('Gemini') &&
     !toolbar.querySelector('[data-role="translation-engine"]').textContent.includes('OpenRouter'));
-  check('each paragraph has its own previous/next arrows and version badge above the text',
-    window.document.querySelectorAll('#article > .wtpdf-page-translation-version-controls, #second > .wtpdf-page-translation-version-controls').length === 2 &&
-    versionControls('article').children[0].textContent === '<' && versionControls('article').children[2].textContent === '>' &&
-    versionControls('article').children[0].getAttribute('aria-label').includes('قبلی') &&
-    versionControls('article').children[2].getAttribute('aria-label').includes('بعدی') &&
-    versionControls('article').querySelector('.wtpdf-page-translation-version-badge').textContent.includes('۰ ترجمه') &&
-    versionControls('second').querySelector('.wtpdf-page-translation-version-badge').textContent.includes('۰ ترجمه'));
-  check('version controls are a small hover tooltip hidden until the mouse is over the paragraph',
+  check('paragraphs without a saved translation show no version box at all',
+    window.document.querySelectorAll('#article > .wtpdf-page-translation-version-controls, #second > .wtpdf-page-translation-version-controls').length === 0 &&
+    !window.document.getElementById('article').classList.contains('wtpdf-page-translation-has-version-controls') &&
+    !window.document.getElementById('second').classList.contains('wtpdf-page-translation-has-version-controls'));
+  check('version box is a hover tooltip hidden until the mouse is over a translated paragraph',
     /wtpdf-page-translation-version-controls\{[^}]*position:absolute/.test(toolbarCss) &&
     /wtpdf-page-translation-version-controls\{[^}]*opacity:0/.test(toolbarCss) &&
     /wtpdf-page-translation-has-version-controls:hover > \.wtpdf-page-translation-version-controls/.test(toolbarCss) &&
-    /wtpdf-page-translation-version-badge\{[^}]*font:600 9px/.test(toolbarCss) &&
-    window.document.getElementById('article').classList.contains('wtpdf-page-translation-has-version-controls'));
+    /wtpdf-page-translation-version-badge\{[^}]*font:600 clamp\(11px/.test(toolbarCss) &&
+    /@media\(max-width:640px\)[\s\S]*?wtpdf-page-translation-version-badge\{font-size:10px/.test(toolbarCss) &&
+    !window.document.getElementById('article').classList.contains('wtpdf-page-translation-has-version-controls'));
 
   const clickBlock = (element) => element.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
   clickBlock(window.document.getElementById('article'));
@@ -165,6 +164,9 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
   check('next-version control reapplies the saved RTL translation',
     window.document.querySelector('#article').textContent.includes('V1(') &&
     window.document.querySelector('#article').getAttribute('dir') === 'rtl');
+  check('the still-untranslated paragraph keeps no version box after a sibling is translated',
+    !versionControls('second') &&
+    !window.document.getElementById('second').classList.contains('wtpdf-page-translation-has-version-controls'));
 
   const sameTabResponse = listener({ type: 'WTPDF_PAGE_TRANSLATE_OPEN_SELECTION', engine: 'ai:openai',
     availableAiEngines: [{ provider: 'openai', model: 'gpt-test' }] }, {}, (response) => { result = response; });
@@ -192,6 +194,19 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
     window.document.querySelector('#article').textContent.includes('V2(') &&
     versionControls('article').querySelector('.wtpdf-page-translation-version-badge').textContent.includes('مدل gpt-test'));
 
+  // کلیک دوباره با همان موتور، پاراگراف ترجمه‌شده را دوباره به سرویس نمی‌فرستد
+  {
+    const requestCountBefore = requests.length;
+    toolbar.querySelector('[data-action="translate-selected"]').click();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    check('re-clicking translate with the same engine skips the already-translated paragraph',
+      requests.length === requestCountBefore &&
+      /قبلاً ترجمه شده‌اند و دوباره ارسال نمی‌شوند/.test(toolbar.querySelector('[data-role="status"]').textContent) &&
+      group('group-1').status === 'translated', { requests: requests.length, status: group('group-1').status });
+  }
+
+  // موتور را عوض می‌کنیم تا پاراگراف ترجمه‌شده رد نشود و مسیر خطا تست شود
+  engineSelect.value = 'google'; engineSelect.dispatchEvent(new window.Event('change', { bubbles: true }));
   responseMode = 'fail';
   toolbar.querySelector('[data-action="translate-selected"]').click();
   await new Promise((resolve) => setTimeout(resolve, 20));
@@ -229,7 +244,10 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
   clickBlock(window.document.getElementById('article'));
   clickBlock(window.document.getElementById('history'));
   pickToggle.click();
+  // هر کلیک با موتور متفاوت نسخهٔ جدید می‌سازد (با موتور یکسان رد می‌شود)
   for (let index = 0; index < 8; index++) {
+    engineSelect.value = index % 2 === 0 ? 'google' : 'ai:openai';
+    engineSelect.dispatchEvent(new window.Event('change', { bubbles: true }));
     toolbar.querySelector('[data-action="translate-selected"]').click();
     await new Promise((resolve) => setTimeout(resolve, 10));
   }

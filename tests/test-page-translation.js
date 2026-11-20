@@ -90,5 +90,57 @@ check('assigns stable IDs to extracted text nodes',
     document.querySelector('#first').getAttribute('dir') === 'ltr' && !document.querySelector('#second').hasAttribute('dir'));
 }
 
+{
+  // Sites commonly set text-align:left/justify; translated Persian text must be
+  // right-aligned regardless, and the site alignment must come back for original text.
+  const alignDom = new JSDOM(`<!doctype html><html dir="ltr"><head><style>
+    #aligned { text-align: left; }
+    #justified { text-align: justify; }
+  </style></head><body>
+    <p id="aligned">A left-aligned paragraph.</p>
+    <p id="justified">A justified paragraph.</p>
+  </body></html>`, { pretendToBeVisual: true });
+  const alignDoc = alignDom.window.document;
+  const alignRecords = PageTranslationTools.collectTextNodes(alignDoc.body, alignDoc);
+  const alignTranslations = new Map(alignRecords.map((record) => [record.id, 'متن فارسی']));
+  PageTranslationTools.applyTranslations(alignRecords, alignTranslations);
+  check('translated paragraphs are right-aligned despite site text-align:left/justify',
+    alignDom.window.getComputedStyle(alignDoc.querySelector('#aligned')).textAlign === 'right' &&
+    alignDom.window.getComputedStyle(alignDoc.querySelector('#justified')).textAlign === 'right' &&
+    alignDoc.querySelector('#aligned').style.getPropertyValue('text-align') === 'right');
+  PageTranslationTools.showOriginal(alignRecords);
+  check('showing original text restores the site alignment and removes inline styles',
+    alignDom.window.getComputedStyle(alignDoc.querySelector('#aligned')).textAlign === 'left' &&
+    alignDom.window.getComputedStyle(alignDoc.querySelector('#justified')).textAlign === 'justify' &&
+    !alignDoc.querySelector('#aligned').hasAttribute('style') &&
+    !alignDoc.querySelector('#justified').hasAttribute('style'));
+  PageTranslationTools.showTranslations(alignRecords);
+  check('re-showing the translation re-applies right alignment',
+    alignDom.window.getComputedStyle(alignDoc.querySelector('#aligned')).textAlign === 'right');
+}
+
+{
+  // Loose text nodes in one <article> share a single direction target; switching one
+  // paragraph back to its original text must not strip RTL from the other translated one.
+  const sharedDom = new JSDOM(`<!doctype html><html><body>
+    <article id="shared"><span>First loose text</span><span>Second loose text</span></article>
+  </body></html>`, { pretendToBeVisual: true });
+  const sharedDoc = sharedDom.window.document;
+  const sharedRecords = PageTranslationTools.collectTextNodes(sharedDoc.body, sharedDoc);
+  const [first, second] = sharedRecords;
+  const sharedTranslations = new Map(sharedRecords.map((record) => [record.id, 'ترجمه فارسی']));
+  PageTranslationTools.applyTranslations([first], sharedTranslations);
+  PageTranslationTools.applyTranslations([second], sharedTranslations);
+  check('shared direction target carries RTL while both paragraphs are translated',
+    sharedDoc.querySelector('#shared').getAttribute('dir') === 'rtl');
+  PageTranslationTools.showVersion([first], new Map([[first.id, first.original]]), new Set());
+  check('switching one paragraph to original keeps RTL for the still-translated paragraph',
+    sharedDoc.querySelector('#shared').getAttribute('dir') === 'rtl' &&
+    second.node.nodeValue === 'ترجمه فارسی');
+  PageTranslationTools.showVersion([second], new Map([[second.id, second.original]]), new Set());
+  check('target direction is restored once no paragraph needs RTL',
+    sharedDoc.querySelector('#shared').getAttribute('dir') === null);
+}
+
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL PAGE TRANSLATION TESTS PASSED');
 process.exit(failures ? 1 : 0);

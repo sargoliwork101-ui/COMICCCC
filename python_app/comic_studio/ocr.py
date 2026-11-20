@@ -931,7 +931,11 @@ def _apply_det_input_cap(engine: Any, det_max_side: int | None) -> None:
 class RapidEngine:
     # The engine understands a bounded detection canvas (see _apply_det_input_cap).
     supports_det_cap = True
-    def __init__(self, engine_id: str, version: str) -> None:
+    def __init__(self, engine_id: str, version: str, *, isolated: bool = False) -> None:
+        self._remote = None
+        if isolated:
+            from .rapid_process import RapidProcess
+            self._remote = RapidProcess(version)
         self.id = engine_id
         self.version = version
         self._instances: dict[str, Any] = {}
@@ -953,7 +957,7 @@ class RapidEngine:
 
     @property
     def using_gpu(self) -> bool:
-        return bool(self._using_gpu and not self._force_cpu)
+        return bool((getattr(self._remote, "using_gpu", False) if self._remote else self._using_gpu) and not self._force_cpu)
 
     @property
     def ready_languages(self) -> list[str]:
@@ -981,15 +985,33 @@ class RapidEngine:
     @property
     def is_loaded_in_ram(self) -> bool:
         with self._lock:
-            return bool(self._instances or any(self._idle_pool.values()) or any(self._created_counts.values()))
+            return bool((self._remote and self._remote.pid) or self._instances
+                        or any(self._idle_pool.values()) or any(self._created_counts.values()))
 
     def unload(self) -> None:
         self._idle.cancel()
+        if self._remote:
+            self._remote.close()
         with self._pool_cond:
             self._instances.clear()
             self._idle_pool.clear()
             self._created_counts.clear()
             self._pool_cond.notify_all()
+
+    @property
+    def worker_pid(self):
+        return self._remote.pid if self._remote else None
+
+    def cancel_ocr(self):
+        if self._remote:
+            self._remote.cancel()
+
+    def _call_remote(self, image, language, **kwargs):
+        self._idle.enter()
+        try:
+            return self._remote.call(image, language, force_cpu=self._force_cpu, **kwargs)
+        finally:
+            self._idle.leave()
 
     def uninstall(self) -> int:
         if self.version == "v6":
@@ -1006,6 +1028,9 @@ class RapidEngine:
 
     @contextlib.contextmanager
     def configure_batch(self, total_pages: int, threads_per_worker: int | None = None):
+        if self._remote:
+            yield 1  # One persistent model and one in-flight page, no pool duplication.
+            return
         if threads_per_worker is None:
             accel = _detect_onnx_acceleration()
             if accel.get("gpu") and not self._force_cpu:
@@ -1419,6 +1444,8 @@ class RapidEngine:
             trim_process_memory()
 
     def recognize(self, image: Image.Image, language: str, *, det_max_side: int | None = None) -> list[OcrLine]:
+        if self._remote:
+            return self._call_remote(image, language, det_max_side=det_max_side)
         rgb = _to_white_backed_rgb(image) if getattr(image, "mode", "RGB") != "RGB" else image
         try:
             arr = np.asarray(rgb)
@@ -1495,6 +1522,8 @@ class RapidEngine:
         finds the line that is already known.  Skipping it removes the most expensive
         part of reading a page full of small cells.
         """
+        if self._remote:
+            return self._call_remote(image, language, method="line")
         rgb = _to_white_backed_rgb(image) if getattr(image, "mode", "RGB") != "RGB" else image
         try:
             arr = np.asarray(rgb)
@@ -3736,8 +3765,8 @@ for _eng_id, _eng_meta in ENGINE_INFO.items():
 class EngineRegistry:
     def __init__(self) -> None:
         self.engines: dict[str, Any] = {
-            "rapidocr-v6": RapidEngine("rapidocr-v6", "v6"),
-            "rapidocr-v5": RapidEngine("rapidocr-v5", "v5"),
+            "rapidocr-v6": RapidEngine("rapidocr-v6", "v6", isolated=True),
+            "rapidocr-v5": RapidEngine("rapidocr-v5", "v5", isolated=True),
             "easyocr": EasyEngine(),
             "tesseract": TesseractEngine(),
         }
@@ -3938,20 +3967,16 @@ DOCUMENT_FALLBACK_SCALE = 2
 
 def _to_white_backed_rgb(image: Image.Image) -> Image.Image:
     """Flatten transparent pixels onto white paper so dark ink never turns black-on-black."""
-    oriented = ImageOps.exif_transpose(image)
-    if oriented.mode in {"RGBA", "LA"} or (oriented.mode == "P" and "transparency" in oriented.info):
-        rgba = oriented.convert("RGBA")
-        white = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
-        composited = Image.alpha_composite(white, rgba).convert("RGB")
-        rgba.close()
-        white.close()
+    with contextlib.ExitStack() as owned:
+        oriented = ImageOps.exif_transpose(image)
         if oriented is not image:
-            oriented.close()
-        return composited
-    rgb = oriented.convert("RGB")
-    if oriented is not image and oriented is not rgb:
-        oriented.close()
-    return rgb
+            owned.callback(oriented.close)
+        if oriented.mode in {"RGBA", "LA"} or (oriented.mode == "P" and "transparency" in oriented.info):
+            rgba = owned.enter_context(oriented.convert("RGBA"))
+            white = owned.enter_context(Image.new("RGBA", rgba.size, (255, 255, 255, 255)))
+            composite = owned.enter_context(Image.alpha_composite(white, rgba))
+            return composite.convert("RGB")
+        return oriented.convert("RGB")
 
 
 PERSIAN_PREPROCESS_BORDER_PAD = 18
@@ -4546,17 +4571,23 @@ def preprocess(
     page_mode: str = "comic",
 ) -> tuple[Image.Image, float]:
     image = _to_white_backed_rgb(image)
-    if contrast:
-        # In document/article mode, keep dark ink strokes unclipped (cutoff_low=0) while brightening off-white paper.
-        cutoff = (0, 1) if page_mode == "document" else 1
-        image = ImageOps.autocontrast(image, cutoff=cutoff)
-    scale = 1.0
-    if precise and image.width * image.height <= PRECISE_UPSCALE_MAX_PIXELS:
-        scale = 2.0
-        resized = image.resize((image.width * 2, image.height * 2), Image.Resampling.LANCZOS)
+    try:
+        if contrast:
+            # Close the replaced RGB copy before allocating the upscaled page.
+            cutoff = (0, 1) if page_mode == "document" else 1
+            adjusted = ImageOps.autocontrast(image, cutoff=cutoff)
+            image.close()
+            image = adjusted
+        scale = 1.0
+        if precise and image.width * image.height <= PRECISE_UPSCALE_MAX_PIXELS:
+            scale = 2.0
+            resized = image.resize((image.width * 2, image.height * 2), Image.Resampling.LANCZOS)
+            image.close()
+            image = resized
+        return image, scale
+    except BaseException:
         image.close()
-        image = resized
-    return image, scale
+        raise
 
 
 def _blocks_from_lines(
@@ -4795,15 +4826,25 @@ def _extra_preprocess_image(image: Image.Image) -> Image.Image:
     """Isolate very bright letter fills, then make them dark on white."""
     import cv2
 
-    rgb = np.asarray(ImageOps.exif_transpose(image).convert("RGB"))
+    with contextlib.ExitStack() as owned:
+        oriented = ImageOps.exif_transpose(image)
+        if oriented is not image:
+            owned.callback(oriented.close)
+        base = owned.enter_context(oriented.convert("RGB"))
+        rgb = np.asarray(base)
     enlarged = cv2.resize(
         rgb, None, fx=EXTRA_PREPROCESS_SCALE, fy=EXTRA_PREPROCESS_SCALE,
         interpolation=cv2.INTER_CUBIC,
     )
     gray = cv2.cvtColor(enlarged, cv2.COLOR_RGB2GRAY)
-    _, bright = cv2.threshold(gray, EXTRA_PREPROCESS_THRESHOLD, 255, cv2.THRESH_BINARY)
-    inverted = cv2.bitwise_not(bright)
-    return Image.fromarray(inverted, mode="L").convert("RGB")
+    # These RGB arrays are no longer needed. Previously both survived until the
+    # final 3x RGB output allocation, along with three separate grayscale masks.
+    del enlarged, rgb
+    # Reuse the grayscale buffer, preserving the exact cubic/threshold pixels.
+    cv2.threshold(gray, EXTRA_PREPROCESS_THRESHOLD, 255, cv2.THRESH_BINARY, dst=gray)
+    cv2.bitwise_not(gray, dst=gray)
+    with Image.fromarray(gray) as inverted:
+        return inverted.convert("RGB")
 
 
 def _bubble_preprocess_regions(image: Image.Image) -> list[tuple[Image.Image, int, int]]:

@@ -105,12 +105,14 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     !!pdoc.getElementById('pdfConvertBtn') && /تبدیل PDF به تصویر/.test(pdoc.getElementById('pdfConvertBtn').textContent));
   check('translated-copy action is available directly from the popup',
     !!pdoc.getElementById('translatePageBtn') && /ترجمهٔ همین صفحه/.test(pdoc.getElementById('translatePageBtn').textContent));
-  check('popup exposes the translation engine and one-time privacy consent controls',
-    !!pdoc.getElementById('pageTranslationEngine') && !!pdoc.getElementById('pageTranslationConsent') &&
-    pdoc.querySelectorAll('#pageTranslationEngine option').length === 3 &&
-    !pdoc.querySelector('#pageTranslationEngine option[value="ai:gemini"]'));
-  check('AI API settings are directly accessible from the popup',
-    !!pdoc.getElementById('aiSettingsBtn') && /تنظیمات API هوش مصنوعی/.test(pdoc.getElementById('aiSettingsBtn').textContent) &&
+  check('popup shows neither an engine selector nor a consent checkbox for page translation',
+    !pdoc.getElementById('pageTranslationEngine') && !pdoc.getElementById('pageTranslationConsent') &&
+    !/موتور ترجمهٔ این صفحه/.test(pdoc.textContent) && !/موافقم متن پاراگراف/.test(pdoc.textContent));
+  check('AI API settings are directly accessible from the popup via the top gear button',
+    !!pdoc.getElementById('aiSettingsBtn') &&
+    pdoc.getElementById('aiSettingsBtn').getAttribute('aria-label') === 'تنظیمات API هوش مصنوعی' &&
+    !!pdoc.getElementById('aiSettingsBtn').querySelector('svg') &&
+    pdoc.querySelector('.brand #aiSettingsBtn') !== null &&
     fs.readFileSync(path.join(ROOT, 'src/popup/popup.js'), 'utf8').includes("src/ai-settings/settings.html"));
   check('file name input present', !!pdoc.getElementById('pdfName'));
   check('page limit input present', pdoc.getElementById('pageLimit') &&
@@ -252,14 +254,13 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
       openedUrl === 'chrome-extension://ext/src/ai-settings/settings.html', openedUrl);
   }
 
-  // One saved consent and a direct provider choice launch translation without an intermediary tab.
+  // A saved engine choice launches translation directly without an intermediary tab or consent checkbox.
   {
     const translateDom = new JSDOM(fs.readFileSync(__dirname + '/../extension/src/popup/popup.html', 'utf8'), {
       url: 'chrome-extension://ext/src/popup/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
     });
     const translateWindow = translateDom.window;
     const storage = makeLocalStorage({
-      wtpdf_page_translation_consent_v1: false,
       wtpdf_page_translation_engine_v1: 'ai:openai',
       gemini_translation_settings_v1: {
         provider: 'openai',
@@ -287,32 +288,55 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     vm.runInContext(popupCode, translateDom.getInternalVMContext(), { filename: 'popup.js' });
     await new Promise((resolve) => setTimeout(resolve, 10));
     const translateButton = translateWindow.document.getElementById('translatePageBtn');
-    const consent = translateWindow.document.getElementById('pageTranslationConsent');
-    const engineOptions = [...translateWindow.document.querySelectorAll('#pageTranslationEngine option')];
-    check('popup shows only AI providers with a saved API key and names their exact model',
-      engineOptions.length === 4 && engineOptions.some((option) => option.value === 'ai:openai' && option.textContent.includes('gpt-popup-test')) &&
-      !engineOptions.some((option) => /Gemini|OpenRouter|AvalAI/.test(option.textContent)) &&
-      !translateWindow.document.getElementById('pageTranslationEngine').textContent.includes('popup-secret'));
-    check('translation stays disabled until one-time consent is given', translateButton.disabled === true);
-    consent.checked = true;
-    consent.dispatchEvent(new translateWindow.Event('change', { bubbles: true }));
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    translateWindow.document.getElementById('pageTranslationEngine').value = 'ai:openai';
-    translateWindow.document.getElementById('pageTranslationEngine').dispatchEvent(new translateWindow.Event('change', { bubbles: true }));
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    check('consent and the chosen engine are saved for future popup opens',
-      storage.data.wtpdf_page_translation_consent_v1 === true && storage.data.wtpdf_page_translation_engine_v1 === 'ai:openai');
+    check('popup no longer shows an engine selector or consent checkbox; the engine is chosen on the translated copy page',
+      !translateWindow.document.getElementById('pageTranslationEngine') &&
+      !translateWindow.document.getElementById('pageTranslationConsent'));
+    check('translation is available directly without any consent checkbox', translateButton.disabled === false);
     translateButton.click();
     await new Promise((resolve) => setTimeout(resolve, 20));
     check('page translation launches a direct copy request with the selected engine, not a consent tab',
       calls.launched.length === 1 && calls.launched[0].type === 'WTPDF_PAGE_TRANSLATE_CREATE_COPY' &&
       calls.launched[0].tabId === 33 && calls.launched[0].engine === 'ai:openai' &&
       calls.created.length === 0 && closed, calls);
-    consent.checked = false;
-    consent.dispatchEvent(new translateWindow.Event('change', { bubbles: true }));
+  }
+  // تنظیمات قدیمی کلید Gemini را در سطح بالا نگه می‌داشت؛ اگر فرمت جدید providers
+  // وجود دارد ولی پروفایل Gemini خالی است، popup باید کلید سطح بالا را پیدا کند.
+  {
+    const legacyDom = new JSDOM(fs.readFileSync(__dirname + '/../extension/src/popup/popup.html', 'utf8'), {
+      url: 'chrome-extension://ext/src/popup/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
+    });
+    const legacyWindow = legacyDom.window;
+    const storage = makeLocalStorage({
+      wtpdf_page_translation_engine_v1: 'ai:gemini',
+      gemini_translation_settings_v1: {
+        provider: 'gemini',
+        providers: { openai: { model: 'gpt-popup-test', profiles: [{ name: 'Test', apiKey: 'popup-secret' }] } },
+        apiKey: 'legacy-gemini-key', model: 'gemini-2.5-flash'
+      }
+    });
+    const calls = { launched: [] };
+    legacyWindow.close = () => {};
+    legacyWindow.chrome = {
+      runtime: {
+        getURL: (resource) => `chrome-extension://ext/${resource}`,
+        sendMessage: async (message) => { calls.launched.push(message); return { ok: true, tabId: 44, paragraphs: 4 }; }
+      },
+      storage: { local: storage },
+      tabs: {
+        query: async () => [{ id: 33, url: 'https://news.example.test/story/1' }],
+        sendMessage: async () => { throw new Error('no content listener on ordinary page'); },
+        create: async () => ({ id: 77 })
+      }
+    };
+    vm.runInContext(popupCode, legacyDom.getInternalVMContext(), { filename: 'popup.js' });
     await new Promise((resolve) => setTimeout(resolve, 10));
-    check('unchecking consent revokes it and disables future translation',
-      storage.data.wtpdf_page_translation_consent_v1 === false && translateButton.disabled === true);
+    const legacyButton = legacyWindow.document.getElementById('translatePageBtn');
+    check('legacy top-level Gemini key keeps the saved Gemini engine selectable in the popup',
+      legacyButton.disabled === false);
+    legacyButton.click();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    check('popup launches the copy request with the legacy-resolved Gemini engine',
+      calls.launched.length === 1 && calls.launched[0].engine === 'ai:gemini', calls);
   }
   {
     const sameTabDom = new JSDOM(fs.readFileSync(__dirname + '/../extension/src/popup/popup.html', 'utf8'), {
@@ -322,7 +346,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     let created = 0, requested = null;
     sameTabWindow.chrome = {
       runtime: { getURL: (resource) => `chrome-extension://ext/${resource}` },
-      storage: { local: makeLocalStorage({ wtpdf_page_translation_consent_v1: true }) },
+      storage: { local: makeLocalStorage({}) },
       tabs: {
         query: async () => [{ id: 37, url: 'https://news.example.test/translated-copy' }],
         sendMessage: async (_id, message) => { requested = message; return { ok: true, translatedCopy: true }; },
@@ -347,7 +371,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     let created = 0;
     blockedWindow.chrome = {
       runtime: { getURL: (resource) => `chrome-extension://ext/${resource}` },
-      storage: { local: makeLocalStorage({ wtpdf_page_translation_consent_v1: true }) },
+      storage: { local: makeLocalStorage({}) },
       tabs: {
         query: async () => [{ id: 34, url: 'chrome://settings/' }],
         create: async () => { created++; }

@@ -18,6 +18,10 @@
     'H4', 'H5', 'H6', 'LI', 'P', 'SUMMARY', 'TD', 'TH'
   ]);
   const directionSnapshots = new WeakMap();
+  // target element -> set of records that currently require RTL on it. A target keeps
+  // its forced RTL while any record still needs it, so showing the original text of one
+  // paragraph never strips RTL from another paragraph sharing the same target element.
+  const directionOwners = new WeakMap();
 
   function splitText(text, id, maxChars = MAX_SEGMENT_CHARS) {
     const source = String(text || '');
@@ -134,13 +138,18 @@
         dirValue: target.getAttribute('dir'),
         hadStyleAttribute: target.hasAttribute('style'),
         inlineDirection: style && style.getPropertyValue ? style.getPropertyValue('direction') : '',
-        inlineDirectionPriority: style && style.getPropertyPriority ? style.getPropertyPriority('direction') : ''
+        inlineDirectionPriority: style && style.getPropertyPriority ? style.getPropertyPriority('direction') : '',
+        inlineTextAlign: style && style.getPropertyValue ? style.getPropertyValue('text-align') : '',
+        inlineTextAlignPriority: style && style.getPropertyPriority ? style.getPropertyPriority('text-align') : ''
       });
     }
     target.setAttribute('dir', 'rtl');
     // Some sites declare direction:ltr!important; dir alone cannot override that CSS.
+    // Sites also commonly set text-align:left/justify, which would leave the Persian
+    // text anchored to the left edge even with direction:rtl, so force right alignment too.
     if (target.style && typeof target.style.setProperty === 'function') {
       target.style.setProperty('direction', 'rtl', 'important');
+      target.style.setProperty('text-align', 'right', 'important');
     }
   }
 
@@ -154,6 +163,11 @@
         target.style.setProperty('direction', snapshot.inlineDirection, snapshot.inlineDirectionPriority);
       } else {
         target.style.removeProperty('direction');
+      }
+      if (snapshot.inlineTextAlign) {
+        target.style.setProperty('text-align', snapshot.inlineTextAlign, snapshot.inlineTextAlignPriority);
+      } else {
+        target.style.removeProperty('text-align');
       }
       if (!snapshot.hadStyleAttribute && target.getAttribute('style') === '') target.removeAttribute('style');
     }
@@ -173,28 +187,41 @@
 
   function setTranslatedDirection(records) {
     const list = Array.isArray(records) ? records : [];
-    // Restore the previous version first, so a partial translation never leaves stale RTL on original text.
-    restoreDirections(list);
+    const affected = new Set();
+    // Release this call's records from the targets they owned before, so a target is
+    // only restored once no record anywhere still needs RTL on it. This keeps RTL on a
+    // translated paragraph when another paragraph sharing the same target is switched
+    // back to its original text.
+    list.forEach((record) => {
+      if (!record) return;
+      (Array.isArray(record.directionTargets) ? record.directionTargets : [record.directionTarget])
+        .filter(Boolean).forEach((target) => {
+          affected.add(target);
+          const owners = directionOwners.get(target);
+          if (owners) owners.delete(record);
+        });
+      record.directionTargets = [];
+      record.directionTarget = null;
+    });
+    // Claim targets for the records that currently show a translation.
     list.forEach((record) => {
       if (!record.hasTranslation || !record.node || !record.node.isConnected) return;
       const target = directionTarget(record.node);
       if (!target) return;
       record.directionTarget = target;
       record.directionTargets = recordDirectionPath(record, target);
-      record.directionTargets.forEach(snapshotAndForceRtl);
+      record.directionTargets.forEach((t) => {
+        affected.add(t);
+        let owners = directionOwners.get(t);
+        if (!owners) { owners = new Set(); directionOwners.set(t, owners); }
+        owners.add(record);
+      });
     });
-  }
-
-  function restoreDirections(records) {
-    const targets = new Set();
-    (Array.isArray(records) ? records : []).forEach((record) => {
-      if (!record) return;
-      (Array.isArray(record.directionTargets) ? record.directionTargets : [record.directionTarget])
-        .filter(Boolean).forEach((target) => targets.add(target));
-    });
-    targets.forEach(restoreDirectionTarget);
-    (Array.isArray(records) ? records : []).forEach((record) => {
-      if (record) record.directionTargets = [];
+    // Force RTL on targets that still have an owner; restore the rest.
+    affected.forEach((target) => {
+      const owners = directionOwners.get(target);
+      if (owners && owners.size) snapshotAndForceRtl(target);
+      else restoreDirectionTarget(target);
     });
   }
 

@@ -82,6 +82,11 @@ _REQUIRED_IMPORTS = {
 }
 
 if __name__ == "__main__":
+    if _IS_FROZEN and len(sys.argv) == 3 and sys.argv[1] == "--rapid-worker":
+        from comic_studio.rapid_process import restore_worker_stdio, worker_main
+        restore_worker_stdio()
+        worker_main(sys.argv[2])
+        raise SystemExit(0)
     _ensure_frozen_stdio()
     if not _IS_FROZEN:
         _ensure_local_package_resolution()

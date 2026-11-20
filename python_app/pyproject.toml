@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comic-ocr-studio"
-version = "4.5.5"
+version = "4.5.9"
 description = "Standalone local OCR, translation and visual document editing studio"
 requires-python = ">=3.11"
 dependencies = [
@@ -43,6 +43,7 @@ local-nmt = [
 ]
 dev = [
   "pytest>=8,<10",
+  "psutil>=5.9,<8",  # Opt-in memory profiling; not a runtime dependency.
 ]
 
 [project.scripts]

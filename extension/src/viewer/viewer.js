@@ -242,7 +242,10 @@ async function setRefererRule(pageUrl) {
       removeRuleIds: [1],
       addRules: [{
         id: 1, priority: 1,
-        action: { type: 'modifyHeaders', requestHeaders: [{ header: 'referer', operation: 'set', value: origin }] },
+        action: { type: 'modifyHeaders', requestHeaders: [
+          { header: 'referer', operation: 'set', value: origin },
+          { header: 'origin', operation: 'remove' }
+        ] },
         // فقط برای دریافت تصویرها؛ درخواست سرویس‌های ترجمه نباید Referer سایت کمیک را بگیرند
         condition: {
           resourceTypes: ['xmlhttprequest'],
@@ -339,6 +342,15 @@ function sniff(u) {
 async function analyze(it) {
   const u8 = new Uint8Array(await it.blob.arrayBuffer());
   let info = sniff(u8);
+  if (!info && (/svg/i.test(it.blob.type || '') || /^\s*(?:<\?xml[\s\S]*?)?<svg[\s>]/i.test(new TextDecoder().decode(u8.slice(0, 512))))) {
+    const text = new TextDecoder().decode(u8.slice(0, 4096));
+    const vb = text.match(/viewBox\s*=\s*["']\s*[\d.-]+\s+[\d.-]+\s+([\d.]+)\s+([\d.]+)/i);
+    const wm = text.match(/\bwidth\s*=\s*["']\s*([\d.]+)/i);
+    const hm = text.match(/\bheight\s*=\s*["']\s*([\d.]+)/i);
+    const w = Math.round(Number(wm && wm[1]) || Number(vb && vb[1]) || 1200) || 1200;
+    const h = Math.round(Number(hm && hm[1]) || Number(vb && vb[2]) || 800) || 800;
+    info = { fmt: 'SVG', ok: true, w, h };
+  }
   if (!info || !info.w || !info.h) {
     try {
       const b = await createImageBitmap(it.blob, { imageOrientation: 'none' });
@@ -679,21 +691,47 @@ async function drawThumb(it) {
   it.thumbRequest = request;
   try {
     const src = await getDisplaySource(it);
-    const bmp = await createImageBitmap(src.blob, { resizeWidth: 240, resizeQuality: 'high' });
+    let drawable = null;
+    let dwSrc = 0, dhSrc = 0;
+    let cleanup = () => {};
+    const isSvg = (it.info && it.info.fmt === 'SVG') || /svg/i.test(src.blob.type || '');
+    if (!isSvg) {
+      try {
+        const bmp = await createImageBitmap(src.blob, { resizeWidth: 240, resizeQuality: 'high' });
+        drawable = bmp;
+        dwSrc = bmp.width;
+        dhSrc = bmp.height;
+        cleanup = () => bmp.close();
+      } catch { /* fallback to <img> below */ }
+    }
+    if (!drawable) {
+      const url = URL.createObjectURL(src.blob);
+      try {
+        const img = await new Promise((resolve, reject) => {
+          const el = new Image();
+          el.onload = () => resolve(el);
+          el.onerror = () => reject(new Error('خطا در بارگذاری پیش‌نمایش'));
+          el.src = url;
+        });
+        drawable = img;
+        dwSrc = img.naturalWidth || it.w || 240;
+        dhSrc = img.naturalHeight || it.h || 180;
+      } finally { URL.revokeObjectURL(url); }
+    }
     try {
       if (it.thumbRequest !== request) return;
       const c = it.el.querySelector('canvas'), ctx = c && c.getContext('2d');
       if (!ctx) return;
-      ctx.fillStyle = '#171c26'; ctx.fillRect(0, 0, c.width, c.height);
+      ctx.fillStyle = isSvg ? '#ffffff' : '#171c26'; ctx.fillRect(0, 0, c.width, c.height);
       // کل تصویر با حفظ نسبت داخل کادر می‌آید؛ برشِ ناخواستهٔ انتهای تصاویر بلند حذف شد.
-      const scale = Math.min(c.width / bmp.width, c.height / bmp.height);
-      const dw = Math.max(1, bmp.width * scale), dh = Math.max(1, bmp.height * scale);
+      const scale = Math.min(c.width / dwSrc, c.height / dhSrc);
+      const dw = Math.max(1, dwSrc * scale), dh = Math.max(1, dhSrc * scale);
       const dx = (c.width - dw) / 2, dy = (c.height - dh) / 2;
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = 'high';
       // هر چهار گوشهٔ منبع رسم می‌شود؛ هیچ بخشی از تصویر به‌عنوان برشِ پیش‌نمایش حذف نمی‌شود.
-      ctx.drawImage(bmp, 0, 0, bmp.width, bmp.height, dx, dy, dw, dh);
-    } finally { bmp.close(); }
+      ctx.drawImage(drawable, 0, 0, dwSrc, dhSrc, dx, dy, dw, dh);
+    } finally { cleanup(); }
   } catch (e) { console.warn('پیش‌نمایش تصویر ناموفق', e); }
 }
 
@@ -1363,7 +1401,10 @@ async function openLightbox(it) {
     lbItem = it;
     if (lbUrl) URL.revokeObjectURL(lbUrl);
     lbUrl = URL.createObjectURL(src.blob);
-    $('lbImg').src = lbUrl;
+    const lbImg = $('lbImg');
+    const isSvg = (it.info && it.info.fmt === 'SVG') || /svg/i.test(src.blob.type || '');
+    lbImg.style.width = isSvg ? `${it.w || 1200}px` : '';
+    lbImg.src = lbUrl;
     $('lightbox').classList.remove('hidden');
     document.body.style.overflow = 'hidden';
   } catch (e) { extAlert('بازکردن تصویر ناموفق بود: ' + (e.message || e), { title: 'خطا در نمایش تصویر' }); }
@@ -1383,13 +1424,41 @@ async function copyLightboxImage() {
     const src = await getDisplaySource(lbItem);
     let blob = src.blob;
     if (blob.type !== 'image/png') {
-      const bmp = await createImageBitmap(blob);
-      const cv = document.createElement('canvas'); cv.width = bmp.width; cv.height = bmp.height;
+      const isSvg = (lbItem.info && lbItem.info.fmt === 'SVG') || /svg/i.test(blob.type || '');
+      let drawable = null;
+      let w = 0, h = 0;
+      let cleanup = () => {};
+      if (!isSvg) {
+        try {
+          const bmp = await createImageBitmap(blob);
+          drawable = bmp;
+          w = bmp.width;
+          h = bmp.height;
+          cleanup = () => bmp.close();
+        } catch { /* fallback to <img> below */ }
+      }
+      if (!drawable) {
+        const url = URL.createObjectURL(blob);
+        try {
+          const img = await new Promise((resolve, reject) => {
+            const el = new Image();
+            el.onload = () => resolve(el);
+            el.onerror = () => reject(new Error('تصویر قابل رمزگشایی نیست'));
+            el.src = url;
+          });
+          drawable = img;
+          w = img.naturalWidth || lbItem.w || 1200;
+          h = img.naturalHeight || lbItem.h || 800;
+        } finally { URL.revokeObjectURL(url); }
+      }
+      const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
       try {
-        cv.getContext('2d').drawImage(bmp, 0, 0);
+        const ctx = cv.getContext('2d');
+        if (isSvg) { ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, h); }
+        ctx.drawImage(drawable, 0, 0, w, h);
         blob = await canvasToBlob(cv, 'image/png');
       } finally {
-        bmp.close();
+        cleanup();
         cv.width = cv.height = 0;
       }
     }
