@@ -392,6 +392,37 @@ function makeHarness() {
       res && res.count === 0 && res.skippedInline === 1, res && res.skippedInline);
   }
 
+  // Deep search must change the real scanner in every navigation mode.
+  for (const mode of ['scroll', 'auto', 'manual']) {
+    for (const deep of [false, true]) {
+      const {window, img, sent, flush} = makeHarness();
+      window.document.body.appendChild(img('https://cdn.test/main.jpg',800,1200));
+      const tiny = img('https://cdn.test/tiny-side.jpg',40,50);
+      window.document.body.appendChild(tiny);
+      const bg = window.document.createElement('div');
+      bg.style.backgroundImage = 'url("https://cdn.test/small-bg.jpg")';
+      window.document.body.appendChild(bg);
+      if (mode === 'auto') {
+        const next = window.document.createElement('button');
+        next.setAttribute('aria-label', 'Next page');
+        next.addEventListener('click', () => { tiny.src = 'https://cdn.test/tiny-next.jpg'; next.disabled = true; });
+        window.document.body.appendChild(next);
+      }
+      const running = window.eval('scrapeAndSend("deep.pdf", '+JSON.stringify(mode)+', {deepSearch:'+deep+'})');
+      if (mode === 'manual') {
+        await flush();await flush();
+        tiny.src = 'https://cdn.test/tiny-next.jpg';
+        await flush();await flush();
+        window.document.querySelector('.wtpdf-done').click();
+      }
+      await running;
+      const urls = sent[0]?.urls || [];
+      check(mode+': deep='+deep+' controls small image collection', urls.includes('https://cdn.test/tiny-side.jpg') === deep, urls);
+      check(mode+': deep='+deep+' controls small background collection', urls.includes('https://cdn.test/small-bg.jpg') === deep, urls);
+      if (mode !== 'scroll') check(mode+': deep='+deep+' applies to later mutations',urls.includes('https://cdn.test/tiny-next.jpg') === deep, urls);
+    }
+  }
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL NAVIGATION TESTS PASSED');
   process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error('TEST CRASH:', e); process.exit(2); });

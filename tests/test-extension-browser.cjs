@@ -90,7 +90,7 @@ const root = path.resolve(__dirname,'../extension');
         for(const mode of ['scroll','auto','manual']){
           await page.click('[data-mode="'+mode+'"]');
           const layout=await page.evaluate(()=>({height:document.body.getBoundingClientRect().height,overflow:document.documentElement.scrollWidth>innerWidth,deep:document.getElementById('scrollModeFields').getBoundingClientRect().height>0}));
-          assert.equal(layout.deep,mode==='scroll');assert.ok(layout.height<=600&&!layout.overflow,JSON.stringify(layout));
+          assert.equal(layout.deep,true);assert.ok(layout.height<=600&&!layout.overflow,JSON.stringify(layout));
           await page.click('#collectionReview');
           assert.ok(await page.$eval('#extModal',el=>!el.classList.contains('hidden')));
           await page.keyboard.press('Escape');

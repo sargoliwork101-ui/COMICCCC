@@ -177,7 +177,7 @@ check('popup reveals the box only via showError', /const showError = \(text\)/.t
   check('helper: scroll mode shows the scroll fields', !scrollStub.classList.contains('hidden'));
   window.eval('applyModeFields("auto")');
   check('helper: auto mode reveals the paged fields', !pagedStub.classList.contains('hidden'));
-  check('helper: auto mode hides the scroll fields', scrollStub.classList.contains('hidden'));
+  check('helper: auto mode preserves common deep search', !scrollStub.classList.contains('hidden'));
   window.eval('applyModeFields("manual")');
   check('helper: manual mode keeps the paged fields visible', !pagedStub.classList.contains('hidden'));
   window.eval('applyModeFields("scroll")');
@@ -513,7 +513,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
   mpw.document.querySelector('.mode-btn[data-mode="auto"]').click();
   check('switching to auto mode reveals the paged controls on any site',
     !fieldsEl.classList.contains('hidden') && mpw.document.getElementById('pageLimit'));
-  check('switching to auto mode hides the deep-search checkbox', scrollEl.classList.contains('hidden'));
+  check('switching to auto mode keeps the deep-search checkbox', !scrollEl.classList.contains('hidden'));
   mpw.document.querySelector('.mode-btn[data-mode="manual"]').click();
   check('manual mode keeps the paged controls visible', !fieldsEl.classList.contains('hidden'));
   mpw.document.querySelector('.mode-btn[data-mode="scroll"]').click();

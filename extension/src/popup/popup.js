@@ -80,9 +80,8 @@ document.getElementById('collectionReview').addEventListener('click', async () =
   const labels = {scroll:'اسکرول صفحه', auto:'ورق‌زدن خودکار', manual:'ورق‌زدن دستی'};
   const name = document.getElementById('pdfName').value.trim() || 'HASAYA STUDIO';
   const limit = Number.parseInt(document.getElementById('pageLimit').value, 10);
-  const detail = collectMode === 'scroll'
-    ? 'جستجوی عمیق: ' + (document.getElementById('deepSearch').checked ? 'روشن' : 'خاموش')
-    : 'حداکثر صفحات: ' + (limit > 0 ? limit : 'همهٔ صفحات');
+  const detail = 'جستجوی عمیق: ' + (document.getElementById('deepSearch').checked ? 'روشن' : 'خاموش') +
+    (collectMode === 'scroll' ? '' : '\nحداکثر صفحات: ' + (limit > 0 ? limit : 'همهٔ صفحات'));
   const approved = await window.extConfirm(`شروع و پیش‌نمایش تصاویر\nروش: ${labels[collectMode]}\nنام خروجی: ${name}\n${detail}\nمطمئن هستید می‌خواهید شروع کنید؟`);
   if (!approved || startBtn.disabled) return;
   approvedPopupTool = startBtn;
@@ -106,8 +105,8 @@ const statusBox = document.getElementById('statusBox');
 const statusText = document.getElementById('statusText');
 // کنترل‌های مخصوص حالت‌های ورق‌زدن (سقف صفحه و انتخابگرهای دستی)؛ مستقل از سایت، فقط بر اساس حالت انتخابی باز می‌شوند
 const pagedModeFields = document.getElementById('pagedModeFields');
-// کنترل مخصوص حالت اسکرول (تیک جستجوی عمیق)
-const scrollModeFields = document.getElementById('scrollModeFields');
+// جستجوی عمیق برای هر سه روش جمع‌آوری مشترک است.
+// The legacy scrollModeFields container now holds the common deep-search setting.
 // متن وضعیت (پیشرفت) را بدون نمایش باکس به‌روز می‌کند؛ پیشرفت واقعی روی خود صفحه با پوشش تمام‌صفحه دیده می‌شود
 const setStatus = (text) => {
   statusText.innerText = text;
@@ -265,7 +264,6 @@ let collectMode = 'scroll';
 // کادرهای هر حالت فقط در همان حالت نمایش داده می‌شوند و ربطی به سایت ندارند
 const applyModeFields = (mode) => {
   if (pagedModeFields) pagedModeFields.classList.toggle('hidden', mode === 'scroll');
-  if (scrollModeFields) scrollModeFields.classList.toggle('hidden', mode !== 'scroll');
 };
 applyModeFields(collectMode);
 const modeSeg = document.getElementById('modeSeg');
@@ -302,7 +300,7 @@ startBtn.addEventListener('click', async () => {
     pageLimit,
     nextSelector: isPagedMode ? document.getElementById('nextSelector').value.trim() : '',
     imageSelector: isPagedMode ? document.getElementById('imageSelector').value.trim() : '',
-    deepSearch: !isPagedMode && document.getElementById('deepSearch').checked === true
+    deepSearch: document.getElementById('deepSearch').checked === true
   };
 
   startBtn.disabled = true;
@@ -374,7 +372,7 @@ async function probeBookFrame() {
 
 // این تابع داخل صفحهٔ وب اجرا می‌شود
 // mode: 'scroll' (پیش‌فرض) | 'auto' (ورق‌زدن خودکار) | 'manual' (ورق‌زدن دستی کاربر)
-// opts: { pageLimit, nextSelector, imageSelector, deepSearch }
+// opts: { pageLimit, nextSelector, imageSelector, deepSearch } — deepSearch applies to every DOM mode.
 async function scrapeAndSend(pdfName, mode, opts) {
   mode = mode === 'auto' || mode === 'manual' ? mode : 'scroll';
   opts = opts || {};
@@ -632,6 +630,7 @@ async function scrapeAndSend(pdfName, mode, opts) {
   const scanImages = () => {
     const before = urls.length;
     if (imageSelector && scanImagesBySelector()) return urls.length - before;
+    if (deepSearch) return scanAllImages();
     document.querySelectorAll('img').forEach((img) => {
       const src = bestSrc(img);
       const rect = img.getBoundingClientRect();
@@ -689,7 +688,7 @@ async function scrapeAndSend(pdfName, mode, opts) {
     return urls.length - before;
   };
 
-  // جستجوی عمیق (اختیاری، فقط حالت اسکرول): هیچ فیلتر اندازه/آدرس/نمودی ندارد؛
+  // جستجوی عمیق (اختیاری، در هر سه روش): هیچ فیلتر اندازه/آدرس/نمودی ندارد؛
   // هر img و هر background-image صفحه جمع می‌شود و فقط مخزن مشترک (تکراری/بودجه data-URI) تصمیم می‌گیرد.
   const scanAllImages = () => {
     const before = urls.length;

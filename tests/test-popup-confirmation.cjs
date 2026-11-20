@@ -42,10 +42,10 @@ const tick = () => new Promise(resolve => setTimeout(resolve, 10));
       for (const mode of ['auto','manual']) {
         d.querySelector('[data-mode='+mode+']').click();
         d.getElementById('pageLimit').value = '12';
-        assert.ok(d.getElementById('scrollModeFields').classList.contains('hidden'));
+        assert.ok(!d.getElementById('scrollModeFields').classList.contains('hidden'));
         assert.ok(!d.getElementById('pagedModeFields').classList.contains('hidden'));
         d.getElementById('collectionReview').click();
-        assert.ok(!d.getElementById('extModalMsg').textContent.includes('جستجوی عمیق'));
+        assert.ok(d.getElementById('extModalMsg').textContent.includes('جستجوی عمیق: روشن'));
         assert.ok(d.getElementById('extModalMsg').textContent.includes('حداکثر صفحات: 12'));
         cancel.click();await tick();
       }
@@ -73,6 +73,31 @@ const tick = () => new Promise(resolve => setTimeout(resolve, 10));
     assert.ok(effects>0,id+' executes after approval');
     const count=effects;ok.click();await tick();assert.equal(effects,count,'no stale confirmation handlers');
     dom.window.close();
+  }
+  // Verify that the popup forwards the common option to the real injected function.
+  for (const mode of ['scroll','auto','manual']) {
+    for (const deep of [false,true]) {
+      const dom = new JSDOM(fs.readFileSync('extension/src/popup/popup.html','utf8'), {url:'https://extension.test',runScripts:'outside-only'});
+      const w=dom.window,d=w.document,calls=[];
+      w.close=()=>{};
+      w.chrome={storage:{local:{get:async()=>({})}},tabs:{query:async()=>[{id:1}]},scripting:{executeScript:async opts=>{
+        calls.push(opts);
+        return opts.func.name==='probeBookFrame' ? [{frameId:0,result:{isReader:false}}] : [{result:{count:1}}];
+      }}};
+      vm.runInContext(fs.readFileSync('extension/src/popup/popup.js','utf8'),dom.getInternalVMContext());
+      d.getElementById('startBtn').click();
+      d.querySelector('[data-mode='+mode+']').click();
+      d.getElementById('deepSearch').checked=deep;
+      d.getElementById('collectionReview').click();
+      assert.equal(calls.length,0);
+      assert.ok(d.getElementById('extModalMsg').textContent.includes('جستجوی عمیق: '+(deep?'روشن':'خاموش')));
+      d.getElementById('extModalOk').click();await tick();
+      const injected=calls.find(call=>call.func.name==='scrapeAndSend');
+      assert.ok(injected,mode);
+      assert.equal(injected.args[1],mode);
+      assert.equal(injected.args[2].deepSearch,deep,mode+' forwards deep search');
+      dom.window.close();
+    }
   }
   console.log('PASS: three popup tools wait for approval; cancel/Escape/backdrop/repeated clicks are safe; keyboard focus and labels work');
 })().catch(error=>{console.error(error);process.exitCode=1;});
