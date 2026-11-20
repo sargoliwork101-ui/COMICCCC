@@ -139,7 +139,29 @@ const root = path.resolve(__dirname,'../extension');
           assert.equal(await page.$eval('#outputSettings',el=>el.open),false);
           await new Promise(r=>setTimeout(r,100));
         }
+
+        // A queued close event from the previous opening must not close a new one.
+        await page.evaluate(()=>{
+          const settings=document.getElementById('outputSettings');
+          const dialog=document.getElementById('outputDialog');
+          settings.open=true;dialog.showModal();dialog.close();dialog.showModal();
+        });
+        await new Promise(r=>setTimeout(r,150));
+        assert.equal(await page.$eval('#outputDialog',el=>el.open),true,'stale close must not dismiss reopened output');
+        await page.keyboard.press('Escape');
+        await new Promise(r=>setTimeout(r,100));
         await page.addScriptTag({url:base+'/src/viewer/result-dialog.js'});
+        await page.evaluate(()=>{
+          const settings=document.getElementById('outputSettings');
+          const output=document.getElementById('outputDialog');
+          settings.open=true;output.showModal();output.close();settings.open=false;
+          document.getElementById('result').classList.remove('hidden');
+          window.openResultDialog();
+        });
+        await new Promise(r=>setTimeout(r,150));
+        assert.equal(await page.evaluate(()=>document.activeElement.id),'closeResultDialog','queued output close must preserve report focus');
+        await page.click('#closeResultDialog');
+
         assert.ok(await page.$('.context-guide-link[href="../help/help.html#organize"] svg'));
         assert.equal(await page.$('.menu-guide-link'),null);
         for(const width of [1280,420]){

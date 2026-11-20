@@ -13,7 +13,12 @@
     if(settings.open){sync();if(!dialog.open)dialog.showModal();}
     else if(dialog.open)dialog.close();
   });
-  dialog.addEventListener('close',()=>{settings.open=false;settings.querySelector('summary').focus();});
+  dialog.addEventListener('close',()=>{
+    // Native close events are queued: ignore one belonging to an earlier opening.
+    if(dialog.open)return;
+    settings.open=false;
+    if(!document.querySelector('dialog[open]'))settings.querySelector('summary').focus();
+  });
   window.addEventListener('keydown',e=>{
     if(dialog.open&&e.key==='Escape'){
       e.preventDefault();e.stopImmediatePropagation();settings.open=false;dialog.close();

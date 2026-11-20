@@ -11,7 +11,7 @@
   };
   const close = () => {
     dialog.close();
-    if (previousFocus?.isConnected && !previousFocus.disabled) previousFocus.focus();
+    if (previousFocus?.isConnected && !previousFocus.disabled && previousFocus.getClientRects().length) previousFocus.focus();
     else document.querySelector('#outputSettings>summary').focus();
   };
   document.getElementById('closeResultDialog').onclick = close;
