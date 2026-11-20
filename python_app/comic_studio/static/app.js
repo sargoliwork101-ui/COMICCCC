@@ -19,6 +19,7 @@ let projectLoadRevision = 0;
 const projectLoadTasks = new Set();
 let toastTimer = null;
 let outlineFrame = null;
+let gridImageObserver = null;
 let activityAfter = 0;
 let activityEntries = [];
 let activityPollTimer = null;
@@ -716,11 +717,11 @@ function showReportDialog(title, lines) {
 }
 function releaseImgElement(img) {
   if (!img) return;
+  gridImageObserver?.unobserve?.(img);
   img.onload = null;
   img.onclick = null;
   if (img.dataset) delete img.dataset.renderedSrc;
   img.removeAttribute('src');
-  img.src = '';
 }
 function releaseWatermarkPreviewResources() {
   if (wmPreviewBitmap && wmPreviewBitmap !== state.editorBitmap) {
@@ -1304,6 +1305,33 @@ function restoreEditorReturnScroll(saved) {
 }
 
 // ---------- Grid, group manager, and drag/drop ----------
+function observeGridImages(images) {
+  gridImageObserver?.disconnect();
+  gridImageObserver = null;
+  if (typeof IntersectionObserver !== 'function') {
+    images.forEach((image) => { image.src = image.dataset.renderedSrc; });
+    return;
+  }
+  // Native loading="lazy" only defers loading; it does not unload pages after
+  // scrolling past them. Retain original-resolution pixels only near the view.
+  // The fixed .tw aspect-ratio preserves layout while the bitmap is detached.
+  const observer = new IntersectionObserver((entries) => {
+    if (gridImageObserver !== observer) return; // ignore callbacks from an old project/grid
+    for (const entry of entries) {
+      const image = entry.target;
+      if (!image.isConnected || !image.dataset.renderedSrc) continue;
+      if (entry.isIntersecting) {
+        if (image.getAttribute('src') !== image.dataset.renderedSrc) image.src = image.dataset.renderedSrc;
+      } else {
+        // Keep metadata and click handlers, not the full-resolution image.
+        // Do not assign src="": that can request the document itself.
+        image.removeAttribute('src');
+      }
+    }
+  }, { rootMargin: '160px', threshold: 0 });
+  gridImageObserver = observer;
+  images.forEach((image) => observer.observe(image));
+}
 function renderGrid() {
   const grid = $('grid'); if (!state.project) return;
   const savedWinScroll = getWindowScrollPosition();
@@ -1344,7 +1372,6 @@ function renderGrid() {
       image.alt = item.name;
       image.draggable = false;
       image.dataset.renderedSrc = nextSrc;
-      image.src = nextSrc;
     }
     image.onload = scheduleOutlines;
     image.onclick = (event) => {
@@ -1444,6 +1471,7 @@ function renderGrid() {
     frag.appendChild(card);
   });
   grid.replaceChildren(frag);
+  observeGridImages([...grid.querySelectorAll('.tw > img')]);
   prevImages.forEach((staleImg) => releaseImgElement(staleImg));
   prevImages.clear();
   renderGroupPanel(); updateSummary(); scheduleOutlines();

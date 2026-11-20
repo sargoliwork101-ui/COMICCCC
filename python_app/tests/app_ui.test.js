@@ -2177,13 +2177,65 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.56 processes 32 OCR pages in order without mid-batch engine recycling, places each page before the next, reuses grid images, and clears preview bitmaps',
+      'v4.57 processes 32 OCR pages in order without mid-batch engine recycling, places each page before the next, reuses grid images, and clears preview bitmaps',
       v399PerPageCheck.img1Reused === true
         && v399PerPageCheck.sequence === Array.from({length: 32}, (_, i) => `ocr:pg-${i + 1}:keep=${i < 31} -> placed:pg-${i + 1}`).join(' -> ')
         && v399PerPageCheck.hadPreviewSrc === true
         && v399PerPageCheck.clearedPreviewSrc === true,
       JSON.stringify(v399PerPageCheck),
     );
+  }
+
+  // v4.57: offscreen image eviction must preserve metadata, click handlers,
+  // reloads, and ignore observer callbacks queued by an older grid/project.
+  {
+    const result = await vm.runInContext(`
+      (() => {
+        const original = window.IntersectionObserver;
+        const observers = [];
+        const host = document.createElement('div');
+        document.body.append(host);
+        try {
+          window.IntersectionObserver = class {
+            constructor(callback) { this.callback = callback; observers.push(this); }
+            observe() {}
+            disconnect() { this.disconnected = true; }
+          };
+          const images = Array.from({length: 36}, (_, i) => {
+            const image = document.createElement('img');
+            image.dataset.renderedSrc = '/page-' + i + '.png?v=2';
+            image.onclick = () => i;
+            host.append(image);
+            return image;
+          });
+          const emit = (observer, items, visible) => observer.callback(items.map(target => ({target, isIntersecting: visible})));
+          observeGridImages(images);
+          const first = observers[0];
+          const initiallyEmpty = images.every(image => !image.hasAttribute('src'));
+          emit(first, images.slice(0, 4), true);
+          emit(first, images.slice(0, 4), false);
+          emit(first, images.slice(32), true);
+          const bounded = images.filter(image => image.hasAttribute('src')).length === 4;
+          const preserved = images[0].dataset.renderedSrc.endsWith('?v=2') && images[0].onclick() === 0;
+          emit(first, [images[0]], true);
+          const reloaded = images[0].getAttribute('src') === '/page-0.png?v=2';
+          observeGridImages(images);
+          emit(first, [images[0]], false);
+          const ignoredOld = images[0].hasAttribute('src') && first.disconnected;
+          const current = observers[1];
+          images[0].remove();
+          images[0].removeAttribute('src');
+          emit(current, [images[0]], true);
+          const ignoredDetached = !images[0].hasAttribute('src');
+          return initiallyEmpty && bounded && preserved && reloaded && ignoredOld && ignoredDetached;
+        } finally {
+          host.remove();
+          window.IntersectionObserver = original;
+          renderGrid();
+        }
+      })()
+    `, context);
+    check('v4.57 bounds grid pixel ownership to visible pages, preserves reload/click metadata, and ignores stale/detached callbacks', result);
   }
 
   // v4.00: Version 4.00 + Optional Custom Storage & Downloads Directory Settings UI (#storageBtn, #modelsStorageBtn, #storageDialog)
@@ -2273,7 +2325,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas426: verText.includes('۴.۵۶'),
+            verHas426: verText.includes('۴.۵۷'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2292,7 +2344,7 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.30 displays version 4.56 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      'v4.00/v4.30 displays version 4.57 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
       v400StorageCheck.verHas426 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
@@ -4514,7 +4566,7 @@ function check(name, condition) {
           && helpModes.features.some((f) => f.includes('دانلود خودکار فایل زبان فارسی') && f.includes('fas'))
         );
         const verText = document.querySelector('.brand .ver')?.textContent || '';
-        return { helpHasV427Table, helpHasV428AutoLang, verHas428: verText.includes('۴.۵۶') };
+        return { helpHasV427Table, helpHasV428AutoLang, verHas428: verText.includes('۴.۵۷') };
       })()
     `, context);
     check(
@@ -4631,7 +4683,7 @@ function check(name, condition) {
       const detail = document.getElementById('serverAlertDetail').textContent || '';
       window.fetch = async (url, opts = {}) => {
         const parsed = new URL(url, 'http://127.0.0.1:8765');
-        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.56' });
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.57' });
         return origFetch(url, opts);
       };
       document.getElementById('serverAlertRetry').click();

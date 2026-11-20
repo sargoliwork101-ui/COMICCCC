@@ -3938,20 +3938,16 @@ DOCUMENT_FALLBACK_SCALE = 2
 
 def _to_white_backed_rgb(image: Image.Image) -> Image.Image:
     """Flatten transparent pixels onto white paper so dark ink never turns black-on-black."""
-    oriented = ImageOps.exif_transpose(image)
-    if oriented.mode in {"RGBA", "LA"} or (oriented.mode == "P" and "transparency" in oriented.info):
-        rgba = oriented.convert("RGBA")
-        white = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
-        composited = Image.alpha_composite(white, rgba).convert("RGB")
-        rgba.close()
-        white.close()
+    with contextlib.ExitStack() as owned:
+        oriented = ImageOps.exif_transpose(image)
         if oriented is not image:
-            oriented.close()
-        return composited
-    rgb = oriented.convert("RGB")
-    if oriented is not image and oriented is not rgb:
-        oriented.close()
-    return rgb
+            owned.callback(oriented.close)
+        if oriented.mode in {"RGBA", "LA"} or (oriented.mode == "P" and "transparency" in oriented.info):
+            rgba = owned.enter_context(oriented.convert("RGBA"))
+            white = owned.enter_context(Image.new("RGBA", rgba.size, (255, 255, 255, 255)))
+            composite = owned.enter_context(Image.alpha_composite(white, rgba))
+            return composite.convert("RGB")
+        return oriented.convert("RGB")
 
 
 PERSIAN_PREPROCESS_BORDER_PAD = 18
@@ -4546,17 +4542,23 @@ def preprocess(
     page_mode: str = "comic",
 ) -> tuple[Image.Image, float]:
     image = _to_white_backed_rgb(image)
-    if contrast:
-        # In document/article mode, keep dark ink strokes unclipped (cutoff_low=0) while brightening off-white paper.
-        cutoff = (0, 1) if page_mode == "document" else 1
-        image = ImageOps.autocontrast(image, cutoff=cutoff)
-    scale = 1.0
-    if precise and image.width * image.height <= PRECISE_UPSCALE_MAX_PIXELS:
-        scale = 2.0
-        resized = image.resize((image.width * 2, image.height * 2), Image.Resampling.LANCZOS)
+    try:
+        if contrast:
+            # Close the replaced RGB copy before allocating the upscaled page.
+            cutoff = (0, 1) if page_mode == "document" else 1
+            adjusted = ImageOps.autocontrast(image, cutoff=cutoff)
+            image.close()
+            image = adjusted
+        scale = 1.0
+        if precise and image.width * image.height <= PRECISE_UPSCALE_MAX_PIXELS:
+            scale = 2.0
+            resized = image.resize((image.width * 2, image.height * 2), Image.Resampling.LANCZOS)
+            image.close()
+            image = resized
+        return image, scale
+    except BaseException:
         image.close()
-        image = resized
-    return image, scale
+        raise
 
 
 def _blocks_from_lines(
@@ -4795,15 +4797,25 @@ def _extra_preprocess_image(image: Image.Image) -> Image.Image:
     """Isolate very bright letter fills, then make them dark on white."""
     import cv2
 
-    rgb = np.asarray(ImageOps.exif_transpose(image).convert("RGB"))
+    with contextlib.ExitStack() as owned:
+        oriented = ImageOps.exif_transpose(image)
+        if oriented is not image:
+            owned.callback(oriented.close)
+        base = owned.enter_context(oriented.convert("RGB"))
+        rgb = np.asarray(base)
     enlarged = cv2.resize(
         rgb, None, fx=EXTRA_PREPROCESS_SCALE, fy=EXTRA_PREPROCESS_SCALE,
         interpolation=cv2.INTER_CUBIC,
     )
     gray = cv2.cvtColor(enlarged, cv2.COLOR_RGB2GRAY)
-    _, bright = cv2.threshold(gray, EXTRA_PREPROCESS_THRESHOLD, 255, cv2.THRESH_BINARY)
-    inverted = cv2.bitwise_not(bright)
-    return Image.fromarray(inverted, mode="L").convert("RGB")
+    # These RGB arrays are no longer needed. Previously both survived until the
+    # final 3x RGB output allocation, along with three separate grayscale masks.
+    del enlarged, rgb
+    # Reuse the grayscale buffer, preserving the exact cubic/threshold pixels.
+    cv2.threshold(gray, EXTRA_PREPROCESS_THRESHOLD, 255, cv2.THRESH_BINARY, dst=gray)
+    cv2.bitwise_not(gray, dst=gray)
+    with Image.fromarray(gray) as inverted:
+        return inverted.convert("RGB")
 
 
 def _bubble_preprocess_regions(image: Image.Image) -> list[tuple[Image.Image, int, int]]:

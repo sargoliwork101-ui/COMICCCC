@@ -123,3 +123,91 @@ def test_32_paged_ocr_requests_reuse_session_save_each_page_and_unload_at_end(tm
             assert active_engines[-1].is_loaded_in_ram is (index < 32)
         assert client.get("/api/health").status_code == 200
         assert len(active_engines) == 32
+
+
+@pytest.mark.parametrize("mode", ["RGB", "RGBA", "L"])
+def test_bright_text_fallback_preserves_pixels_and_releases_rgb_arrays_before_output(monkeypatch, mode):
+    import cv2
+    import numpy as np
+    from PIL import ImageOps
+    import comic_studio.ocr as ocr
+
+    rng = np.random.default_rng(27)
+    source = Image.fromarray(rng.integers(0, 256, (73, 121, 3), dtype=np.uint8)).convert(mode)
+    # Reference: the exact previous cubic -> grayscale -> threshold -> invert path.
+    rgb = np.asarray(ImageOps.exif_transpose(source).convert("RGB"))
+    enlarged = cv2.resize(rgb, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+    gray = cv2.cvtColor(enlarged, cv2.COLOR_RGB2GRAY)
+    _, bright = cv2.threshold(gray, ocr.EXTRA_PREPROCESS_THRESHOLD, 255, cv2.THRESH_BINARY)
+    expected = cv2.cvtColor(cv2.bitwise_not(bright), cv2.COLOR_GRAY2RGB)
+    del rgb, enlarged, gray, bright
+
+    enlarged_refs = []
+    original_resize = cv2.resize
+    original_fromarray = Image.fromarray
+
+    def resize(*args, **kwargs):
+        result = original_resize(*args, **kwargs)
+        enlarged_refs.append(weakref.ref(result))
+        return result
+
+    def fromarray(*args, **kwargs):
+        # A live 3x RGB intermediate here used to overlap with the final RGB
+        # allocation and three full-size masks. It is no longer needed.
+        assert enlarged_refs and all(ref() is None for ref in enlarged_refs)
+        return original_fromarray(*args, **kwargs)
+
+    monkeypatch.setattr(cv2, "resize", resize)
+    monkeypatch.setattr(Image, "fromarray", fromarray)
+    with ocr._extra_preprocess_image(source) as result:
+        assert result.size == (363, 219)
+        assert np.array_equal(np.asarray(result), expected)
+    source.getpixel((0, 0))  # the caller still owns its input
+    source.close()
+
+
+@pytest.mark.parametrize("failure", [None, "contrast", "resize"])
+def test_preprocess_closes_replaced_images_even_on_failure(monkeypatch, failure):
+    from PIL import ImageOps
+    import comic_studio.ocr as ocr
+
+    with Image.new("RGB", (50, 30), "white") as source:
+        base = source.copy()
+        contrast_copy = source.copy()
+        monkeypatch.setattr(ocr, "_to_white_backed_rgb", lambda image: base)
+
+        def contrast(image, **kwargs):
+            assert image is base
+            if failure == "contrast":
+                raise RuntimeError("contrast failed")
+            return contrast_copy
+
+        original_resize = Image.Image.resize
+
+        def resize(image, *args, **kwargs):
+            if image is contrast_copy:
+                with pytest.raises(ValueError, match="closed"):
+                    base.getpixel((0, 0))
+                if failure == "resize":
+                    raise RuntimeError("resize failed")
+            return original_resize(image, *args, **kwargs)
+
+        monkeypatch.setattr(ImageOps, "autocontrast", contrast)
+        monkeypatch.setattr(Image.Image, "resize", resize)
+        try:
+            if failure:
+                with pytest.raises(RuntimeError, match="failed"):
+                    ocr.preprocess(source, True, True)
+            else:
+                result, scale = ocr.preprocess(source, True, True)
+                with result:
+                    assert result.size == (100, 60) and scale == 2
+            with pytest.raises(ValueError, match="closed"):
+                base.getpixel((0, 0))
+            if failure != "contrast":
+                with pytest.raises(ValueError, match="closed"):
+                    contrast_copy.getpixel((0, 0))
+            assert source.getpixel((0, 0)) == (255, 255, 255)
+        finally:
+            base.close()
+            contrast_copy.close()
