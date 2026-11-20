@@ -298,16 +298,18 @@ function check(name, cond, extra) {
     check('cancel restores selection snapshot', JSON.stringify(h.ev('items.map(i=>i.selected)')) === JSON.stringify(beforeCancel));
   }
 
-  // ---------- 6. manual pdfOrder sorting ----------
+  // ---------- 6. One on-image order badge, no duplicate order input ----------
   {
     const h = makeHarness();
     for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
     const grid = h.$('grid');
-    const input0 = grid.children[0].querySelector('.page-order');
-    input0.value = '9';
-    input0.dispatchEvent(new h.window.Event('change', { bubbles: true }));
-    const order = [...grid.children].map((n) => n.querySelector('.page-order').value);
-    check('manual order moves card to end', order[order.length - 1] === '9' && order[0] === '2', order);
+    check('cards have no redundant order controls', !grid.querySelector('.page-order, .order-control'));
+    const first = grid.firstElementChild;
+    grid.appendChild(first);
+    h.ev('updatePdfOrderFromGrid()');
+    const order = [...grid.children].map(n => n.querySelector('.idx').textContent);
+    check('on-image badges follow current grid order', JSON.stringify(order) === JSON.stringify(order.map((_,i)=>String(i+1))), order);
+    check('PDF output order follows reordered cards', h.ev('items.find(it=>it.el===document.getElementById("grid").lastElementChild).pdfOrder') === grid.children.length);
   }
 
   // ---------- 7. translation cancel ----------

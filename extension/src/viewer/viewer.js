@@ -371,7 +371,7 @@ function makeCard(it) {
   el.draggable = true;
   el.title = 'برای جابه‌جایی بکشید و روی لبهٔ کارت رها کنید؛ برای گروه‌بندی، روی وسط کارت دیگر رها کنید. داخل یک گروه، رهاکردن روی لبهٔ کارت هم‌گروه فقط ترتیب داخلی گروه را عوض می‌کند؛ برای خروج از گروه، کارت را در فضای خالی شبکه رها کنید';
   el.innerHTML = `<div class="tw"><canvas width="240" height="320"></canvas><div class="spin">در حال دریافت...</div>
-    <span class="idx">${it.i + 1}${it.dupNo ? ` · کپی ${it.dupNo}` : ''}</span><span class="tick">${ICON_CHECK}</span>
+    <span class="idx" title="ترتیب فعلی تصویر">${it.pdfOrder || it.i + 1}</span><span class="tick">${ICON_CHECK}</span>
     <button class="zoom" title="مشاهدهٔ بزرگ">${ICON_ZOOM}</button>
     <button class="crop" title="کراپ دستی">${ICON_CROP}</button>
     <button class="edit" title="ویرایش ترجمه">${ICON_EDIT}</button>
@@ -379,16 +379,7 @@ function makeCard(it) {
     <button class="delete" title="حذف این تصویر" aria-label="حذف تصویر">${ICON_DELETE}</button>
     <span class="fa-badge">ترجمه شد</span><span class="page-group-badge hidden"></span></div>
     <button class="retry" type="button" title="تلاش مجدد برای بارگیری این تصویر" aria-label="تلاش مجدد برای بارگیری">${ICON_RETRY}<span>تلاش مجدد</span></button>
-    <div class="meta">…</div>
-    <div class="order-control"><span>ترتیب در PDF</span><input class="page-order" type="number" min="1" step="1" value="${it.pdfOrder || it.i + 1}" aria-label="ترتیب در PDF"></div>`;
-  const orderInput = el.querySelector('.page-order');
-  orderInput.addEventListener('click', (ev) => ev.stopPropagation());
-  orderInput.addEventListener('change', () => {
-    const value = Number.parseInt(orderInput.value, 10);
-    it.pdfOrder = Number.isFinite(value) && value > 0 ? value : (it.pdfOrder || it.i + 1);
-    orderInput.value = String(it.pdfOrder);
-    sortGridByPdfOrder();
-  });
+    <div class="meta">…</div>`;
   el.addEventListener('dragstart', (ev) => {
     if (ev.target.closest('input, button, select, textarea')) { ev.preventDefault(); return; }
     draggedItem = it;
@@ -423,7 +414,6 @@ function makeCard(it) {
   });
   el.addEventListener('click', (ev) => {
     if (Date.now() < suppressCardClickUntil) { ev.preventDefault(); return; }
-    if (ev.target.closest('.page-order')) return;
     if (ev.target.closest('.zoom')) { openLightbox(it); return; }
     if (ev.target.closest('.crop')) { openCropper(it); return; }
     if (ev.target.closest('.edit')) { if (typeof openEditor === 'function') openEditor(it); return; }
@@ -938,21 +928,15 @@ async function retryItem(it) {
 }
 
 // ---------- مرتب‌سازی کارت‌ها / ترتیب خروجی PDF ----------
-function sortGridByPdfOrder() {
-  const grid = $('grid');
-  items.slice().sort((a, b) => (a.pdfOrder || a.i + 1) - (b.pdfOrder || b.i + 1) || a.uid - b.uid)
-    .forEach((it) => grid.appendChild(it.el));
-}
-
 function updatePdfOrderFromGrid() {
   Array.from($('grid').children).forEach((el, index) => {
     const it = items.find((item) => item.el === el);
     if (!it) return;
     it.pdfOrder = index + 1;
-    const input = el.querySelector('.page-order');
-    if (input) input.value = String(it.pdfOrder);
+    const input = el.querySelector('.idx');
+    if (input) input.textContent = String(it.pdfOrder);
   });
-  // جابه‌جایی درگ/دراپ یا مرتب‌سازی دستی، محل کادر گروه‌ها را عوض می‌کند
+  // جابه‌جایی درگ/دراپ، محل کادر گروه‌ها را عوض می‌کند
   drawGroupOutlines();
 }
 
@@ -1228,12 +1212,12 @@ function previewOrderFor(movingEls, anchorNode) {
   const anchorIndex = anchorNode ? tentative.indexOf(anchorNode) : tentative.length;
   tentative.splice(anchorIndex, 0, ...movingEls);
   tentative.forEach((el, index) => {
-    const input = el.querySelector('.page-order');
+    const input = el.querySelector('.idx');
     if (!input) return;
     const next = String(index + 1);
-    // فقط ورودی‌هایی که شماره‌شان واقعاً عوض شده به‌روز و فلش می‌شوند (جلوگیری از reflow و انیمیشن بی‌مورد در هر dragover)
-    if (input.value === next) return;
-    input.value = next;
+    // فقط نشان‌هایی که شماره‌شان واقعاً عوض شده به‌روز و فلش می‌شوند (جلوگیری از reflow و انیمیشن بی‌مورد در هر dragover)
+    if (input.textContent === next) return;
+    input.textContent = next;
     input.classList.remove('order-flash');
     void input.offsetWidth;
     input.classList.add('order-flash');
@@ -1247,11 +1231,11 @@ function previewDragOrder(dragged, targetEl, before) {
 // بازگرداندن شماره‌ها به ترتیب واقعی فعلی شبکه (وقتی درگ لغو می‌شود یا روی نوار گروهی می‌رویم)
 function restoreDragOrderPreview() {
   Array.from($('grid').children).forEach((el, index) => {
-    const input = el.querySelector('.page-order');
+    const input = el.querySelector('.idx');
     if (!input) return;
     if (input.classList.contains('order-flash')) input.classList.remove('order-flash');
     const next = String(index + 1);
-    if (input.value !== next) input.value = next;
+    if (input.textContent !== next) input.textContent = next;
   });
 }
 
@@ -1293,11 +1277,11 @@ function previewInternalOrder(dragged, targetEl, before) {
     tentative.push(el);
   }
   tentative.forEach((el, index) => {
-    const input = el.querySelector('.page-order');
+    const input = el.querySelector('.idx');
     if (!input) return;
     const next = String(index + 1);
-    if (input.value === next) return;
-    input.value = next;
+    if (input.textContent === next) return;
+    input.textContent = next;
     input.classList.remove('order-flash');
     void input.offsetWidth;
     input.classList.add('order-flash');
