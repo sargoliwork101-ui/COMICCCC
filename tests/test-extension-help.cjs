@@ -25,3 +25,8 @@ assert.ok(viewer.querySelector('.top-menu-ocr #btnTranslate'));
 assert.ok(viewer.querySelector('.profile-actions #saveProfileBtn svg'));
 assert.ok(viewer.querySelector('.profile-actions #restoreProfileBtn svg'));
 console.log('PASS: extension guide sections/anchors are valid; menu keeps OCR, translation and profile actions');
+
+assert.equal(viewer.querySelectorAll('.top-menu-panel .context-guide-link').length,1);
+assert.equal(viewer.querySelector('.context-guide-link').getAttribute('href'),'../help/help.html#organize');
+assert.equal(viewer.querySelector('.context-guide-link').textContent,'');
+assert.equal(viewer.querySelector('.menu-guide-link'),null);

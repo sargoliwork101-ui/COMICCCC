@@ -90,7 +90,8 @@ const root = path.resolve(__dirname,'../extension');
         assert.ok(menu.equal&&menu.aligned&&menu.solid&&!menu.overflow,JSON.stringify(menu));
         await page.evaluate(()=>{document.getElementById('topMenu').open=false;});
         await page.addScriptTag({url:base+'/src/viewer/result-dialog.js'});
-        assert.ok(await page.$('.menu-guide-link[aria-label="راهنمای افزونه"] svg'));
+        assert.ok(await page.$('.context-guide-link[href="../help/help.html#organize"] svg'));
+        assert.equal(await page.$('.menu-guide-link'),null);
         for(const width of [1280,420]){
           await page.setViewport({width,height:900});
           await page.evaluate(()=>{
