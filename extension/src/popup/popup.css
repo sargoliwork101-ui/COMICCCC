@@ -50,3 +50,12 @@ body { width: 360px; padding: 18px; display: flex; flex-direction: column; gap: 
 }
 .check-field span { font: 700 13px/1.5 'Vazirmatn', sans-serif; color: var(--text); }
 #scrollModeFields .mode-hint { margin-top: 6px; }
+
+/* Icon tools use the same local theme tokens as the rest of the extension. */
+.popup-tool-row{display:flex;align-items:center;justify-content:center;gap:10px;padding:6px 0 2px}
+body .popup-tool-row .popup-tool{position:relative;display:inline-flex;align-items:center;justify-content:center;flex:0 0 44px;width:44px;height:40px;min-height:40px;padding:10px;margin:0;border:1px solid var(--line2);border-radius:10px;background:var(--surface2);color:var(--text);box-shadow:none;overflow:visible}
+body .popup-tool-row .popup-tool>svg{width:18px;height:18px;stroke-width:1.8}
+body .popup-tool-row .popup-tool:hover:not(:disabled){background:color-mix(in srgb,var(--a1) 12%,var(--surface2));border-color:var(--a1);color:var(--a1)}
+body .popup-tool-row .popup-tool:disabled{opacity:.45;cursor:not-allowed}
+.popup-tool-tip{position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);z-index:10;width:max-content;max-width:230px;padding:5px 9px;border-radius:7px;background:var(--surface3);border:1px solid var(--line2);color:var(--text);font:11px/1.8 Vazirmatn,Tahoma,sans-serif;pointer-events:none;opacity:0;visibility:hidden;box-shadow:var(--shadow)}
+.popup-tool:is(:hover,:focus-visible) .popup-tool-tip{opacity:1;visibility:visible}

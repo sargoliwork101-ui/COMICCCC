@@ -1,3 +1,63 @@
+// A shared, keyboard-accessible confirmation for popup tools and updates.
+let popupConfirmationPending = false;
+window.extConfirm = (message, options = {}) => {
+  if (popupConfirmationPending) return Promise.resolve(false);
+  popupConfirmationPending = true;
+  const root = document.getElementById('extModal');
+  const ok = document.getElementById('extModalOk');
+  const cancel = document.getElementById('extModalCancel');
+  const previous = document.activeElement;
+  document.getElementById('extModalTitle').textContent = options.title || 'تأیید انتخاب ابزار';
+  document.getElementById('extModalMsg').textContent = message;
+  ok.textContent = options.okText || 'بله، ادامه بده';
+  cancel.textContent = options.cancelText || 'انصراف';
+  cancel.classList.remove('hidden');
+  root.classList.remove('hidden');
+  cancel.focus();
+  return new Promise(resolve => {
+    const finish = approved => {
+      root.classList.add('hidden');
+      ok.removeEventListener('click', approve);
+      cancel.removeEventListener('click', reject);
+      root.removeEventListener('click', backdrop);
+      document.removeEventListener('keydown', keydown, true);
+      popupConfirmationPending = false;
+      previous?.focus();
+      resolve(approved);
+    };
+    const approve = () => finish(true);
+    const reject = () => finish(false);
+    const backdrop = event => { if (event.target === root) reject(); };
+    const keydown = event => {
+      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); reject(); }
+      if (event.key === 'Tab') {
+        event.preventDefault();
+        (document.activeElement === cancel ? ok : cancel).focus();
+      }
+    };
+    ok.addEventListener('click', approve);
+    cancel.addEventListener('click', reject);
+    root.addEventListener('click', backdrop);
+    document.addEventListener('keydown', keydown, true);
+  });
+};
+
+// Intercept only the three tools; existing execution handlers run after approval.
+let approvedPopupTool = null;
+for (const [id, label] of [['startBtn', 'شروع و پیش‌نمایش تصاویر'], ['pdfConvertBtn', 'تبدیل PDF به تصویر'], ['translatePageBtn', 'ترجمهٔ همین صفحه']]) {
+  const button = document.getElementById(id);
+  button?.addEventListener('click', async event => {
+    if (approvedPopupTool === button) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (button.disabled || popupConfirmationPending) return;
+    const approved = await window.extConfirm(`شما «${label}» را انتخاب کرده‌اید. مطمئن هستید می‌خواهید ادامه دهید؟`);
+    if (!approved || button.disabled) return;
+    approvedPopupTool = button;
+    try { button.click(); } finally { approvedPopupTool = null; }
+  }, true);
+}
+
 const startBtn = document.getElementById('startBtn');
 const pdfConvertBtn = document.getElementById('pdfConvertBtn');
 if (pdfConvertBtn) {

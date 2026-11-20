@@ -216,6 +216,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
   vm.runInContext(popupCode, c, { filename: 'popup.js' });
   if (clickStart) {
     w.document.getElementById('startBtn').click();
+    w.document.getElementById('extModalOk').click();
     await new Promise((r) => setTimeout(r, 10));
   }
   return {
@@ -240,6 +241,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     };
     vm.runInContext(popupCode, pdfDom.getInternalVMContext(), { filename: 'popup.js' });
     pdfWindow.document.getElementById('pdfConvertBtn').click();
+    pdfWindow.document.getElementById('extModalOk').click();
     await new Promise((resolve) => setTimeout(resolve, 10));
     check('PDF shortcut opens a dedicated empty preview workspace',
       openedUrl === 'chrome-extension://ext/src/viewer/viewer.html?pdfWorkspace=1', openedUrl);
@@ -302,6 +304,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
       !translateWindow.document.getElementById('pageTranslationConsent'));
     check('translation is available directly without any consent checkbox', translateButton.disabled === false);
     translateButton.click();
+    translateWindow.document.getElementById('extModalOk').click();
     await new Promise((resolve) => setTimeout(resolve, 20));
     check('page translation launches a direct copy request with the selected engine, not a consent tab',
       calls.launched.length === 1 && calls.launched[0].type === 'WTPDF_PAGE_TRANSLATE_CREATE_COPY' &&
@@ -343,6 +346,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     check('legacy top-level Gemini key keeps the saved Gemini engine selectable in the popup',
       legacyButton.disabled === false);
     legacyButton.click();
+    legacyWindow.document.getElementById('extModalOk').click();
     await new Promise((resolve) => setTimeout(resolve, 20));
     check('popup launches the copy request with the legacy-resolved Gemini engine',
       calls.launched.length === 1 && calls.launched[0].engine === 'ai:gemini', calls);
@@ -365,6 +369,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     vm.runInContext(popupCode, sameTabDom.getInternalVMContext(), { filename: 'popup.js' });
     await new Promise((resolve) => setTimeout(resolve, 10));
     sameTabWindow.document.getElementById('translatePageBtn').click();
+    sameTabWindow.document.getElementById('extModalOk').click();
     await new Promise((resolve) => setTimeout(resolve, 10));
     check('retranslate from the popup opens paragraph selection in the existing copy tab',
       requested && requested.type === 'WTPDF_PAGE_TRANSLATE_OPEN_SELECTION' && created === 0, { requested, created });
@@ -390,6 +395,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     await new Promise((resolve) => setTimeout(resolve, 10));
     const translateButton = blockedWindow.document.getElementById('translatePageBtn');
     if (translateButton) translateButton.click();
+    blockedWindow.document.getElementById('extModalOk').click();
     await new Promise((resolve) => setTimeout(resolve, 10));
     check('page translation refuses browser-internal pages with a clear error',
       created === 0 && !blockedWindow.document.getElementById('statusBox').classList.contains('hidden') &&
@@ -539,6 +545,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     };
     vm.runInContext(popupCode, dom3.getInternalVMContext(), { filename: 'popup.js' });
     w3.document.getElementById('startBtn').click();
+    w3.document.getElementById('extModalOk').click();
     await new Promise((r) => setTimeout(r, 10));
     check('frame probe runs across all frames', calls[0] && calls[0].target && calls[0].target.allFrames === true, calls[0]);
     check('scrape injected into the reader frame only',
@@ -560,6 +567,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     };
     vm.runInContext(popupCode, dom4.getInternalVMContext(), { filename: 'popup.js' });
     w4.document.getElementById('startBtn').click();
+    w4.document.getElementById('extModalOk').click();
     await new Promise((r) => setTimeout(r, 10));
     const statusBox = w4.document.getElementById('statusBox');
     check('v2.68 missing active tab displays clean Persian error and re-enables start button',

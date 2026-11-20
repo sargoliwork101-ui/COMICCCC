@@ -14,7 +14,7 @@
       <h1>HASAYA</h1>
       <p>کمیک را به PDF یا تصویر تبدیل کن</p>
     </div>
-    <span class="version-pill">v3.10</span>
+    <span class="version-pill">v3.11</span>
     <button type="button" id="aiSettingsBtn" class="settings-btn" title="تنظیم سرویس، مدل و کلید API برای ترجمه"
       aria-label="تنظیمات API هوش مصنوعی">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
@@ -91,17 +91,19 @@
 
   <section class="studio-section" aria-labelledby="actionSectionTitle">
     <h2 class="studio-section-title" id="actionSectionTitle"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H6v18h12V7zM14 3v5h5M8 13h8M8 17h6"/></svg>ابزارها و خروجی</h2>
-  <button id="startBtn" class="btn">
+  <div class="popup-tool-row" role="group" aria-label="ابزارها و خروجی">
+  <button id="startBtn" class="btn popup-tool" type="button" aria-label="شروع و پیش‌نمایش تصاویر" aria-describedby="startTooltip">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5M4 20h16"/></svg>
-    <span>شروع و پیش‌نمایش تصاویر</span>
+    <span class="popup-tool-tip" role="tooltip" id="startTooltip">شروع و پیش‌نمایش تصاویر</span>
   </button>
-  <button id="pdfConvertBtn" class="btn ghost" type="button" title="انتخاب PDF و تبدیل صفحه‌های آن به تصویر در زبانهٔ جدا">
+  <button id="pdfConvertBtn" class="btn ghost popup-tool" aria-label="تبدیل PDF به تصویر" aria-describedby="pdfTooltip" type="button" title="انتخاب PDF و تبدیل صفحه‌های آن به تصویر در زبانهٔ جدا">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 14h8M8 17h6"/></svg>
-    <span>تبدیل PDF به تصویر</span>
+    <span class="popup-tool-tip" role="tooltip" id="pdfTooltip">تبدیل PDF به تصویر</span>
   </button>
-  <button id="translatePageBtn" class="btn ghost" type="button" title="کپی صفحه را باز می‌کند؛ پاراگراف‌ها و موتور ترجمه را خودتان انتخاب می‌کنید"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h12M9 3v2M5 5c0 5 4 8 8 10M13 5c0 5-4 8-10 10m11 6 4-10 4 10m-6-3h4"/></svg>
-    <span>ترجمهٔ همین صفحه</span>
+  <button id="translatePageBtn" class="btn ghost popup-tool" aria-label="ترجمهٔ همین صفحه" aria-describedby="translateTooltip" type="button" title="کپی صفحه را باز می‌کند؛ پاراگراف‌ها و موتور ترجمه را خودتان انتخاب می‌کنید"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h12M9 3v2M5 5c0 5 4 8 8 10M13 5c0 5-4 8-10 10m11 6 4-10 4 10m-6-3h4"/></svg>
+    <span class="popup-tool-tip" role="tooltip" id="translateTooltip">ترجمهٔ همین صفحه</span>
   </button>
+  </div>
 
   </section>
 

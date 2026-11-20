@@ -49,6 +49,19 @@ const root = path.resolve(__dirname,'../extension');
         return {font,different:dark!==light,overflow:document.documentElement.scrollWidth>innerWidth};
       });
       assert.ok(result.font&&result.different&&!result.overflow,route+JSON.stringify(result));
+      if(route.startsWith('popup')){
+        const tools=await page.evaluate(()=>[...document.querySelectorAll('.popup-tool-row button')].map(el=>{
+          const r=el.getBoundingClientRect();return {top:r.top,width:r.width,height:r.height};
+        }));
+        assert.equal(tools.length,3);assert.ok(tools.every(r=>r.top===tools[0].top&&r.width===44&&r.height===40));
+        for(const id of ['startBtn','pdfConvertBtn','translatePageBtn']){
+          await page.hover('#'+id);
+          const tooltip=await page.$eval('#'+id+' [role=tooltip]',el=>{
+            const r=el.getBoundingClientRect();return {visible:getComputedStyle(el).visibility==='visible',fits:r.left>=0&&r.right<=innerWidth};
+          });
+          assert.ok(tooltip.visible&&tooltip.fits,JSON.stringify(tooltip));
+        }
+      }
       if(route.startsWith('viewer')){
         for(const theme of ['dark','light']){
           await page.evaluate(theme=>{document.documentElement.dataset.theme=theme;},theme);
