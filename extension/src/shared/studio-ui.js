@@ -18,6 +18,14 @@
     help.innerHTML = '<svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 .5c0 1.5-2.5 1.5-2.5 3.5m0 3h.01"/></svg>';
     host.appendChild(help);
   }
+  const toolbar = document.querySelector('.toolbar');
+  const header = document.querySelector('.topbar');
+  if (toolbar && header) {
+    const measure = () => root.style.setProperty('--viewer-header-height', header.getBoundingClientRect().height + 'px');
+    measure();
+    if (typeof ResizeObserver !== 'undefined') new ResizeObserver(measure).observe(header);
+    else window.addEventListener('resize', measure);
+  }
   let interacted = false;
   const apply = (theme) => {
     root.dataset.theme = theme === 'light' ? 'light' : 'dark';

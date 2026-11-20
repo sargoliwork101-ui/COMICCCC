@@ -18,7 +18,7 @@
         </div>
       </div>
       <div class="topbar-side">
-        <span class="version-pill">نسخهٔ ۳.۲۵</span>
+        <span class="version-pill">نسخهٔ ۳.۲۶</span>
         <details class="top-menu" id="topMenu">
           <summary aria-label="منوی ابزارها" title="پروفایل، OCR و ترجمه">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
@@ -103,7 +103,7 @@
         <details class="tool-menu" id="groupMenu">
           <summary>مدیریت گروه‌ها</summary>
           <div class="tool-menu-body">
-            <p class="menu-hint">لبهٔ کارت: جابه‌جایی؛ وسط کارت: گروه‌بندی؛ فضای خالی: خروج از گروه. <a href="../help/help.html#organize" target="_blank" rel="noopener">راهنما</a></p>
+            <p class="menu-hint">لبهٔ کارت: جابه‌جایی؛ وسط کارت: گروه‌بندی؛ فضای خالی: خروج از گروه. <a href="../help/help.html#organize" target="_blank" rel="noopener" class="context-guide-link" aria-label="راهنما" title="راهنما"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 .5c0 1.5-2.5 1.5-2.5 3.5m0 3h.01"/></svg></a></p>
             <div class="group-manager"><strong>گروه‌های ساخته‌شده</strong><div id="groupList" class="group-list"><span class="group-empty">هنوز گروهی نساخته‌اید.</span></div></div>
           </div>
         </details>
@@ -199,7 +199,7 @@
         <option value="jpn">日本語 (ژاپنی)</option>
         <option value="chi_sim">中文 (چینی ساده)</option>
       </select>
-      <p id="ocrMethodNote" class="note">OCR محلی Tesseract با یک روش صفحه‌بندی؛ فقط متن برای ترجمه آنلاین ارسال می‌شود. <a href="../help/help.html#ocr" target="_blank" rel="noopener">راهنمای OCR</a></p>
+      <p id="ocrMethodNote" class="note">OCR محلی Tesseract با یک روش صفحه‌بندی؛ فقط متن برای ترجمه آنلاین ارسال می‌شود. <a href="../help/help.html#ocr" target="_blank" rel="noopener" class="context-guide-link" aria-label="راهنمای OCR" title="راهنمای OCR"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 .5c0 1.5-2.5 1.5-2.5 3.5m0 3h.01"/></svg></a></p>
       <label class="check"><input type="checkbox" id="trOnlySel" checked><span>فقط تصاویر انتخاب‌شده</span></label>
       <label class="check" title="اگر خاموش باشد، متن اصلی پاک نمی‌شود و ترجمه با حاشیه روی تصویر قرار می‌گیرد"><input type="checkbox" id="trErase" checked><span>پاک‌کردن متن اصلی زیر ترجمه</span></label>
       <label class="check" title="یک روش خواندن اضافه برای متن سفید با حاشیه روی نقاشی؛ حدود ۴۰٪ کندتر"><input type="checkbox" id="trPrecise" checked><span>دقت بالاتر (کندتر)</span></label>
@@ -219,7 +219,7 @@
           <div id="aiProfileList" class="ai-profile-list"></div>
           <button id="trAiAddProfile" class="mini" type="button"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v16M4 12h16"/></svg>افزودن API</button>
           <p class="ai-help"><a id="trAiKeyHelp" href="https://aistudio.google.com/api-keys" target="_blank" rel="noopener noreferrer">ساخت کلید در Google AI Studio</a> · کلیدها فقط در حافظهٔ محلی همین مرورگر ذخیره می‌شوند.</p>
-          <p class="note">زبان تصویر را درست انتخاب کنید؛ ترجمه به اینترنت نیاز دارد. <a href="../help/help.html#ocr" target="_blank" rel="noopener">راهنما</a></p>
+          <p class="note">زبان تصویر را درست انتخاب کنید؛ ترجمه به اینترنت نیاز دارد. <a href="../help/help.html#ocr" target="_blank" rel="noopener" class="context-guide-link" aria-label="راهنما" title="راهنما"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 .5c0 1.5-2.5 1.5-2.5 3.5m0 3h.01"/></svg></a></p>
           <label for="trAiModel">نام مدل در سرویس انتخاب‌شده</label>
           <input id="trAiModel" type="text" dir="ltr" value="gemini-flash-latest" spellcheck="false">
           <label for="trAiSkill">Skill / راهنمای سبک ترجمه</label>
@@ -229,7 +229,7 @@
           <p id="trAiError" class="ai-error" role="alert"></p>
         </div>
       </details>
-      <p class="note">زبان تصویر را درست انتخاب کنید؛ ترجمه به اینترنت نیاز دارد. <a href="../help/help.html#ocr" target="_blank" rel="noopener">راهنما</a></p>
+      <p class="note">زبان تصویر را درست انتخاب کنید؛ ترجمه به اینترنت نیاز دارد. <a href="../help/help.html#ocr" target="_blank" rel="noopener" class="context-guide-link" aria-label="راهنما" title="راهنما"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 .5c0 1.5-2.5 1.5-2.5 3.5m0 3h.01"/></svg></a></p>
       <div class="modal-actions">
         <button id="trStart" class="btn"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>شروع ترجمه</button>
         <button id="trClose" class="btn ghost"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg>انصراف</button>
@@ -286,7 +286,7 @@
     <div class="crop-body">
       <div id="cropStage" class="crop-stage" tabindex="0" aria-label="ناحیهٔ انتخاب برش؛ Enter برای اعمال"><img id="cropImg" alt=""><div id="cropSelection"><i class="crop-handle nw" data-handle="nw"></i><i class="crop-handle n" data-handle="n"></i><i class="crop-handle ne" data-handle="ne"></i><i class="crop-handle e" data-handle="e"></i><i class="crop-handle se" data-handle="se"></i><i class="crop-handle s" data-handle="s"></i><i class="crop-handle sw" data-handle="sw"></i><i class="crop-handle w" data-handle="w"></i></div></div>
     </div>
-    <p class="crop-help">لبهٔ کارت: جابه‌جایی؛ وسط کارت: گروه‌بندی؛ فضای خالی: خروج از گروه. <a href="../help/help.html#organize" target="_blank" rel="noopener">راهنما</a></p>
+    <p class="crop-help">لبهٔ کارت: جابه‌جایی؛ وسط کارت: گروه‌بندی؛ فضای خالی: خروج از گروه. <a href="../help/help.html#organize" target="_blank" rel="noopener" class="context-guide-link" aria-label="راهنما" title="راهنما"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 .5c0 1.5-2.5 1.5-2.5 3.5m0 3h.01"/></svg></a></p>
   </div>
 
   <div id="lightbox" class="hidden">

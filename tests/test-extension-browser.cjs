@@ -102,6 +102,20 @@ const root = path.resolve(__dirname,'../extension');
         });
         assert.ok(menu.equal&&menu.aligned&&menu.solid&&!menu.overflow,JSON.stringify(menu));
         await page.evaluate(()=>{document.getElementById('topMenu').open=false;});
+
+        for(const width of [1280,420]){
+          await page.setViewport({width,height:900});
+          await page.evaluate(()=>{document.getElementById('grid').style.minHeight='4000px';window.scrollTo(0,700);});
+          await new Promise(r=>setTimeout(r,100));
+          const sticky=await page.evaluate(()=>{
+            const bar=document.querySelector('.toolbar').getBoundingClientRect();
+            const header=document.querySelector('.topbar').getBoundingClientRect();
+            return {visible:bar.top>=header.bottom-2&&bar.top<header.bottom+3,outputInDock:!!document.querySelector('.dock #outputSettings')};
+          });
+          assert.ok(sticky.visible&&sticky.outputInDock,JSON.stringify(sticky));
+          await page.evaluate(()=>window.scrollTo(0,0));
+        }
+        await page.setViewport({width:1280,height:900});
         await page.addScriptTag({url:base+'/src/viewer/output-dialog.js'});
         const dock=await page.evaluate(()=>({
           buildVisible:!!document.getElementById('buildBtn').getClientRects().length,
@@ -123,6 +137,7 @@ const root = path.resolve(__dirname,'../extension');
           await page.keyboard.press('Escape');
           await page.waitForFunction(()=>!document.getElementById('outputDialog').open);
           assert.equal(await page.$eval('#outputSettings',el=>el.open),false);
+          await new Promise(r=>setTimeout(r,100));
         }
         await page.addScriptTag({url:base+'/src/viewer/result-dialog.js'});
         assert.ok(await page.$('.context-guide-link[href="../help/help.html#organize"] svg'));
@@ -232,7 +247,7 @@ const root = path.resolve(__dirname,'../extension');
           assert.ok(layout.heights.every(h=>h<50)&&layout.inline,JSON.stringify(layout));
           assert.ok(layout.menu<layout.toolbar/2,JSON.stringify(layout));
           assert.equal(layout.danger,'rgb(251, 113, 133)');
-          assert.ok(layout.panel.includes(theme==='dark'?'0.082353 0.141176 0.172549':'0.894118 0.92549 0.921569'),JSON.stringify(layout));
+          assert.equal(layout.panel,theme==='dark'?'rgb(21, 36, 44)':'rgb(228, 236, 235)');
           const header=await page.evaluate(()=>{
             const controls=['.topbar-side #studioThemeToggle','.topbar-side .top-menu>summary'];
             return controls.map(selector=>{

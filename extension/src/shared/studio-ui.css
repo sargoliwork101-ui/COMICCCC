@@ -147,3 +147,6 @@ body #outputDialog .opts{display:flex;flex-direction:column;gap:9px;margin-top:1
 @media(max-width:600px){.dock-actions{flex-wrap:wrap}.dock-actions .output-settings{flex:0 0 auto}.dock-actions .output-settings>summary{min-width:120px}}
 
 .dock-actions #outputSettings>summary{display:flex;align-items:center;gap:7px;min-width:110px}.dock-actions #outputSettings>summary::after{display:none}.dock-actions #outputSettings>summary svg{width:16px;height:16px}.dock-center:has(>.seg.hidden){display:none}
+
+/* Keep the viewer tools below the sticky header, never hidden behind it. */
+body .toolbar.panel{position:sticky;top:var(--viewer-header-height,80px);z-index:40;background:var(--surface);backdrop-filter:none}

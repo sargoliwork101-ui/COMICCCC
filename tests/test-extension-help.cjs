@@ -30,3 +30,11 @@ assert.equal(viewer.querySelectorAll('.top-menu-panel .context-guide-link').leng
 assert.equal(viewer.querySelector('.context-guide-link').getAttribute('href'),'../help/help.html#organize');
 assert.equal(viewer.querySelector('.context-guide-link').textContent,'');
 assert.equal(viewer.querySelector('.menu-guide-link'),null);
+
+for(const file of ['viewer/viewer.html','popup/popup.html','ai-settings/settings.html','pdf-import/pdf-import.html']){
+ const doc=new JSDOM(fs.readFileSync(path.join(base,file),'utf8')).window.document;
+ for(const link of doc.querySelectorAll('a[href*="help.html"]')){
+  assert.equal(link.textContent.trim(),'','no textual help control: '+file);
+  assert.ok(link.querySelector('svg') && link.getAttribute('aria-label'));
+ }
+}
