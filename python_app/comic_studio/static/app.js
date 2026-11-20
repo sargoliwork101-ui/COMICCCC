@@ -1194,6 +1194,14 @@ function overlayBlock(block, mode = currentOverlayMode()) {
 }
 function overlayBlocks(item, mode = currentOverlayMode()) { return (item.blocks || []).map((block) => overlayBlock(block, mode)); }
 function hasRenderableText(block) { return !!block.tr?.trim() || !!(!block._plainText && block.richHtml && Typeset.richHtmlWords(block.richHtml).some((word) => String(word.t || '').trim())); }
+// Read the persisted translation, never OCR overlay text or an AI provenance flag.
+function translationReportStats(images) {
+  const active = (images || []).flatMap((image) => (image.blocks || [])
+    .filter((block) => block && block.enabled !== false && String(block.text || '').trim()));
+  const translated = active.filter(hasRenderableText).length;
+  return { total: active.length, translated, untranslated: active.length - translated,
+    percentage: active.length ? Math.round(translated / active.length * 100) : 0 };
+}
 function hasRenderableShapeFill(block) {
   if (!block || !block.manual) return false;
   const bg = String(block.bg || '');
@@ -1469,7 +1477,7 @@ function renderGrid() {
     {
       const blocks = Array.isArray(item.blocks) ? item.blocks : [];
       const enabled = blocks.filter((entry) => entry && entry.enabled !== false);
-      const translated = enabled.filter((entry) => String(entry.tr || '').trim() || String(entry.richHtml || '').trim());
+      const translated = enabled.filter(hasRenderableText);
       let tlClass = 'tl-none';
       let tlText = 'ترجمه نشده';
       let tlTitle = 'این صفحه هنوز هیچ کادر ترجمهٔ فعالی ندارد';
@@ -3659,14 +3667,14 @@ async function performContextTranslation(request, preview, ongoing = null, corre
     toast(isDirectMtProvider(request.provider) ? 'ترجمه ذخیره شد' : 'ترجمه و خلاصه ذخیره شد');
     const targetIds = Array.isArray(request?.image_ids) && request.image_ids.length ? request.image_ids : selectedImages().map((img) => img.id);
     const targetImages = (state.project?.images || []).filter((img) => targetIds.includes(img.id));
-    const activeBlocks = targetImages.flatMap((img) => (img.blocks || []).filter((b) => b.enabled !== false && String(b.text || '').trim()));
-    if (activeBlocks.length) {
-      const translatedCount = activeBlocks.filter((b) => String(b.translated || '').trim()).length;
-      const untranslatedCount = activeBlocks.length - translatedCount;
-      const pct = Math.round((translatedCount / activeBlocks.length) * 100);
+    const stats = translationReportStats(targetImages);
+    if (stats.total) {
+      const translatedCount = stats.translated;
+      const untranslatedCount = stats.untranslated;
+      const pct = stats.percentage;
       showReportDialog('گزارش ترجمه', [
         `درصد ترجمه‌شده: ${pct}٪`,
-        `ترجمه‌شده: ${translatedCount} از ${activeBlocks.length} متن`,
+        `ترجمه‌شده: ${translatedCount} از ${stats.total} متن`,
         ...(untranslatedCount > 0 ? [`ترجمه‌نشده: ${untranslatedCount} متن`] : []),
       ]);
     }
