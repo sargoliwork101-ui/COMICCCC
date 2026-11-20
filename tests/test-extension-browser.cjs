@@ -68,6 +68,19 @@ const root = path.resolve(__dirname,'../extension');
         }
         await page.setViewport({width:1280,height:900});
         assert.equal(await page.$$eval('section:not([hidden])',els=>els.length),1);
+
+        for(const width of [1440,768,420,320]){
+          await page.setViewport({width,height:700});
+          const pager=await page.evaluate(()=>{
+            const pos=document.getElementById('helpPosition');
+            return {whiteSpace:getComputedStyle(pos).whiteSpace,
+              buttons:['helpPrev','helpNext'].map(id=>document.getElementById(id).getBoundingClientRect().width),
+              overflow:document.documentElement.scrollWidth>innerWidth};
+          });
+          assert.equal(pager.whiteSpace,'nowrap');
+          assert.ok(pager.buttons.every(w=>w<150)&&!pager.overflow,JSON.stringify(pager));
+        }
+        await page.setViewport({width:1280,height:900});
         await page.click('#helpNext');
         assert.equal(await page.$eval('nav a[aria-current=page]',el=>el.hash),'#organize');
         await page.type('#helpSearch','عبارتناموجود۱۲۳');
