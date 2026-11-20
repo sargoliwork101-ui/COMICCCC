@@ -18,7 +18,7 @@
         </div>
       </div>
       <div class="topbar-side">
-        <span class="version-pill">نسخهٔ ۳.۲۱</span>
+        <span class="version-pill">نسخهٔ ۳.۲۲</span>
         <details class="top-menu" id="topMenu">
           <summary aria-label="منوی ابزارها" title="پروفایل، OCR و ترجمه">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
@@ -139,11 +139,12 @@
 
       <details class="output-settings" id="outputSettings" data-mode="pdf">
         <summary>تنظیمات خروجی</summary>
-        <div class="output-panel" role="group" aria-label="تنظیمات خروجی">
+        <dialog class="output-panel" id="outputDialog" aria-labelledby="outputDialogTitle">
           <div class="output-panel-heading">
-            <strong>تنظیمات خروجی</strong>
+            <strong id="outputDialogTitle">تنظیمات خروجی</strong>
             <button type="button" class="output-close" id="closeOutputSettings"><svg class="studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg>بستن</button>
           </div>
+          <label for="outputKind">نوع خروجی</label><select id="outputKind" class="sel"><option value="pdf">PDF</option><option value="img">تصاویر جدا</option></select>
           <div class="opts" id="pdfOpts">
             <label class="check" title="همهٔ تصاویر انتخاب‌شده پشت سر هم و بدون فاصله، در یک صفحهٔ واحد PDF قرار می‌گیرند">
               <input type="checkbox" id="seamless"><span>همه تصاویر در یک صفحه</span>
@@ -154,17 +155,21 @@
             <label class="check" title="هر دو تصویر متوالی به‌صورت عمودی در یک صفحهٔ PDF قرار می‌گیرند">
               <input type="checkbox" id="twoPerPage"><span>دو تصویر در هر صفحه</span>
             </label>
+            <label for="pdfName">نام فایل PDF</label>
             <input type="text" id="pdfName" value="comic" spellcheck="false" aria-label="نام فایل PDF" placeholder="نام PDF">
           </div>
           <div class="opts hidden" id="imgOpts">
+            <label for="outFmt">فرمت تصاویر</label>
             <select id="outFmt" class="sel" aria-label="فرمت تصاویر" title="اصلی: بدون تغییر؛ PNG: بدون افت؛ JPEG: کیفیت ۱۰۰٪.">
               <option value="orig">فرمت اصلی</option>
               <option value="png">PNG، بدون افت</option>
               <option value="jpg">JPEG، کیفیت ۱۰۰٪</option>
             </select>
+            <label for="folderName">زیرپوشهٔ خروجی</label>
             <input type="text" id="folderName" placeholder="نام زیرپوشه (اختیاری)" spellcheck="false" aria-label="نام زیرپوشه">
           </div>
-        </div>
+          <div class="output-dialog-actions"><button id="startOutputDialog" type="button" class="btn">ساخت و دانلود</button></div>
+        </dialog>
       </details>
       </div>
 
@@ -309,6 +314,7 @@
   <script src="../core/translate.js"></script>
   <script src="../core/ai-translate.js"></script>
   <script src="../core/pdf-import-store.js"></script>
+  <script src="output-dialog.js"></script>
   <script src="result-dialog.js"></script>
   <script src="viewer.js"></script>
   <script src="trans.js"></script>

@@ -89,6 +89,21 @@ const root = path.resolve(__dirname,'../extension');
         });
         assert.ok(menu.equal&&menu.aligned&&menu.solid&&!menu.overflow,JSON.stringify(menu));
         await page.evaluate(()=>{document.getElementById('topMenu').open=false;});
+        await page.addScriptTag({url:base+'/src/viewer/output-dialog.js'});
+        for(const width of [1280,420]){
+          await page.setViewport({width,height:900});
+          await page.evaluate(()=>{document.getElementById('outputSettings').open=true;});
+          await page.waitForSelector('#outputDialog[open]');
+          const output=await page.$eval('#outputDialog',el=>{
+            const r=el.getBoundingClientRect();
+            const checks=[...el.querySelectorAll('#pdfOpts .check')].map(c=>c.getBoundingClientRect().top);
+            return {center:Math.abs(r.left+r.width/2-innerWidth/2)<2,inside:r.left>=0&&r.right<=innerWidth,rows:checks[1]>checks[0]&&checks[2]>checks[1]};
+          });
+          assert.ok(output.center&&output.inside&&output.rows,JSON.stringify(output));
+          await page.keyboard.press('Escape');
+          await page.waitForFunction(()=>!document.getElementById('outputDialog').open);
+          assert.equal(await page.$eval('#outputSettings',el=>el.open),false);
+        }
         await page.addScriptTag({url:base+'/src/viewer/result-dialog.js'});
         assert.ok(await page.$('.context-guide-link[href="../help/help.html#organize"] svg'));
         assert.equal(await page.$('.menu-guide-link'),null);
