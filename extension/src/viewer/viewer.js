@@ -957,8 +957,6 @@ function refreshSummary(groupView = buildPageGroupView()) {
     retryAllButton.classList.toggle('hidden', failedN === 0 || loading);
     retryAllButton.disabled = building || editingPageGroupId !== null;
   }
-  const importPdfButton = $('btnImportPdf');
-  if (importPdfButton) importPdfButton.disabled = loading || building || editingPageGroupId !== null;
   ['btnAll', 'btnNone', 'btnInv'].forEach((id) => { $(id).disabled = building || editingPageGroupId !== null; });
   // حذف دسته‌جمعی فقط وقتی ممکن است که حداقل یک کارت سالم انتخاب‌شده وجود داشته باشد
   const deleteSelButton = $('btnDeleteSel');
@@ -2436,7 +2434,6 @@ async function main() {
   $('btnRetryAll').onclick = () => { loadAll(items.filter((it) => it.state === 'failed')); };
   $('buildBtn').onclick = onBuild;
   $('saveImgBtn').onclick = onSaveImages;
-  $('btnImportPdf').onclick = openPdfImportTab;
   if (chrome.runtime.onMessage && chrome.runtime.onMessage.addListener) {
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (!message || message.type !== 'PIC_TO_PDF_IMPORT_COMPLETE' || message.token !== pendingPdfImportToken) return false;
