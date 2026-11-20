@@ -87,6 +87,7 @@ const tick = () => new Promise(resolve => setTimeout(resolve, 10));
       vm.runInContext(fs.readFileSync('extension/src/popup/popup.js','utf8'),dom.getInternalVMContext());
       d.getElementById('startBtn').click();
       d.querySelector('[data-mode='+mode+']').click();
+      d.documentElement.dataset.theme='light';
       d.getElementById('deepSearch').checked=deep;
       d.getElementById('collectionReview').click();
       assert.equal(calls.length,0);
@@ -96,6 +97,7 @@ const tick = () => new Promise(resolve => setTimeout(resolve, 10));
       assert.ok(injected,mode);
       assert.equal(injected.args[1],mode);
       assert.equal(injected.args[2].deepSearch,deep,mode+' forwards deep search');
+      assert.equal(injected.args[2].uiTheme,'light',mode+' forwards the current Focus theme');
       dom.window.close();
     }
   }

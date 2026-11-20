@@ -80,3 +80,15 @@ body .output-close{display:inline-flex;align-items:center;gap:4px;padding:4px 8p
 :is(.top-menu>summary:hover,.top-menu[open]>summary){background:color-mix(in srgb,var(--a1) 12%,var(--surface));border-color:var(--a1)}
 
 .import-header{background:var(--surface);border-color:var(--line)}
+
+/* Dialogs, warnings and progress share the same Focus surfaces in both themes. */
+:is(.ext-modal-card,.modal-card,.loading-card,.output-panel,.tool-menu-body){background:var(--surface);color:var(--text);border-color:var(--line2)}
+:is(.ext-modal-title,.ext-modal-msg,.loading-hint,.import-description){color:var(--text)}
+:is(.ext-modal,.loading-overlay){background:color-mix(in srgb,var(--bg) 78%,transparent)}
+.bar{background:var(--surface3)}
+.bar>div{box-shadow:none}
+:root[data-theme=light] :is(.update-status.err,.status.error,.import-status.error,.profile-status.bad,.ai-profile-status.bad,#failed){color:#be123c}
+:root[data-theme=light] :is(.update-status.warn,.load-errors){color:#92400e}
+:root[data-theme=light] :is(.update-status.ok,.status:not(.error),.import-status.success,.profile-status.ok,.ai-profile-status.ok){color:#047857}
+html{scrollbar-color:var(--line2) var(--bg)}
+::-webkit-scrollbar-thumb{background:var(--line2)}

@@ -14,6 +14,10 @@ const root = path.resolve(__dirname,'../extension');
   const server = http.createServer((req,res)=>{
     requests.push(req.url);
     const url = new URL(req.url,'http://localhost');
+    if(url.pathname==='/collector-probe'){
+      res.setHeader('Content-Type','text/html');
+      return res.end('<!doctype html><html><body style="background:rgb(250,240,230)"><p>Original site content</p></body></html>');
+    }
     if(url.pathname==='/ocr-probe'){
       res.setHeader('Content-Type','text/html');
       return res.end('<!doctype html><script src="/vendor/tesseract.min.js"></script><script src="/src/core/ocr.js"></script>');
@@ -51,6 +55,18 @@ const root = path.resolve(__dirname,'../extension');
       });
       assert.ok(result.font&&result.different&&!result.overflow,route+JSON.stringify(result));
       assert.equal(result.accent,'#15817b','shared light Focus palette: '+route);
+      if(route.startsWith('popup')||route.startsWith('viewer')){
+        for(const theme of ['light','dark']){
+          const modal=await page.evaluate(theme=>{
+            document.documentElement.dataset.theme=theme;
+            const root=document.getElementById('extModal');root.classList.remove('hidden');
+            const bg=getComputedStyle(root.querySelector('.ext-modal-card')).backgroundColor;
+            root.classList.add('hidden');return bg;
+          },theme);
+          assert.equal(modal,theme==='light'?'rgb(255, 255, 255)':'rgb(21, 36, 44)','Focus confirmation surface');
+        }
+      }
+
       if(route.startsWith('popup')){
         const tools=await page.evaluate(()=>[...document.querySelectorAll('.popup-tool-row button')].map(el=>{
           const r=el.getBoundingClientRect();return {top:r.top,width:r.width,height:r.height};
@@ -136,6 +152,43 @@ const root = path.resolve(__dirname,'../extension');
       }
 
     }
+    // Exercise the actual on-site UI rather than only extension-owned HTML pages.
+    const popupSource=fs.readFileSync(path.join(root,'src/popup/popup.js'),'utf8');
+    const collectorSource=popupSource.slice(popupSource.indexOf('async function scrapeAndSend'));
+    for(const theme of ['dark','light']){
+      for(const mode of ['scroll','auto','manual']){
+        await page.setViewport({width:1280,height:900});
+        await page.goto(base+'/collector-probe');
+        await page.evaluate(origin=>{
+          window.chrome={runtime:{getURL:v=>origin+'/'+v,sendMessage:async()=>({ok:true})}};
+          window.__wtpdfTimings={scrollMax:1,scrollSleep:1,manualRescan:20};
+        },base);
+        await page.addScriptTag({content:collectorSource});
+        await page.evaluate(({mode,theme})=>{
+          window.collectorRun=scrapeAndSend('probe.pdf',mode,{uiTheme:theme});
+        },{mode,theme});
+        await page.waitForSelector('.wtpdf-root');
+        await page.evaluate(()=>document.fonts.ready);
+        const appearance=await page.evaluate(()=>{
+          const root=document.querySelector('.wtpdf-root');
+          const card=root.querySelector('.wtpdf-card,.wtpdf-manual-card');
+          return {theme:root.dataset.wtpdfTheme,background:getComputedStyle(card).backgroundColor,
+            text:getComputedStyle(root.querySelector('.wtpdf-msg')).color,
+            spinner:root.querySelector('.wtpdf-spinner')?getComputedStyle(root.querySelector('.wtpdf-spinner')).borderTopColor:null,
+            body:getComputedStyle(document.body).backgroundColor,
+            font:document.fonts.check('13px HasayaCollectionVazirmatn')};
+        });
+        assert.equal(appearance.theme,theme);
+        assert.equal(appearance.background,theme==='light'?'rgb(255, 255, 255)':'rgb(21, 36, 44)');
+        assert.equal(appearance.text,theme==='light'?'rgb(32, 60, 65)':'rgb(225, 238, 242)');
+        if(mode!=='manual')assert.equal(appearance.spinner,theme==='light'?'rgb(21, 129, 123)':'rgb(107, 215, 206)');
+        assert.equal(appearance.body,'rgb(250, 240, 230)','site theme must remain untouched');
+        assert.ok(appearance.font);
+        await page.keyboard.press('Escape');
+        await page.evaluate(()=>window.collectorRun);
+        assert.equal(await page.$('.wtpdf-root'),null,'on-site UI must be removed after cancel');
+      }
+    }
     const external=[];
     page.on('request',request=>{if(/^https?:/.test(request.url())&&!request.url().startsWith(base+'/'))external.push(request.url());});
     await page.goto(base+'/ocr-probe');
@@ -150,6 +203,6 @@ const root = path.resolve(__dirname,'../extension');
     assert.ok(requests.some(url=>url.includes('/vendor/ocr/lang/eng.traineddata.gz')));
     assert.ok(requests.some(url=>url.includes('/vendor/ocr/core/')));
     assert.deepEqual(external,[],'OCR must not request a third-party website');
-    console.log('PASS: real Chromium renders all four extension pages with local font/light-dark theme; real Tesseract reads pixels using only packaged local resources');
+    console.log('PASS: real Chromium renders four pages, confirmations and all three injected collection UIs in Focus light/dark; real local Tesseract reads pixels');
   }finally{if(browser)await browser.close();await new Promise(resolve=>server.close(resolve));}
 })().catch(error=>{console.error(error);process.exitCode=1;});

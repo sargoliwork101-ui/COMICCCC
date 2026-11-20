@@ -418,7 +418,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     'msg: !!document.querySelector(".wtpdf-msg"),' +
     'spinner: !!document.querySelector(".wtpdf-spinner"),' +
     'hintText: hint ? hint.textContent : "",' +
-    'hasDarkBackdrop: style.includes("rgba(3,5,10,.88)"),' +
+    'hasDarkBackdrop: style.includes("--wtpdf-scrim:rgba(6,17,24,.82)") && style.includes("background:var(--wtpdf-scrim)"),' +
     'hasCenteredFlex: style.includes("align-items:center") && style.includes("justify-content:center"),' +
     'hasBigFont: /font:700 26px/.test(style),' +
     'hasMaxZ: style.includes("z-index:2147483647")}; })()');
@@ -426,7 +426,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
   check('overlay advertises ESC cancellation hint', /ESC/.test(probe.hintText), probe.hintText);
   check('full-screen overlay shown while scraping', probe.overlay && probe.card && probe.msg && probe.spinner, probe);
   check('overlay centered on screen', probe.hasCenteredFlex, probe);
-  check('overlay dark backdrop', probe.hasDarkBackdrop, probe);
+  check('overlay uses the theme-scoped Focus backdrop', probe.hasDarkBackdrop, probe);
   check('message font about 2x (26px)', probe.hasBigFont, probe);
   check('overlay on top of page (max z-index)', probe.hasMaxZ, probe);
   check('overlay removed after finish', !window.document.querySelector('.wtpdf-overlay') && !window.document.querySelector('style'));

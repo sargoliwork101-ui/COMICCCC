@@ -300,7 +300,8 @@ startBtn.addEventListener('click', async () => {
     pageLimit,
     nextSelector: isPagedMode ? document.getElementById('nextSelector').value.trim() : '',
     imageSelector: isPagedMode ? document.getElementById('imageSelector').value.trim() : '',
-    deepSearch: document.getElementById('deepSearch').checked === true
+    deepSearch: document.getElementById('deepSearch').checked === true,
+    uiTheme: document.documentElement.dataset.theme || (window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
   };
 
   startBtn.disabled = true;
@@ -710,37 +711,36 @@ async function scrapeAndSend(pdfName, mode, opts) {
 
   // ---------- رابط کاربری روی صفحه ----------
   const styleTag = document.createElement('style');
-  styleTag.textContent =
-    '@keyframes wtpdfSpin{to{transform:rotate(360deg)}}' +
-    '.wtpdf-overlay{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;' +
-    'padding:24px;background:rgba(3,5,10,.88);backdrop-filter:blur(4px);direction:rtl;pointer-events:none}' +
-    '.wtpdf-card{max-width:86vw;display:flex;flex-direction:column;align-items:center;gap:18px;' +
-    'background:rgba(15,19,28,.98);border:1px solid rgba(139,123,255,.55);border-radius:22px;padding:30px 38px;' +
-    'box-shadow:0 26px 80px rgba(0,0,0,.75),0 0 0 4px rgba(139,123,255,.16);text-align:center}' +
-    '.wtpdf-spinner{width:46px;height:46px;border-radius:50%;border:4px solid rgba(255,255,255,.16);' +
-    'border-top-color:#8b7bff;animation:wtpdfSpin .8s linear infinite}' +
-    '.wtpdf-card.wtpdf-cancel .wtpdf-spinner{animation:none;border-top-color:#fb7185}' +
-    '.wtpdf-msg{font:700 26px/1.7 Vazirmatn,Tahoma,sans-serif;color:#f2f4fb;white-space:pre-line}' +
-    '.wtpdf-hint{font:600 16px/1.6 Vazirmatn,Tahoma,sans-serif;color:#c9c2ff;opacity:.85}' +
-    // پنل کوچک تعاملی حالت دستی: فقط خود کارت کلیک می‌خورد، بقیه صفحه برای کاربر آزاد است
-    '.wtpdf-manual{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:2147483647;direction:rtl;max-width:92vw}' +
-    '.wtpdf-manual-card{display:flex;flex-direction:column;align-items:center;gap:10px;pointer-events:auto;' +
-    'background:rgba(15,19,28,.98);border:1px solid rgba(52,211,153,.55);border-radius:18px;padding:18px 24px;' +
-    'box-shadow:0 22px 70px rgba(0,0,0,.7),0 0 0 4px rgba(52,211,153,.14);text-align:center}' +
-    '.wtpdf-manual .wtpdf-msg{font:700 17px/1.6 Vazirmatn,Tahoma,sans-serif;color:#f2f4fb;white-space:pre-line;max-width:440px}' +
-    '.wtpdf-count{font:800 24px/1.4 Vazirmatn,Tahoma,sans-serif;color:#34d399}' +
-    '.wtpdf-manual .wtpdf-hint{font:600 12.5px/1.6 Vazirmatn,Tahoma,sans-serif;color:#c9c2ff;opacity:.9}' +
-    '.wtpdf-done{border:0;border-radius:12px;padding:11px 30px;cursor:pointer;' +
-    'background:linear-gradient(135deg,#34d399,#10b981);color:#06281d;' +
-    'font:800 15px/1 Vazirmatn,Tahoma,sans-serif;box-shadow:0 10px 28px -10px rgba(16,185,129,.85);transition:filter .15s,transform .15s}' +
-    '.wtpdf-done:hover{filter:brightness(1.08);transform:translateY(-1px)}' +
-    '.wtpdf-done:active{transform:scale(.97)}' +
-    '.wtpdf-gb-status{font:600 12px/1.6 Vazirmatn,Tahoma,sans-serif;color:#7dd3fc;direction:ltr;max-width:440px;word-break:break-all}' +
-    '.wtpdf-gb-error{font:600 11.5px/1.6 Vazirmatn,Tahoma,sans-serif;color:#fda4af;max-width:440px}' +
-    '.wtpdf-btn-row{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}' +
-    '.wtpdf-mini-btn{border:1px solid rgba(255,255,255,.25);background:rgba(255,255,255,.08);color:#f2f4fb;' +
-    'border-radius:10px;padding:8px 14px;cursor:pointer;pointer-events:auto;font:700 12.5px/1 Vazirmatn,Tahoma,sans-serif;transition:background .15s}' +
-    '.wtpdf-mini-btn:hover{background:rgba(255,255,255,.16)}';
+  const uiTheme = opts.uiTheme === 'light' ? 'light' : 'dark';
+  const collectionFont = chrome.runtime.getURL?.('assets/fonts/Vazirmatn.woff2');
+  styleTag.textContent = `
+    ${collectionFont ? `@font-face{font-family:HasayaCollectionVazirmatn;src:url(${JSON.stringify(collectionFont)}) format('woff2');font-weight:100 900;font-display:swap;}` : ''}
+    @keyframes wtpdfSpin{to{transform:rotate(360deg)}}
+    .wtpdf-root{--wtpdf-surface:#15242c;--wtpdf-surface2:#1c303a;--wtpdf-line:#29404a;--wtpdf-text:#e1eef2;--wtpdf-muted:#829da8;--wtpdf-accent:#6bd7ce;--wtpdf-action:#218b88;--wtpdf-danger:#fb7185;--wtpdf-scrim:rgba(6,17,24,.82);color-scheme:dark;font-family:HasayaCollectionVazirmatn,Vazirmatn,Tahoma,sans-serif}
+    .wtpdf-root[data-wtpdf-theme="light"]{--wtpdf-surface:#fff;--wtpdf-surface2:#e4f0ef;--wtpdf-line:#b8d1d2;--wtpdf-text:#203c41;--wtpdf-muted:#6c898d;--wtpdf-accent:#15817b;--wtpdf-action:#167f79;--wtpdf-danger:#be123c;--wtpdf-scrim:rgba(16,40,45,.28);color-scheme:light}
+    .wtpdf-overlay{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;padding:24px;background:var(--wtpdf-scrim);backdrop-filter:blur(4px);direction:rtl;pointer-events:none}
+    .wtpdf-card{max-width:86vw;display:flex;flex-direction:column;align-items:center;gap:18px;background:var(--wtpdf-surface);border:1px solid var(--wtpdf-line);border-radius:18px;padding:30px 38px;box-shadow:0 26px 80px rgba(0,0,0,.3);text-align:center}
+    .wtpdf-spinner{width:46px;height:46px;border-radius:50%;border:4px solid var(--wtpdf-line);border-top-color:var(--wtpdf-accent);animation:wtpdfSpin .8s linear infinite}
+    .wtpdf-card.wtpdf-cancel .wtpdf-spinner{animation:none;border-top-color:var(--wtpdf-danger)}
+    .wtpdf-root .wtpdf-msg{font:700 26px/1.7 HasayaCollectionVazirmatn,Vazirmatn,Tahoma,sans-serif;color:var(--wtpdf-text);white-space:pre-line}
+    .wtpdf-root .wtpdf-hint{font:600 16px/1.6 HasayaCollectionVazirmatn,Vazirmatn,Tahoma,sans-serif;color:var(--wtpdf-muted)}
+    .wtpdf-manual{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:2147483647;direction:rtl;max-width:92vw}
+    .wtpdf-manual-card{display:flex;flex-direction:column;align-items:center;gap:10px;pointer-events:auto;background:var(--wtpdf-surface);border:1px solid var(--wtpdf-line);border-radius:14px;padding:18px 24px;box-shadow:0 22px 70px rgba(0,0,0,.3);text-align:center}
+    .wtpdf-manual .wtpdf-msg{font-size:17px;line-height:1.6;max-width:440px}
+    .wtpdf-count{font:800 24px/1.4 HasayaCollectionVazirmatn,Vazirmatn,Tahoma,sans-serif;color:var(--wtpdf-accent)}
+    .wtpdf-manual .wtpdf-hint{font-size:12.5px;line-height:1.6}
+    .wtpdf-done{border:0;border-radius:9px;padding:11px 30px;cursor:pointer;background:var(--wtpdf-action);color:#fff;font:800 15px/1 HasayaCollectionVazirmatn,Vazirmatn,Tahoma,sans-serif;box-shadow:none;transition:filter .15s,transform .15s}
+    .wtpdf-done:hover{filter:brightness(1.08);transform:translateY(-1px)}
+    .wtpdf-done:active{transform:scale(.97)}
+    .wtpdf-gb-status{font:600 12px/1.6 HasayaCollectionVazirmatn,Vazirmatn,Tahoma,sans-serif;color:var(--wtpdf-accent);direction:ltr;max-width:440px;word-break:break-all}
+    .wtpdf-gb-error{font:600 11.5px/1.6 HasayaCollectionVazirmatn,Vazirmatn,Tahoma,sans-serif;color:var(--wtpdf-danger);max-width:440px}
+    .wtpdf-btn-row{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+    .wtpdf-mini-btn{border:1px solid var(--wtpdf-line);background:var(--wtpdf-surface2);color:var(--wtpdf-text);border-radius:9px;padding:8px 14px;cursor:pointer;pointer-events:auto;font:700 12.5px/1 HasayaCollectionVazirmatn,Vazirmatn,Tahoma,sans-serif}
+    .wtpdf-mini-btn:hover{border-color:var(--wtpdf-accent)}
+    .wtpdf-root button:focus-visible{outline:2px solid var(--wtpdf-accent);outline-offset:3px}
+    @media(prefers-reduced-motion:reduce){.wtpdf-spinner{animation:none}.wtpdf-done{transition:none}}
+    @media(prefers-reduced-transparency:reduce){.wtpdf-overlay{backdrop-filter:none}}
+  `;
   document.documentElement.appendChild(styleTag);
 
   let uiRoot = null, card = null, say = () => {}, countEl = null;
@@ -751,6 +751,7 @@ async function scrapeAndSend(pdfName, mode, opts) {
     // پنل شناور بالای صفحه؛ بدون پوشش تیره تا کاربر سایت را ببیند و روی مثلث‌های خودش کلیک کند
     uiRoot = document.createElement('div');
     uiRoot.className = 'wtpdf-manual wtpdf-root';
+    uiRoot.dataset.wtpdfTheme = uiTheme;
     uiRoot.innerHTML =
       '<div class="wtpdf-manual-card">' +
       '<strong class="wtpdf-msg"></strong>' +
@@ -773,6 +774,7 @@ async function scrapeAndSend(pdfName, mode, opts) {
     // پوشش تمام‌صفحهٔ تیره با کارت وسط‌چین و قلم درشت (اسکرول و ورق‌زدن خودکار)
     uiRoot = document.createElement('div');
     uiRoot.className = 'wtpdf-overlay wtpdf-root';
+    uiRoot.dataset.wtpdfTheme = uiTheme;
     card = document.createElement('div');
     card.className = 'wtpdf-card';
     card.innerHTML = '<span class="wtpdf-spinner" aria-hidden="true"></span><span class="wtpdf-msg"></span>' +
