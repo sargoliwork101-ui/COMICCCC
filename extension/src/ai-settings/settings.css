@@ -42,3 +42,5 @@ h1 { margin: 2px 0 4px; font-size: clamp(20px, 4vw, 26px); }
 }
 
 .credit-inquiry{grid-column:1/-1;border:1px solid var(--line2);border-radius:10px;padding:10px;min-width:0}.credit-inquiry .credit-check{width:auto;min-height:34px}.credit-report{font-size:12px;line-height:1.9;overflow-wrap:anywhere}.credit-report p{margin:5px 0}.credit-help{font-size:12px;line-height:1.9}.credit-help summary{cursor:pointer;color:var(--a1)}
+
+.credit-inquiry .usage-check{width:auto;min-height:34px;margin-top:8px}.credit-inquiry label{display:block;margin-top:10px}.credit-inquiry .credit-key-id{display:block;margin-top:6px;direction:ltr;text-align:left;box-sizing:border-box}
