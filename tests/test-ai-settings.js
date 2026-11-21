@@ -44,6 +44,7 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
     return { ok: true, status: 200, json: async () => data };
   };
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../extension/src/core/ai-translate.js'), 'utf8'), dom.getInternalVMContext(), { filename: 'ai-translate.js' });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../extension/src/ai-settings/avalai-credit.js'), 'utf8'), dom.getInternalVMContext());
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../extension/src/ai-settings/settings.js'), 'utf8'), dom.getInternalVMContext(), { filename: 'settings.js' });
   await pause();
 
@@ -101,6 +102,14 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
     !calls.fetch[0].url.includes('new-secret') && JSON.parse(calls.fetch[0].options.body).contents[0].parts[0].text.includes('Hello. This is a translation test.') &&
     /آزمون ترجمه موفق/.test($('profiles').querySelector('.profile-status').textContent));
   check('status gives feedback after saving', /ذخیره شد/.test($('settingsStatus').textContent));
+
+  check('credit inquiry does not appear for Gemini', !$('profiles').querySelector('.credit-check'));
+  $('provider').value = 'avalai';
+  $('provider').dispatchEvent(new window.Event('change', { bubbles: true }));
+  await pause();
+  check('AvalAI mounts a separate read-only inquiry for each key without calling it automatically',
+    $('profiles').querySelectorAll('.credit-check').length === stateProfileCount() && calls.fetch.length === 1);
+  function stateProfileCount() { return $('profiles').querySelectorAll('.profile-key').length; }
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL AI SETTINGS TESTS PASSED');
   process.exit(failures ? 1 : 0);
