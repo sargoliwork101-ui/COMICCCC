@@ -1,3 +1,93 @@
+// A shared, keyboard-accessible confirmation for popup tools and updates.
+let popupConfirmationPending = false;
+window.extConfirm = (message, options = {}) => {
+  if (popupConfirmationPending) return Promise.resolve(false);
+  popupConfirmationPending = true;
+  const root = document.getElementById('extModal');
+  const ok = document.getElementById('extModalOk');
+  const cancel = document.getElementById('extModalCancel');
+  const previous = document.activeElement;
+  document.getElementById('extModalTitle').textContent = options.title || 'تأیید انتخاب ابزار';
+  document.getElementById('extModalMsg').textContent = message;
+  ok.textContent = options.okText || 'بله، ادامه بده';
+  cancel.textContent = options.cancelText || 'انصراف';
+  cancel.classList.remove('hidden');
+  root.classList.remove('hidden');
+  cancel.focus();
+  return new Promise(resolve => {
+    const finish = approved => {
+      root.classList.add('hidden');
+      ok.removeEventListener('click', approve);
+      cancel.removeEventListener('click', reject);
+      root.removeEventListener('click', backdrop);
+      document.removeEventListener('keydown', keydown, true);
+      popupConfirmationPending = false;
+      previous?.focus();
+      resolve(approved);
+    };
+    const approve = () => finish(true);
+    const reject = () => finish(false);
+    const backdrop = event => { if (event.target === root) reject(); };
+    const keydown = event => {
+      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); reject(); }
+      if (event.key === 'Tab') {
+        event.preventDefault();
+        (document.activeElement === cancel ? ok : cancel).focus();
+      }
+    };
+    ok.addEventListener('click', approve);
+    cancel.addEventListener('click', reject);
+    root.addEventListener('click', backdrop);
+    document.addEventListener('keydown', keydown, true);
+  });
+};
+
+// Intercept only the three tools; existing execution handlers run after approval.
+let approvedPopupTool = null;
+for (const [id, label] of [['startBtn', 'شروع و پیش‌نمایش تصاویر'], ['pdfConvertBtn', 'تبدیل PDF به تصویر'], ['translatePageBtn', 'ترجمهٔ همین صفحه']]) {
+  const button = document.getElementById(id);
+  button?.addEventListener('click', async event => {
+    if (approvedPopupTool === button) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (button.disabled || popupConfirmationPending) return;
+    if (id === 'startBtn') { openCollectionView(); return; }
+    const approved = await window.extConfirm(`شما «${label}» را انتخاب کرده‌اید. مطمئن هستید می‌خواهید ادامه دهید؟`);
+    if (!approved || button.disabled) return;
+    approvedPopupTool = button;
+    try { button.click(); } finally { approvedPopupTool = null; }
+  }, true);
+}
+
+function openCollectionView() {
+  document.getElementById('homeView').classList.add('hidden');
+  document.getElementById('collectionView').classList.remove('hidden');
+  document.querySelector('#modeSeg .mode-btn').focus();
+}
+document.getElementById('collectionBack').addEventListener('click', () => {
+  document.getElementById('collectionView').classList.add('hidden');
+  document.getElementById('homeView').classList.remove('hidden');
+  document.getElementById('startBtn').focus();
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !popupConfirmationPending && !document.getElementById('collectionView').classList.contains('hidden')) {
+    document.getElementById('collectionBack').click();
+  }
+});
+document.getElementById('collectionReview').addEventListener('click', async () => {
+  const review = document.getElementById('collectionReview');
+  if (review.disabled || popupConfirmationPending) return;
+  const labels = {scroll:'اسکرول صفحه', auto:'ورق‌زدن خودکار', manual:'ورق‌زدن دستی'};
+  const name = document.getElementById('pdfName').value.trim() || 'HASAYA STUDIO';
+  const limit = Number.parseInt(document.getElementById('pageLimit').value, 10);
+  const detail = 'جستجوی عمیق: ' + (document.getElementById('deepSearch').checked ? 'روشن' : 'خاموش') +
+    (collectMode === 'scroll' ? '' : '\nحداکثر صفحات: ' + (limit > 0 ? limit : 'همهٔ صفحات'));
+  const approved = await window.extConfirm(`شروع و پیش‌نمایش تصاویر\nروش: ${labels[collectMode]}\nنام خروجی: ${name}\n${detail}\nمطمئن هستید می‌خواهید شروع کنید؟`);
+  if (!approved || startBtn.disabled) return;
+  approvedPopupTool = startBtn;
+  try { startBtn.click(); } finally { approvedPopupTool = null; }
+});
+
 const startBtn = document.getElementById('startBtn');
 const pdfConvertBtn = document.getElementById('pdfConvertBtn');
 if (pdfConvertBtn) {
@@ -15,8 +105,8 @@ const statusBox = document.getElementById('statusBox');
 const statusText = document.getElementById('statusText');
 // کنترل‌های مخصوص حالت‌های ورق‌زدن (سقف صفحه و انتخابگرهای دستی)؛ مستقل از سایت، فقط بر اساس حالت انتخابی باز می‌شوند
 const pagedModeFields = document.getElementById('pagedModeFields');
-// کنترل مخصوص حالت اسکرول (تیک جستجوی عمیق)
-const scrollModeFields = document.getElementById('scrollModeFields');
+// جستجوی عمیق برای هر سه روش جمع‌آوری مشترک است.
+// The legacy scrollModeFields container now holds the common deep-search setting.
 // متن وضعیت (پیشرفت) را بدون نمایش باکس به‌روز می‌کند؛ پیشرفت واقعی روی خود صفحه با پوشش تمام‌صفحه دیده می‌شود
 const setStatus = (text) => {
   statusText.innerText = text;
@@ -174,7 +264,6 @@ let collectMode = 'scroll';
 // کادرهای هر حالت فقط در همان حالت نمایش داده می‌شوند و ربطی به سایت ندارند
 const applyModeFields = (mode) => {
   if (pagedModeFields) pagedModeFields.classList.toggle('hidden', mode === 'scroll');
-  if (scrollModeFields) scrollModeFields.classList.toggle('hidden', mode !== 'scroll');
 };
 applyModeFields(collectMode);
 const modeSeg = document.getElementById('modeSeg');
@@ -183,7 +272,12 @@ if (modeSeg) {
     const btn = ev.target.closest('.mode-btn');
     if (!btn) return;
     collectMode = btn.dataset.mode || 'scroll';
-    modeSeg.querySelectorAll('.mode-btn').forEach((b) => b.classList.toggle('active', b === btn));
+    modeSeg.querySelectorAll('.mode-btn').forEach((b) => {
+      b.classList.toggle('active', b === btn);
+      b.setAttribute('aria-pressed', String(b === btn));
+    });
+    document.getElementById('collectionOptions').classList.remove('hidden');
+    document.getElementById('collectionReview').disabled = false;
     applyModeFields(collectMode);
   });
 }
@@ -195,7 +289,7 @@ const MODE_STATUS = {
 };
 
 startBtn.addEventListener('click', async () => {
-  let pdfName = document.getElementById('pdfName').value.trim() || 'comic';
+  let pdfName = document.getElementById('pdfName').value.trim() || 'HASAYA STUDIO';
   if (!pdfName.toLowerCase().endsWith('.pdf')) pdfName += '.pdf';
 
   // سقف صفحات Google Books: صفر/خالی یعنی بدون محدودیت
@@ -206,7 +300,8 @@ startBtn.addEventListener('click', async () => {
     pageLimit,
     nextSelector: isPagedMode ? document.getElementById('nextSelector').value.trim() : '',
     imageSelector: isPagedMode ? document.getElementById('imageSelector').value.trim() : '',
-    deepSearch: !isPagedMode && document.getElementById('deepSearch').checked === true
+    deepSearch: document.getElementById('deepSearch').checked === true,
+    uiTheme: document.documentElement.dataset.theme || (window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
   };
 
   startBtn.disabled = true;
@@ -278,7 +373,7 @@ async function probeBookFrame() {
 
 // این تابع داخل صفحهٔ وب اجرا می‌شود
 // mode: 'scroll' (پیش‌فرض) | 'auto' (ورق‌زدن خودکار) | 'manual' (ورق‌زدن دستی کاربر)
-// opts: { pageLimit, nextSelector, imageSelector, deepSearch }
+// opts: { pageLimit, nextSelector, imageSelector, deepSearch } — deepSearch applies to every DOM mode.
 async function scrapeAndSend(pdfName, mode, opts) {
   mode = mode === 'auto' || mode === 'manual' ? mode : 'scroll';
   opts = opts || {};
@@ -349,6 +444,39 @@ async function scrapeAndSend(pdfName, mode, opts) {
   // «lazy.png» اغلب نام فایل واقعی سایت است، نه placeholder؛ خود کلمهٔ lazy را به‌تنهایی فیلتر نکن.
   const PLACEHOLDER = /(?:^|[/_.-])(blank|loading|placeholder|spacer|pixel|1x1)(?:[/_.-]|$)/i;
 
+  // URL tokens may contain commas (CDN transforms and data URLs). A comma
+  // separates descriptors/candidates, not every substring inside a URL token.
+  const srcsetEntries = (set) => {
+    const input = String(set || '');
+    const entries = [];
+    let position = 0;
+    while (position < input.length) {
+      while (position < input.length && /[\s,]/.test(input[position])) position++;
+      const start = position;
+      while (position < input.length && !/\s/.test(input[position])) position++;
+      let url = input.slice(start, position);
+      if (!url) break;
+      if (url.endsWith(',')) {
+        url = url.replace(/,+$/, '');
+        if (url) entries.push({url, descriptor: ''});
+        continue;
+      }
+      const descriptorStart = position;
+      let parentheses = 0;
+      while (position < input.length) {
+        const char = input[position];
+        if (char === '(') parentheses++;
+        if (char === ')') parentheses--;
+        if (char === ',' && parentheses <= 0) break;
+        position++;
+      }
+      const descriptor = input.slice(descriptorStart, position).trim();
+      position++;
+      if (!descriptor || /^(?:\d+w|(?:\d+(?:\.\d+)?|\.\d+)x)$/.test(descriptor)) entries.push({url, descriptor});
+    }
+    return entries;
+  };
+
   // میان منبعِ بارگذاری‌شده و گزینه‌های با وضوح بالاتر در صفت‌ها و srcset مقایسه کن.
   const bestSrc = (img) => {
     const toAbsolute = (value) => {
@@ -358,13 +486,6 @@ async function scrapeAndSend(pdfName, mode, opts) {
       try { return new URL(raw, document.baseURI || location.href).href; } catch { return ''; }
     };
     const active = toAbsolute(img.currentSrc || img.src);
-
-    // سایت‌ها معمولاً نسخهٔ اصلی را روی یکی از این صفات نگه می‌دارند و src را به thumbnail می‌دهند.
-    // قبلاً اگر thumbnail لود شده بود، همین ابتدای تابع برگردانده می‌شد و این آدرس‌های بهتر نادیده گرفته می‌شدند.
-    for (const name of ['data-original', 'data-original-src', 'data-full', 'data-full-src', 'data-zoom', 'data-hires', 'data-high-res']) {
-      const original = toAbsolute(img.getAttribute(name));
-      if (original) return original;
-    }
 
     const renderedWidth = img.clientWidth || img.getBoundingClientRect().width || img.naturalWidth || 1000;
     const candidates = [];
@@ -383,23 +504,22 @@ async function scrapeAndSend(pdfName, mode, opts) {
           }
         }
       } catch { /* data/blob URL or malformed URL */ }
-      const pathMatch = String(url).match(/(?:^|[/_-])(?:w|width)[=_-]?(\d{3,5})(?=[/_?.-]|$)/i);
+      const pathMatch = String(url).match(/(?:^|[/_-])(?:w|width)[=_-]?(\d{3,5})(?=[/_,?.-]|$)/i);
       return pathMatch ? Number(pathMatch[1]) : 0;
     };
+    // A labelled original without a size hint retains its semantic priority;
+    // a size-limited "original" must compete with measured/advertised widths.
+    for (const name of ['data-original', 'data-original-src', 'data-full', 'data-full-src', 'data-zoom', 'data-hires', 'data-high-res']) {
+      const original = toAbsolute(img.getAttribute(name));
+      if (original) addCandidate(original, urlResolution(original) || Number.MAX_SAFE_INTEGER, 8);
+    }
+    const densityBase = Math.max(renderedWidth, Number(img.naturalWidth) || 0);
     const parseSet = (set, priority = 0) => {
-      // srcset descriptors (w/x) communicate the actual candidate size; choose the largest available.
-      (set || '').split(',').forEach((part) => {
-        const [value, descriptor] = part.trim().split(/\s+/);
-        if (!value) return;
-        let score = urlResolution(value);
-        if (descriptor && /w$/i.test(descriptor)) {
-          const width = Number.parseFloat(descriptor);
-          if (Number.isFinite(width)) score = Math.max(score, width);
-        } else if (descriptor && /x$/i.test(descriptor)) {
-          const density = Number.parseFloat(descriptor);
-          if (Number.isFinite(density)) score = Math.max(score, density * renderedWidth);
-        }
-        addCandidate(value, score, priority);
+      srcsetEntries(set).forEach(({url, descriptor}) => {
+        let score = urlResolution(url);
+        if (descriptor?.endsWith('w')) score = Math.max(score, Number.parseFloat(descriptor));
+        else if (descriptor?.endsWith('x')) score = Math.max(score, Number.parseFloat(descriptor) * densityBase);
+        addCandidate(url, score, priority);
       });
     };
 
@@ -411,7 +531,7 @@ async function scrapeAndSend(pdfName, mode, opts) {
     }) : [];
     // If the browser selected a <picture><source>, restrict the candidates to that same art direction/format.
     const selectedSource = pictureSources.find((source) =>
-      (source.srcset || source.getAttribute('data-srcset') || '').split(',').some((part) => toAbsolute(part.trim().split(/\s+/)[0]) === active));
+      srcsetEntries(source.srcset || source.getAttribute('data-srcset')).some((entry) => toAbsolute(entry.url) === active));
     if (selectedSource) {
       parseSet(selectedSource.srcset || selectedSource.getAttribute('data-srcset'), 3);
     } else {
@@ -487,7 +607,12 @@ async function scrapeAndSend(pdfName, mode, opts) {
       if (el.tagName === 'IMG') { add(bestSrc(el)); return; }
       if (el.tagName === 'SOURCE') {
         const srcset = el.getAttribute('srcset') || el.getAttribute('data-srcset');
-        if (srcset) { const first = srcset.split(',')[0].trim().split(/\s+/)[0]; add(first); }
+        if (srcset) {
+          const entries = srcsetEntries(srcset);
+          const size = (entry) => Number.parseFloat(entry.descriptor) * (entry.descriptor.endsWith('x') ? 1000 : 1) || 0;
+          entries.sort((a, b) => size(b) - size(a));
+          if (entries.length) add(entries[0].url);
+        }
         return;
       }
       // المان‌های container: هم تصاویر داخلی و هم background-image خودشان
@@ -506,6 +631,7 @@ async function scrapeAndSend(pdfName, mode, opts) {
   const scanImages = () => {
     const before = urls.length;
     if (imageSelector && scanImagesBySelector()) return urls.length - before;
+    if (deepSearch) return scanAllImages();
     document.querySelectorAll('img').forEach((img) => {
       const src = bestSrc(img);
       const rect = img.getBoundingClientRect();
@@ -563,7 +689,7 @@ async function scrapeAndSend(pdfName, mode, opts) {
     return urls.length - before;
   };
 
-  // جستجوی عمیق (اختیاری، فقط حالت اسکرول): هیچ فیلتر اندازه/آدرس/نمودی ندارد؛
+  // جستجوی عمیق (اختیاری، در هر سه روش): هیچ فیلتر اندازه/آدرس/نمودی ندارد؛
   // هر img و هر background-image صفحه جمع می‌شود و فقط مخزن مشترک (تکراری/بودجه data-URI) تصمیم می‌گیرد.
   const scanAllImages = () => {
     const before = urls.length;
@@ -585,37 +711,36 @@ async function scrapeAndSend(pdfName, mode, opts) {
 
   // ---------- رابط کاربری روی صفحه ----------
   const styleTag = document.createElement('style');
-  styleTag.textContent =
-    '@keyframes wtpdfSpin{to{transform:rotate(360deg)}}' +
-    '.wtpdf-overlay{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;' +
-    'padding:24px;background:rgba(3,5,10,.88);backdrop-filter:blur(4px);direction:rtl;pointer-events:none}' +
-    '.wtpdf-card{max-width:86vw;display:flex;flex-direction:column;align-items:center;gap:18px;' +
-    'background:rgba(15,19,28,.98);border:1px solid rgba(139,123,255,.55);border-radius:22px;padding:30px 38px;' +
-    'box-shadow:0 26px 80px rgba(0,0,0,.75),0 0 0 4px rgba(139,123,255,.16);text-align:center}' +
-    '.wtpdf-spinner{width:46px;height:46px;border-radius:50%;border:4px solid rgba(255,255,255,.16);' +
-    'border-top-color:#8b7bff;animation:wtpdfSpin .8s linear infinite}' +
-    '.wtpdf-card.wtpdf-cancel .wtpdf-spinner{animation:none;border-top-color:#fb7185}' +
-    '.wtpdf-msg{font:700 26px/1.7 Vazirmatn,Tahoma,sans-serif;color:#f2f4fb;white-space:pre-line}' +
-    '.wtpdf-hint{font:600 16px/1.6 Vazirmatn,Tahoma,sans-serif;color:#c9c2ff;opacity:.85}' +
-    // پنل کوچک تعاملی حالت دستی: فقط خود کارت کلیک می‌خورد، بقیه صفحه برای کاربر آزاد است
-    '.wtpdf-manual{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:2147483647;direction:rtl;max-width:92vw}' +
-    '.wtpdf-manual-card{display:flex;flex-direction:column;align-items:center;gap:10px;pointer-events:auto;' +
-    'background:rgba(15,19,28,.98);border:1px solid rgba(52,211,153,.55);border-radius:18px;padding:18px 24px;' +
-    'box-shadow:0 22px 70px rgba(0,0,0,.7),0 0 0 4px rgba(52,211,153,.14);text-align:center}' +
-    '.wtpdf-manual .wtpdf-msg{font:700 17px/1.6 Vazirmatn,Tahoma,sans-serif;color:#f2f4fb;white-space:pre-line;max-width:440px}' +
-    '.wtpdf-count{font:800 24px/1.4 Vazirmatn,Tahoma,sans-serif;color:#34d399}' +
-    '.wtpdf-manual .wtpdf-hint{font:600 12.5px/1.6 Vazirmatn,Tahoma,sans-serif;color:#c9c2ff;opacity:.9}' +
-    '.wtpdf-done{border:0;border-radius:12px;padding:11px 30px;cursor:pointer;' +
-    'background:linear-gradient(135deg,#34d399,#10b981);color:#06281d;' +
-    'font:800 15px/1 Vazirmatn,Tahoma,sans-serif;box-shadow:0 10px 28px -10px rgba(16,185,129,.85);transition:filter .15s,transform .15s}' +
-    '.wtpdf-done:hover{filter:brightness(1.08);transform:translateY(-1px)}' +
-    '.wtpdf-done:active{transform:scale(.97)}' +
-    '.wtpdf-gb-status{font:600 12px/1.6 Vazirmatn,Tahoma,sans-serif;color:#7dd3fc;direction:ltr;max-width:440px;word-break:break-all}' +
-    '.wtpdf-gb-error{font:600 11.5px/1.6 Vazirmatn,Tahoma,sans-serif;color:#fda4af;max-width:440px}' +
-    '.wtpdf-btn-row{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}' +
-    '.wtpdf-mini-btn{border:1px solid rgba(255,255,255,.25);background:rgba(255,255,255,.08);color:#f2f4fb;' +
-    'border-radius:10px;padding:8px 14px;cursor:pointer;pointer-events:auto;font:700 12.5px/1 Vazirmatn,Tahoma,sans-serif;transition:background .15s}' +
-    '.wtpdf-mini-btn:hover{background:rgba(255,255,255,.16)}';
+  const uiTheme = opts.uiTheme === 'light' ? 'light' : 'dark';
+  const collectionFont = chrome.runtime.getURL?.('assets/fonts/Vazirmatn.woff2');
+  styleTag.textContent = `
+    ${collectionFont ? `@font-face{font-family:HasayaCollectionVazirmatn;src:url(${JSON.stringify(collectionFont)}) format('woff2');font-weight:100 900;font-display:swap;}` : ''}
+    @keyframes wtpdfSpin{to{transform:rotate(360deg)}}
+    .wtpdf-root{--wtpdf-surface:#15242c;--wtpdf-surface2:#1c303a;--wtpdf-line:#29404a;--wtpdf-text:#e1eef2;--wtpdf-muted:#829da8;--wtpdf-accent:#6bd7ce;--wtpdf-action:#218b88;--wtpdf-danger:#fb7185;--wtpdf-scrim:rgba(6,17,24,.82);color-scheme:dark;font-family:HasayaCollectionVazirmatn,Vazirmatn,Tahoma,sans-serif}
+    .wtpdf-root[data-wtpdf-theme="light"]{--wtpdf-surface:#e4eceb;--wtpdf-surface2:#ccdcd9;--wtpdf-line:#b8d1d2;--wtpdf-text:#203c41;--wtpdf-muted:#6c898d;--wtpdf-accent:#15817b;--wtpdf-action:#167f79;--wtpdf-danger:#be123c;--wtpdf-scrim:rgba(16,40,45,.28);color-scheme:light}
+    .wtpdf-overlay{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;padding:24px;background:var(--wtpdf-scrim);backdrop-filter:blur(4px);direction:rtl;pointer-events:none}
+    .wtpdf-card{max-width:86vw;display:flex;flex-direction:column;align-items:center;gap:18px;background:var(--wtpdf-surface);border:1px solid var(--wtpdf-line);border-radius:18px;padding:30px 38px;box-shadow:0 26px 80px rgba(0,0,0,.3);text-align:center}
+    .wtpdf-spinner{width:46px;height:46px;border-radius:50%;border:4px solid var(--wtpdf-line);border-top-color:var(--wtpdf-accent);animation:wtpdfSpin .8s linear infinite}
+    .wtpdf-card.wtpdf-cancel .wtpdf-spinner{animation:none;border-top-color:var(--wtpdf-danger)}
+    .wtpdf-root .wtpdf-msg{font:700 26px/1.7 HasayaCollectionVazirmatn,Vazirmatn,Tahoma,sans-serif;color:var(--wtpdf-text);white-space:pre-line}
+    .wtpdf-root .wtpdf-hint{font:600 16px/1.6 HasayaCollectionVazirmatn,Vazirmatn,Tahoma,sans-serif;color:var(--wtpdf-muted)}
+    .wtpdf-manual{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:2147483647;direction:rtl;max-width:92vw}
+    .wtpdf-manual-card{display:flex;flex-direction:column;align-items:center;gap:10px;pointer-events:auto;background:var(--wtpdf-surface);border:1px solid var(--wtpdf-line);border-radius:14px;padding:18px 24px;box-shadow:0 22px 70px rgba(0,0,0,.3);text-align:center}
+    .wtpdf-manual .wtpdf-msg{font-size:17px;line-height:1.6;max-width:440px}
+    .wtpdf-count{font:800 24px/1.4 HasayaCollectionVazirmatn,Vazirmatn,Tahoma,sans-serif;color:var(--wtpdf-accent)}
+    .wtpdf-manual .wtpdf-hint{font-size:12.5px;line-height:1.6}
+    .wtpdf-done{border:0;border-radius:9px;padding:11px 30px;cursor:pointer;background:var(--wtpdf-action);color:#fff;font:800 15px/1 HasayaCollectionVazirmatn,Vazirmatn,Tahoma,sans-serif;box-shadow:none;transition:filter .15s,transform .15s}
+    .wtpdf-done:hover{filter:brightness(1.08);transform:translateY(-1px)}
+    .wtpdf-done:active{transform:scale(.97)}
+    .wtpdf-gb-status{font:600 12px/1.6 HasayaCollectionVazirmatn,Vazirmatn,Tahoma,sans-serif;color:var(--wtpdf-accent);direction:ltr;max-width:440px;word-break:break-all}
+    .wtpdf-gb-error{font:600 11.5px/1.6 HasayaCollectionVazirmatn,Vazirmatn,Tahoma,sans-serif;color:var(--wtpdf-danger);max-width:440px}
+    .wtpdf-btn-row{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+    .wtpdf-mini-btn{border:1px solid var(--wtpdf-line);background:var(--wtpdf-surface2);color:var(--wtpdf-text);border-radius:9px;padding:8px 14px;cursor:pointer;pointer-events:auto;font:700 12.5px/1 HasayaCollectionVazirmatn,Vazirmatn,Tahoma,sans-serif}
+    .wtpdf-mini-btn:hover{border-color:var(--wtpdf-accent)}
+    .wtpdf-root button:focus-visible{outline:2px solid var(--wtpdf-accent);outline-offset:3px}
+    @media(prefers-reduced-motion:reduce){.wtpdf-spinner{animation:none}.wtpdf-done{transition:none}}
+    @media(prefers-reduced-transparency:reduce){.wtpdf-overlay{backdrop-filter:none}}
+  `;
   document.documentElement.appendChild(styleTag);
 
   let uiRoot = null, card = null, say = () => {}, countEl = null;
@@ -626,6 +751,7 @@ async function scrapeAndSend(pdfName, mode, opts) {
     // پنل شناور بالای صفحه؛ بدون پوشش تیره تا کاربر سایت را ببیند و روی مثلث‌های خودش کلیک کند
     uiRoot = document.createElement('div');
     uiRoot.className = 'wtpdf-manual wtpdf-root';
+    uiRoot.dataset.wtpdfTheme = uiTheme;
     uiRoot.innerHTML =
       '<div class="wtpdf-manual-card">' +
       '<strong class="wtpdf-msg"></strong>' +
@@ -648,6 +774,7 @@ async function scrapeAndSend(pdfName, mode, opts) {
     // پوشش تمام‌صفحهٔ تیره با کارت وسط‌چین و قلم درشت (اسکرول و ورق‌زدن خودکار)
     uiRoot = document.createElement('div');
     uiRoot.className = 'wtpdf-overlay wtpdf-root';
+    uiRoot.dataset.wtpdfTheme = uiTheme;
     card = document.createElement('div');
     card.className = 'wtpdf-card';
     card.innerHTML = '<span class="wtpdf-spinner" aria-hidden="true"></span><span class="wtpdf-msg"></span>' +

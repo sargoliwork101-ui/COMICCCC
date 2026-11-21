@@ -22,7 +22,9 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
   let listener = null, translationRun = 0, responseMode = 'full';
   const coreSource = fs.readFileSync(path.join(__dirname, '../extension/src/core/page-translation.js'), 'utf8');
   vm.runInContext(coreSource, dom.getInternalVMContext(), { filename: 'page-translation.js' });
+  let themeChanged;
   window.chrome = {
+    storage: {local: {get: async () => ({hasaya_ui_theme: 'light'})}, onChanged: {addListener: fn => { themeChanged = fn; }}},
     runtime: {
       onMessage: { addListener: (callback) => { listener = callback; } },
       sendMessage: async (message) => {
@@ -55,6 +57,9 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
     availableAiEngines: [{ provider: 'openai', model: 'gpt-test' }] }, {}, (response) => { result = response; });
   await pause();
   const toolbar = window.document.querySelector('[data-wtpdf-page-translation-ui="toolbar"]');
+  check('translation dock uses saved Focus light theme', toolbar.dataset.focusTheme === 'light');
+  themeChanged({hasaya_ui_theme:{newValue:'dark'}}, 'local');
+  check('translation dock syncs theme without touching the site body', toolbar.dataset.focusTheme === 'dark' && !window.document.body.dataset.focusTheme);
   const pickToggle = window.document.querySelector('[data-action="pick-toggle"]');
   const group = (id) => window.__wtpdfPageTranslation.groups.find((item) => item.id === id);
   const versionControls = (id) => window.document.getElementById(id).querySelector('.wtpdf-page-translation-version-controls');
