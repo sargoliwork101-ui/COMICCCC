@@ -1,0 +1,152 @@
+/* Focus design tokens, approved in the standalone preview. All fonts/assets are packaged with the extension. */
+:root{color-scheme:dark;--bg:#101a20;--surface:#15242c;--panel:#15242c;--surface2:#1c303a;--surface3:#243e47;--line:#243944;--line2:#29404a;--text:#e1eef2;--muted:#829da8;--faint:#829da8;--a1:#6bd7ce;--a2:#218b88;--grad:linear-gradient(135deg,#218b88,#267e7a);--grad-ok:linear-gradient(135deg,#10b981,#34d399);--danger:#fb7185;--warning:#fbbf24;--shadow:0 18px 50px #0009;--glow:none;--glow-ok:none}
+:root[data-theme=light]{--a1:#15817b;--a2:#167f79;color-scheme:light;--bg:#d8e3e2;--surface:#e4eceb;--panel:#e4eceb;--surface2:#ccdcd9;--surface3:#c1d3d0;--line:#cee0e0;--line2:#b8d1d2;--text:#203c41;--muted:#506c70;--faint:#506c70;--shadow:0 18px 50px #24304a22}
+body{background:radial-gradient(circle at 85% -20%,#218b8810,transparent 38%),var(--bg);color:var(--text);font:13px/1.8 Vazirmatn,Tahoma,sans-serif}
+body :is(button,input,select,textarea){font-family:Vazirmatn,Tahoma,sans-serif}
+select{color-scheme:inherit}
+:is(.panel,.settings-card,.import-card,.studio-section,.card,.box,.output-panel,.tool-menu-body,.top-menu-panel,.modal-card,.ext-modal-card){background:var(--surface);border:1px solid var(--line2);border-radius:12px;color:var(--text)}
+:is(.topbar,.dock,.ed-head){background:var(--surface);color:var(--text);border-color:var(--line)}
+:is(.btn,.mini,.mode-btn,.seg-btn){border-radius:9px;box-shadow:none;font-size:12px;transition:background .15s,border-color .15s}
+:is(.mini,.btn.ghost,.btn.secondary){background:var(--surface2);color:var(--text);border:1px solid var(--line2)}
+:is(input:not([type=checkbox]):not([type=radio]):not([type=color]),select,textarea){background:var(--surface);color:var(--text);border-color:var(--line2)}
+:is(button,a,input,select,textarea,summary):focus-visible{outline:2px solid var(--a2);outline-offset:3px}
+:is(.studio-icon,button>svg,summary>svg){width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;vertical-align:middle}
+.studio-theme-toggle{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;flex:none;padding:5px;border:1px solid var(--line2);border-radius:9px;background:var(--surface2);color:var(--text);cursor:pointer}
+.studio-section{padding:12px;display:flex;flex-direction:column;gap:12px}
+.studio-section-title{display:flex;align-items:center;gap:8px;margin:0;color:var(--a2);font-size:12px;font-weight:700}
+.studio-action-group{display:flex;flex-wrap:wrap;align-items:center;gap:7px;padding:8px;border:1px solid var(--line);border-radius:10px;background:var(--surface2)}
+.studio-group-label{font-size:10px;font-weight:700;color:var(--muted);flex-basis:100%}
+.studio-help{font-size:11px;line-height:1.9;color:var(--muted)}
+.studio-help summary{cursor:pointer;color:var(--a2);font-weight:700}
+.studio-help p{margin:8px 0}
+#statusText{color:var(--text)}
+.top-menu-title{display:flex;align-items:center;gap:8px;color:var(--a2)}
+.settings-heading h1{font-size:20px}.settings-heading .studio-theme-toggle{margin-inline-start:auto}
+@supports(backdrop-filter:blur(1px)){
+ :is(.topbar,.dock,.top-menu-panel,.output-panel,.modal-card,.ext-modal-card){background:color-mix(in srgb,var(--surface) 92%,transparent);backdrop-filter:blur(18px)}
+}
+@media(prefers-reduced-transparency:reduce){:is(.topbar,.dock,.top-menu-panel,.output-panel,.modal-card,.ext-modal-card){background:var(--surface);backdrop-filter:none}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
+@media(max-width:600px){.studio-action-group{width:100%}.studio-group-label{flex-basis:100%}.topbar-in{gap:8px;flex-wrap:wrap}}
+
+.version-pill{color:var(--a1)}
+:is(.note,.muted,.menu-hint,.mode-hint){color:var(--muted)}
+.mode-btn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px}
+
+/* Viewer action capsules mirror Studio's .selection-actions/.action-group. */
+.toolbar.panel{background:color-mix(in srgb,var(--panel) 94%,transparent);border:1px solid var(--line);border-radius:13px;padding:11px 12px;box-shadow:none}
+.toolbar .toolbar-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.toolbar-actions .studio-action-group{display:inline-flex;align-items:center;flex:0 1 auto;gap:4px;flex-wrap:wrap;padding:4px 6px 4px 7px;border-radius:11px;border:1px solid var(--line2);background:color-mix(in srgb,var(--surface) 74%,var(--surface2));width:auto;min-width:0}
+.toolbar-actions .studio-group-label{flex:0 0 auto;font-size:10px;font-weight:800;color:var(--a2);padding:0 6px 0 4px;border-inline-end:1px solid var(--line2);margin-inline-end:2px;white-space:nowrap}
+.toolbar-actions .studio-action-group .mini{display:inline-flex;align-items:center;justify-content:center;gap:4.5px;padding:4px 8px;font-size:10.5px;line-height:1.5;min-height:27px;border-radius:8px;background:var(--surface2);border:1px solid var(--line2);color:var(--text);box-shadow:none}
+.toolbar-actions .studio-action-group .mini svg{width:14px;height:14px;stroke-width:1.85}
+.toolbar-actions .studio-action-group .mini:hover:not(:disabled){border-color:var(--a1);background:color-mix(in srgb,var(--a1) 12%,var(--surface2))}
+.toolbar-actions .studio-action-group .mini:disabled{opacity:.45;cursor:not-allowed}
+.toolbar-actions .studio-action-group .mini.warn{color:var(--danger)}
+.toolbar-actions .studio-action-group[aria-label="گروه‌بندی صفحات"]{border-color:color-mix(in srgb,var(--a1) 34%,var(--line2));background:color-mix(in srgb,var(--a1) 5%,var(--surface))}
+.toolbar-actions .studio-action-group[aria-label="گروه‌بندی صفحات"] .studio-group-label{color:var(--a1)}
+:root[data-theme=light] .toolbar-actions .studio-action-group[aria-label="گروه‌بندی صفحات"] .studio-group-label{color:var(--a1)}
+.toolbar .toolbar-selection-count{display:inline-flex;align-items:center;gap:5px;padding:3.5px 10px;font-size:11px;font-weight:600;line-height:1.8;border-radius:999px;border:1px solid color-mix(in srgb,var(--a1) 42%,var(--line2));background:color-mix(in srgb,var(--a1) 10%,var(--surface2));color:var(--text)}
+.toolbar .toolbar-selection-count::before{content:'';width:7px;height:7px;border-radius:50%;background:var(--a1);flex:none}
+.toolbar .toolbar-menus{margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
+.toolbar .toolbar-menus .tool-menu{width:fit-content;max-width:100%;border-color:var(--line2);border-radius:11px;background:var(--surface2)}
+.toolbar .tool-menu>summary{padding:5px 10px;font-size:10.5px;line-height:1.8}
+.toolbar .tool-menu[open]{width:100%;background:var(--surface)}
+@media(max-width:600px){.toolbar-actions .studio-action-group{flex:1 1 100%}.toolbar .toolbar-selection-count{margin-inline-start:0}}
+
+/* Equal header hit targets and glyph sizes for menu and theme. */
+.topbar-side :is(.studio-theme-toggle,.top-menu>summary){box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;min-width:36px;flex:none;padding:7px;border-radius:9px;border:1px solid var(--line2);background:var(--surface2);color:var(--text)}
+.topbar-side :is(.studio-theme-toggle,.top-menu>summary)>svg{width:18px;height:18px;stroke-width:1.8}
+.topbar-side .top-menu{display:flex;align-items:center}
+
+/* Compact text-labelled controls; icon-only header targets stay unchanged. */
+body :is(.btn,.mini,.seg-btn){display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:5px 9px;min-height:28px;border-radius:8px;font-size:11px;line-height:1.5}
+body :is(.btn,.mini,.mode-btn,.seg-btn)>svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
+body .mode-btn{padding:6px 4px;gap:4px;font-size:10.5px;line-height:1.5}
+.toolbar-actions .studio-action-group .mini{padding:3px 6px;min-height:25px;font-size:10px;gap:4px}
+body .output-close{display:inline-flex;align-items:center;gap:4px;padding:4px 8px;font-size:11px}
+@media(pointer:coarse){body :is(.btn,.mini,.mode-btn,.seg-btn){min-height:36px}}
+
+/* Focus surfaces apply to all extension workspaces, including dialogs/docks. */
+:is(.brand-logo,.version-pill){box-shadow:none}
+.version-pill{background:color-mix(in srgb,var(--a1) 9%,var(--surface));border-color:var(--line2)}
+:is(.mode-seg,.advanced,.tool-menu,.selected-file,.loading-card){background:var(--surface);border-color:var(--line2)}
+:is(.btn,.mini,.seg-btn,.settings-btn,.update-btn){box-shadow:none}
+:is(.mini.accent,.seg-btn.active){background:color-mix(in srgb,var(--a1) 12%,var(--surface));border-color:var(--a1);color:var(--a1)}
+:is(.mode-btn.active,.btn:not(.ghost):not(.ok)){background:var(--grad);color:#fff}
+:is(.item.selected,.item.selected .tw){border-color:var(--a1)}
+:is(.tick,.bar>div){background:var(--a2)}
+:is(.group-edit-status,.profile-status,.job-hint){color:var(--muted)}
+:is(.top-menu>summary:hover,.top-menu[open]>summary){background:color-mix(in srgb,var(--a1) 12%,var(--surface));border-color:var(--a1)}
+
+.import-header{background:var(--surface);border-color:var(--line)}
+
+/* Dialogs, warnings and progress share the same Focus surfaces in both themes. */
+:is(.ext-modal-card,.modal-card,.loading-card,.output-panel,.tool-menu-body){background:var(--surface);color:var(--text);border-color:var(--line2)}
+:is(.ext-modal-title,.ext-modal-msg,.loading-hint,.import-description){color:var(--text)}
+:is(.ext-modal,.loading-overlay){background:color-mix(in srgb,var(--bg) 78%,transparent)}
+.bar{background:var(--surface3)}
+.bar>div{box-shadow:none}
+:root[data-theme=light] :is(.update-status.err,.status.error,.import-status.error,.profile-status.bad,.ai-profile-status.bad,#failed){color:#be123c}
+:root[data-theme=light] :is(.update-status.warn,.load-errors){color:#92400e}
+:root[data-theme=light] :is(.update-status.ok,.status:not(.error),.import-status.success,.profile-status.ok,.ai-profile-status.ok){color:#047857}
+html{scrollbar-color:var(--line2) var(--bg)}
+::-webkit-scrollbar-thumb{background:var(--line2)}
+
+/* Structured, solid menu: no gallery text bleeding through the tools. */
+body .top-menu-panel{background:var(--surface);backdrop-filter:none;box-sizing:border-box;padding:14px;gap:14px}
+.top-menu-section{min-width:0}.top-menu-title .studio-icon{width:18px;height:18px;flex:none}
+.profile-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.profile-actions .mini{width:100%;min-height:34px;white-space:normal}
+.profile-actions #deleteProfileBtn{grid-column:1/-1}
+.top-menu-ocr{display:flex;flex-direction:column;align-items:stretch;gap:8px}
+.top-menu-ocr .check{display:flex;align-items:center;gap:8px;margin:0;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--surface2)}
+.top-menu-ocr .check input{flex:none;accent-color:var(--a2)}
+.top-menu-ocr .mini{width:100%;min-height:34px}
+.guide-footer{padding:8px 12px;text-align:center;font-size:11px}.guide-footer a,body p a{color:var(--a1)}
+
+.studio-guide-link{text-decoration:none;box-sizing:border-box}.topbar-side .studio-guide-link{width:36px;height:36px}.studio-guide-link svg{width:18px;height:18px}
+
+/* Result summary uses the same compact aligned actions as the workspace. */
+.menu-guide-link{width:36px;height:36px;text-decoration:none}
+body #result{display:grid;grid-template-columns:minmax(0,1fr) max-content;align-items:center;gap:12px;background:var(--surface);border-color:var(--line2);box-shadow:none}
+#result>:is(#statusText,.bar,#failed,#jobHint){grid-column:1/-1}
+#result #statusText{font-size:12px}
+#result .bar{height:6px}
+#result .stats{display:flex;gap:8px;min-width:0}
+#result .stat{flex:0 1 120px;max-width:120px;min-width:0;border-radius:9px;background:var(--surface2);padding:7px 12px}
+#result .stat b{font-size:16px}
+#result #downloadBtn{grid-column:2;width:auto;max-width:none;min-height:34px;padding:7px 14px;white-space:normal;text-align:center;box-sizing:border-box;background:var(--a2);color:#fff;box-shadow:none}
+#result #btnStopTr{width:auto;justify-self:end}
+@media(max-width:600px){body #result{grid-template-columns:minmax(0,1fr)}#result #downloadBtn{grid-column:1;justify-self:start;max-width:100%}#result .stat{flex:1;max-width:none}}
+
+#resultDialog{width:min(680px,calc(100vw - 32px));max-height:85vh;box-sizing:border-box;overflow:auto;padding:16px;border:1px solid var(--line2);border-radius:14px;background:var(--surface);color:var(--text);box-shadow:var(--shadow)}
+#resultDialog::backdrop{background:rgba(6,17,24,.68);backdrop-filter:blur(4px)}
+.result-dialog-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+.result-dialog-head h2{font-size:15px;margin:0;color:var(--a1)}
+#resultDialog #result{margin:0;padding:0;border:0;border-radius:0}
+#closeResultDialog{width:32px;height:32px;font-size:22px;flex:none}
+#reopenResultDialog{margin-bottom:10px;width:auto}
+
+.context-guide-link{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;vertical-align:middle;color:var(--a1);text-decoration:none;border-radius:6px}.context-guide-link:hover{background:var(--surface2)}.context-guide-link svg{width:16px;height:16px}
+
+/* Centered Studio-style output settings rather than a dock popover. */
+body #outputSettings #outputDialog{position:fixed;inset:0;margin:auto;transform:none;width:min(500px,calc(100vw - 28px));max-height:85vh;box-sizing:border-box;overflow:auto;padding:18px;border:1px solid var(--line2);border-radius:14px;background:var(--surface);color:var(--text);box-shadow:var(--shadow)}
+#outputDialog::backdrop{background:rgba(6,17,24,.68);backdrop-filter:blur(4px)}
+#outputDialog:not([open]){display:none}
+#outputDialog .output-panel-heading{padding-bottom:12px;border-bottom:1px solid var(--line)}
+body #outputDialog .opts{display:flex;flex-direction:column;gap:9px;margin-top:14px}
+#outputDialog .check{display:flex;align-items:center;gap:9px;background:var(--surface2);border:1px solid var(--line);border-radius:8px;min-height:36px;box-sizing:border-box}
+#outputDialog .check input{width:auto;flex:none;accent-color:var(--a2)}
+#outputDialog :is(input[type=text],select){box-sizing:border-box;width:100%;min-height:36px}
+#outputDialog label[for]{margin:4px 0 0;color:var(--muted)}
+.output-dialog-actions{display:flex;justify-content:flex-end;margin-top:18px;padding-top:12px;border-top:1px solid var(--line)}
+#outputDialog #startOutputDialog{width:auto;min-height:34px;padding:7px 16px}
+
+.dock .seg-btn.active{box-shadow:none}.dock-actions{gap:6px}.dock-actions .output-settings{flex:none}.dock-actions .output-settings>summary{min-height:34px;box-sizing:border-box}
+@media(max-width:600px){.dock-actions{flex-wrap:wrap}.dock-actions .output-settings{flex:0 0 auto}.dock-actions .output-settings>summary{min-width:120px}}
+
+.dock-actions #outputSettings>summary{display:flex;align-items:center;gap:7px;min-width:110px}.dock-actions #outputSettings>summary::after{display:none}.dock-actions #outputSettings>summary svg{width:16px;height:16px}.dock-center:has(>.seg.hidden){display:none}
+
+/* Keep the viewer tools below the sticky header, never hidden behind it. */
+body .toolbar.panel{position:sticky;top:var(--viewer-header-height,80px);z-index:40;background:var(--surface);backdrop-filter:none}

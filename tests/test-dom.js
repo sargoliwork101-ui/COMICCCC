@@ -124,8 +124,8 @@ const $ = (id) => window.document.getElementById(id);
   check('manifest name and action title use HASAYA', manifest.name === 'HASAYA' &&
     manifest.action.default_title === 'HASAYA');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
-  check('manifest and viewer version badge are synchronized at 3.29', manifest.version === '3.29' &&
-    window.document.querySelector('.version-pill').textContent.includes('۳.۲۹'));
+  check('manifest and viewer version badge are synchronized at 3.30', manifest.version === '3.30' &&
+    window.document.querySelector('.version-pill').textContent.includes('۳.۳۰'));
   const viewerCss = fs.readFileSync(path.join(ROOT, 'src/viewer/viewer.css'), 'utf8');
   check('topbar keeps the hamburger visible while the page scrolls',
     /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(viewerCss));
@@ -137,9 +137,7 @@ const $ = (id) => window.document.getElementById(id);
   const editorImage = viewerCss.match(/\.ed-stage img\s*\{([^}]*)\}/);
   check('large and editor previews keep square image corners',
     !!lightboxImage && !!editorImage && hasZeroRadius(lightboxImage[1]) && hasZeroRadius(editorImage[1]));
-  check('PDF-to-image import opens the dedicated converter tab',
-    !!window.document.getElementById('btnImportPdf') &&
-    /زبانهٔ جدا/.test(window.document.getElementById('btnImportPdf').title));
+  check('viewer removes duplicate PDF import control', !window.document.getElementById('btnImportPdf'));
   check('manifest icon files declared', [16, 32, 48, 128].every((s) => manifest.icons[String(s)] === `assets/icons/icon${s}.png`) &&
     manifest.action.default_icon['128'] === 'assets/icons/icon128.png');
   check('brand logo points at the new icon file',
@@ -160,7 +158,7 @@ const $ = (id) => window.document.getElementById(id);
   check('group menu stays in toolbar, outside hamburger', !!window.document.querySelector('.toolbar #groupMenu') &&
     !topMenu.contains($('groupMenu')));
   check('OCR-only contrast control exists and defaults on', !!$('trContrast') && $('trContrast').checked &&
-    /فقط برای OCR/.test($('trContrast').parentElement.textContent));
+    /کنتراست بهتر برای خواندن متن/.test($('trContrast').parentElement.textContent));
   check('OCR uses one local Tesseract page-segmentation method',
     !$('trOcrProfile') && /یک روش صفحه‌بندی/.test($('ocrMethodNote').textContent));
   check('optional AI settings stay collapsed to avoid clutter', $('aiSettings') && $('aiSettings').tagName === 'DETAILS' && !$('aiSettings').open);
@@ -214,7 +212,7 @@ const $ = (id) => window.document.getElementById(id);
       'api.openai.com', 'openrouter.ai', 'api.avalai.ir'].every((host) => refererExclusions.includes(host)),
     refererExclusions);
   check('cards rendered', $('grid').children.length === 3);
-  $('btnImportPdf').click();
+  ev('openPdfImportTab()');
   await sleep(20);
   check('PDF converter opens in a separate extension tab',
     /pdf-import\.html\?/.test(window.__openedPdfImportUrl || '') && /returnTab=17/.test(window.__openedPdfImportUrl || ''),

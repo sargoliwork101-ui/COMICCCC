@@ -239,6 +239,7 @@ async function runTranslate() {
   refreshSummary();
   const result = $('result');
   result.classList.remove('hidden', 'done');
+  window.openResultDialog?.();
   $('downloadBtn').classList.add('hidden');
   $('btnStopTr').classList.remove('hidden');
   $('failed').innerText = '';

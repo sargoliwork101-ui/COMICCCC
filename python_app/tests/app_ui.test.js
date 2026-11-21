@@ -402,7 +402,7 @@ function check(name, condition) {
   check('repeated text reuse can be disabled and saved', aiSaveRequests.at(-1).reuse_repeated === false && !$('aiReuseRepeated').checked);
   check('successful settings save closes the dialog', !$('aiDialog').open);
   $('aiBtn').click(); await sleep(20); aiSaveFailure = true; $('saveAiBtn').click(); await sleep(20);
-  check('settings server failure keeps the dialog open and offers a copyable HTTP error', $('aiDialog').open && $('aiStatus').textContent.includes('HTTP 503') && !$('copyAiError').classList.contains('hidden') && !$('saveAiBtn').disabled);
+  check('settings server failure keeps the dialog open and offers a copyable HTTP error', $('aiDialog').open && $('aiStatus').textContent.includes('کد 503') && $('aiStatus').dataset.technicalMessage.includes('HTTP 503') && !$('copyAiError').classList.contains('hidden') && !$('saveAiBtn').disabled);
   aiSaveFailure = false;
   const beforeInvalidSave = aiSaveRequests.length;
   const timeoutInput = $('aiProfiles').querySelector('.ai-profile-timeout_seconds'); timeoutInput.value = '4'; timeoutInput.dispatchEvent(new window.Event('input', {bubbles:true}));
@@ -708,6 +708,7 @@ function check(name, condition) {
   check('translation progress dialog closes after success', !$('translationDialog').open);
   check('finishing translation automatically selects translation display mode', $('overlayMode').value === 'translation' && $('exportOverlayMode').value === 'translation');
   check('finishing translation places translated text on the image', renderedBlocks[0].tr === 'ترجمهٔ تازه' && !renderedBlocks[0]._plainText);
+  check('v4.60 completed translation report counts the persisted tr field, not a nonexistent translated field', $('jobReportBody').textContent.includes('درصد ترجمه‌شده: 100٪') && $('jobReportBody').textContent.includes('ترجمه‌شده: 1 از 1 متن') && !$('jobReportBody').textContent.includes('ترجمه‌نشده:'));
   await vm.runInContext('openEditor(state.project.images[0].id)', context);
   const retranslateButton = [...$('blockList').querySelectorAll('button')].find((button) => button.textContent === 'ترجمهٔ دوباره');
   retranslateButton.click(); await sleep(20);
@@ -740,7 +741,7 @@ function check(name, condition) {
   previewFailure = 'server';
   $('translationSkill').value = 'new guidance'; $('translationSkill').dispatchEvent(new window.Event('input', {bubbles:true}));
   $('translationPreviewConfirm').click(); await sleep(20);
-  check('preview refresh errors remain visible and copyable with HTTP details', $('translationPreviewDialog').open && $('translationPreviewError').textContent.includes('HTTP 503') && $('translationPreviewError').textContent.includes('simulated preview outage') && !$('copyTranslationPreviewError').classList.contains('hidden') && $('translationPreviewConfirm').textContent.includes('به‌روزرسانی') && translationCalls.length === sendsBeforePreparationFailure);
+  check('preview refresh errors remain visible and copyable with HTTP details', $('translationPreviewDialog').open && $('translationPreviewError').textContent.includes('کد 503') && !$('translationPreviewError').textContent.includes('simulated preview outage') && $('translationPreviewError').dataset.technicalMessage.includes('HTTP 503') && $('translationPreviewError').dataset.technicalMessage.includes('simulated preview outage') && !$('copyTranslationPreviewError').classList.contains('hidden') && $('translationPreviewConfirm').textContent.includes('به‌روزرسانی') && translationCalls.length === sendsBeforePreparationFailure);
   $('translationPreviewCancel').click(); previewFailure = null; vm.runInContext("state.ai.provider = 'free'", context);
 
   const stalePreviewCallsBefore = translationPreviewCalls.length;
@@ -2113,10 +2114,12 @@ function check(name, condition) {
         const prevProject = JSON.parse(JSON.stringify(state.project));
         const sequence = [];
         try {
-          state.project.images = [
-            { id: 'pg-1', name: 'page-1.png', file: 'pg-1.png', width: 200, height: 120, format: 'PNG', bytes: 100, order: 0, selected: true, approved: false, groupId: null, crop: null, edited: false, blocks: [] },
-            { id: 'pg-2', name: 'page-2.png', file: 'pg-2.png', width: 200, height: 120, format: 'PNG', bytes: 100, order: 1, selected: true, approved: false, groupId: null, crop: null, edited: false, blocks: [] },
-          ];
+          // Exceed the reported 25-page failure and all three former ten-page recycle boundaries.
+          state.project.images = Array.from({length: 32}, (_, i) => ({
+            id: 'pg-' + (i + 1), name: 'page-' + (i + 1) + '.png', file: 'pg-' + (i + 1) + '.png',
+            width: 200, height: 120, format: 'PNG', bytes: 100, order: i, selected: true,
+            approved: false, groupId: null, crop: null, edited: false, blocks: [],
+          }));
           renderGrid();
           const img1Before = document.querySelector('#grid .item[data-id="pg-1"] .tw > img');
           const img2Before = document.querySelector('#grid .item[data-id="pg-2"] .tw > img');
@@ -2142,12 +2145,12 @@ function check(name, condition) {
               }
               return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => nextProj, text: async () => JSON.stringify(nextProj) };
             }
-            if (u.endsWith('/pg-1/rendered') || u.endsWith('/pg-2/rendered')) {
-              const pid = u.includes('/pg-1/') ? 'pg-1' : 'pg-2';
+            if (u.includes('/images/pg-') && u.endsWith('/rendered')) {
+              const pid = u.split('/images/')[1].split('/')[0];
               sequence.push('placed:' + pid);
               return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ ok: true }), text: async () => '{"ok":true}' };
             }
-            if (u.includes('/images/pg-1/content') || u.includes('/images/pg-2/content')) {
+            if (u.includes('/images/pg-') && u.includes('/content')) {
               return origFetch('/api/projects/project-ui/images/image-ui/content');
             }
             return origFetch(url, options);
@@ -2175,13 +2178,127 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v3.99 processes multi-page OCR strictly page-by-page (placing text & freeing RAM after page 1 before starting page 2), reuses unchanged grid <img> nodes, and clears dialog bitmaps on close',
+      'v4.60 processes 32 OCR pages in order without mid-batch engine recycling, places each page before the next, reuses grid images, and clears preview bitmaps',
       v399PerPageCheck.img1Reused === true
-        && v399PerPageCheck.sequence === 'ocr:pg-1:keep=true -> placed:pg-1 -> ocr:pg-2:keep=false -> placed:pg-2'
+        && v399PerPageCheck.sequence === Array.from({length: 32}, (_, i) => `ocr:pg-${i + 1}:keep=${i < 31} -> placed:pg-${i + 1}`).join(' -> ')
         && v399PerPageCheck.hadPreviewSrc === true
         && v399PerPageCheck.clearedPreviewSrc === true,
       JSON.stringify(v399PerPageCheck),
     );
+  }
+
+  // v4.60: persisted content, not source/AI flags/empty HTML, defines completion.
+  {
+    const parserContext = vm.createContext({document: window.document, module: {exports: {}}});
+    vm.runInContext(fs.readFileSync(path.join(root, 'typeset.js'), 'utf8'), parserContext);
+    const originalRichParser = window.Typeset.richHtmlWords;
+    window.Typeset.richHtmlWords = parserContext.module.exports.richHtmlWords;
+    const stats = vm.runInContext(`
+      (() => {
+        const blocks = [
+          {text:'one', tr:'ترجمه', enabled:true},
+          {text:'two', tr:'', richHtml:'<b>ترجمهٔ قالب‌دار</b>'},
+          {text:'three', tr:'  ', richHtml:'<p><br></p>'},
+          {text:'four', tr:'', richHtml:'<p>&nbsp;</p>'},
+          {text:'five', tr:'', translated:'obsolete value', aiTranslated:true},
+          {text:'disabled', tr:'ترجمه', enabled:false},
+          {text:'  ', tr:'بدون متن مبنا'},
+        ];
+        const result = translationReportStats([{blocks}]);
+        const empty = translationReportStats([]);
+        const saved = state.project;
+        try {
+          state.project = {...saved, images:[{...saved.images[0], blocks}]};
+          renderGrid();
+          const badge = document.querySelector('#grid .translation-state-badge');
+          return {...result, zero: empty.total === 0 && empty.percentage === 0,
+            partial: badge.classList.contains('tl-partial') && badge.title.startsWith('3 از 6')};
+        } finally { state.project = saved; renderGrid(); }
+      })()
+    `, context);
+    window.Typeset.richHtmlWords = originalRichParser;
+    check('v4.60 translation stats count saved plain/rich text and exclude empty markup, stale flags, disabled and source-free blocks', stats.total === 5 && stats.translated === 2 && stats.untranslated === 3 && stats.percentage === 40 && stats.zero && stats.partial);
+  }
+
+  // v4.60: localize presentation without destroying copyable diagnostics.
+  {
+    const noticeCheck = vm.runInContext(`
+      (() => {
+        const input = 'POST /api/projects/private-id/ocr — HTTP 503: PP-OCR worker exited: 73';
+        const before = new Error(input);
+        toast(before.message, true);
+        const element = document.getElementById('toast');
+        const safe = localizeToastMessage('Failed to fetch').includes('عدم برقراری');
+        const memory = localizeToastMessage('out of memory').includes('حافظه');
+        const disk = localizeToastMessage('No space left on device').includes('دیسک');
+        const access = localizeToastMessage('Permission denied').includes('دسترسی');
+        const timeout = localizeToastMessage('request timed out').includes('زمان انتظار');
+        const unknown = localizeToastMessage('Unexpected native diagnostic').includes('گزارش');
+        const originalPreserved = noticeTechnicalText(element) === input && before.message === input;
+        const output = element.textContent;
+        element.textContent = 'وضعیت تازه';
+        const noStaleCopy = noticeTechnicalText(element) === 'وضعیت تازه';
+        setNoticeText(element, '<img src=x onerror=alert(1)>');
+        const noMarkup = !element.querySelector('img');
+        toast('هشدار: فضای ذخیره‌سازی کم است');
+        return safe && memory && disk && access && timeout && unknown && originalPreserved
+          && output.includes('کد 503') && output.includes('کد خروج 73')
+          && !output.includes('/api/') && noMarkup && noStaleCopy;
+      })()
+    `, context);
+    check('v4.60 Persian notices preserve exact technical diagnostics, error semantics and text-only safety', noticeCheck);
+  }
+
+  // v4.60: offscreen image eviction must preserve metadata, click handlers,
+  // reloads, and ignore observer callbacks queued by an older grid/project.
+  {
+    const result = await vm.runInContext(`
+      (() => {
+        const original = window.IntersectionObserver;
+        const observers = [];
+        const host = document.createElement('div');
+        document.body.append(host);
+        try {
+          window.IntersectionObserver = class {
+            constructor(callback) { this.callback = callback; observers.push(this); }
+            observe() {}
+            disconnect() { this.disconnected = true; }
+          };
+          const images = Array.from({length: 36}, (_, i) => {
+            const image = document.createElement('img');
+            image.dataset.renderedSrc = '/page-' + i + '.png?v=2';
+            image.onclick = () => i;
+            host.append(image);
+            return image;
+          });
+          const emit = (observer, items, visible) => observer.callback(items.map(target => ({target, isIntersecting: visible})));
+          observeGridImages(images);
+          const first = observers[0];
+          const initiallyEmpty = images.every(image => !image.hasAttribute('src'));
+          emit(first, images.slice(0, 4), true);
+          emit(first, images.slice(0, 4), false);
+          emit(first, images.slice(32), true);
+          const bounded = images.filter(image => image.hasAttribute('src')).length === 4;
+          const preserved = images[0].dataset.renderedSrc.endsWith('?v=2') && images[0].onclick() === 0;
+          emit(first, [images[0]], true);
+          const reloaded = images[0].getAttribute('src') === '/page-0.png?v=2';
+          observeGridImages(images);
+          emit(first, [images[0]], false);
+          const ignoredOld = images[0].hasAttribute('src') && first.disconnected;
+          const current = observers[1];
+          images[0].remove();
+          images[0].removeAttribute('src');
+          emit(current, [images[0]], true);
+          const ignoredDetached = !images[0].hasAttribute('src');
+          return initiallyEmpty && bounded && preserved && reloaded && ignoredOld && ignoredDetached;
+        } finally {
+          host.remove();
+          window.IntersectionObserver = original;
+          renderGrid();
+        }
+      })()
+    `, context);
+    check('v4.60 bounds grid pixel ownership to visible pages, preserves reload/click metadata, and ignores stale/detached callbacks', result);
   }
 
   // v4.00: Version 4.00 + Optional Custom Storage & Downloads Directory Settings UI (#storageBtn, #modelsStorageBtn, #storageDialog)
@@ -2271,7 +2388,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas426: verText.includes('۴.۳۰'),
+            verHas426: verText.includes('۴.۶۰'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2290,7 +2407,7 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.30 displays version 4.30 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      'v4.00/v4.30 displays version 4.60 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
       v400StorageCheck.verHas426 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
@@ -4512,7 +4629,7 @@ function check(name, condition) {
           && helpModes.features.some((f) => f.includes('دانلود خودکار فایل زبان فارسی') && f.includes('fas'))
         );
         const verText = document.querySelector('.brand .ver')?.textContent || '';
-        return { helpHasV427Table, helpHasV428AutoLang, verHas428: verText.includes('۴.۳۰') };
+        return { helpHasV427Table, helpHasV428AutoLang, verHas428: verText.includes('۴.۶۰') };
       })()
     `, context);
     check(
@@ -4629,7 +4746,7 @@ function check(name, condition) {
       const detail = document.getElementById('serverAlertDetail').textContent || '';
       window.fetch = async (url, opts = {}) => {
         const parsed = new URL(url, 'http://127.0.0.1:8765');
-        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.55' });
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.60' });
         return origFetch(url, opts);
       };
       document.getElementById('serverAlertRetry').click();
@@ -4643,7 +4760,7 @@ function check(name, condition) {
     'v4.30 shows a Persian recovery banner when the local app stops answering and the retry button clears it',
     v430AlertCheck.visible === true
       && /ارتباط با برنامه/.test(v430AlertCheck.text)
-      && v430AlertCheck.detail === 'simulated outage'
+      && /عملیات کامل نشد/.test(v430AlertCheck.detail)
       && v430AlertCheck.hiddenAfterRetry === true,
     JSON.stringify(v430AlertCheck),
   );

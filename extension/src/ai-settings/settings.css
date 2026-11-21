@@ -14,7 +14,7 @@ h1 { margin: 2px 0 4px; font-size: clamp(20px, 4vw, 26px); }
 .field { display: flex; flex-direction: column; gap: 7px; }
 .field > label, .profile-heading label { font-size: 12px; font-weight: 700; }
 .field input, .field select, .field textarea, .profile-row input { min-width: 0; width: 100%; padding: 10px 12px; border: 1px solid var(--line2); border-radius: 10px; background: rgba(255,255,255,.04); color: var(--text); font: inherit; outline: none; }
-.field input:focus, .field select:focus, .field textarea:focus, .profile-row input:focus { border-color: var(--a1); box-shadow: 0 0 0 3px rgba(139,123,255,.16); }
+.field input:focus, .field select:focus, .field textarea:focus, .profile-row input:focus { border-color: var(--a1); box-shadow: 0 0 0 3px rgba(107,215,206,.16); }
 .field textarea { min-height: 110px; resize: vertical; }
 .field input[dir="ltr"] { text-align: left; }
 .profile-heading { flex-direction: row; justify-content: space-between; align-items: center; gap: 12px; }
@@ -29,8 +29,8 @@ h1 { margin: 2px 0 4px; font-size: clamp(20px, 4vw, 26px); }
 .profile-status:empty { display: none; }
 .profile-status.ok { color: #6ee7b7; }
 .profile-status.bad { color: #fda4af; }
-#keyHelp a { color: #b9afff; }
-.privacy-note { margin: 0; padding: 11px 12px; border-right: 3px solid var(--a1); border-radius: 8px; background: rgba(139,123,255,.07); color: #d5cfe9; font-size: 11px; line-height: 1.9; }
+#keyHelp a { color: var(--a1); }
+.privacy-note { margin: 0; padding: 11px 12px; border-right: 3px solid var(--a1); border-radius: 8px; background: rgba(107,215,206,.07); color: var(--text); font-size: 11px; line-height: 1.9; }
 .status { min-height: 20px; margin: 0; color: #6ee7b7; font-size: 12px; }
 .status.error { color: #fda4af; }
 .actions { display: flex; justify-content: flex-start; }

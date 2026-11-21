@@ -21,8 +21,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+import anyio
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from PIL import UnidentifiedImageError
@@ -132,6 +133,45 @@ class PendingResultConflict(Exception):
         super().__init__('نتیجه آماده است اما با تغییرات پروژه تعارض دارد؛ نتیجه حفظ شد و به انتخاب شما نیاز دارد.')
         self.token = token
         self.kind = kind
+
+
+class _RenderedImageResponse(Response):
+    """Stream one opened generation of a replaceable PNG, with bounded memory.
+
+    FileResponse stats a path before opening it. An atomic render replacement
+    between those steps can give the old Content-Length with the new body,
+    aborting the HTTP response. Obtain both length and bytes from the same fd.
+    """
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(media_type="image/png")
+        self.path = path
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            file = await anyio.open_file(self.path, "rb")
+        except FileNotFoundError:
+            await JSONResponse({"detail": "تصویر ویرایش‌شده دیگر موجود نیست؛ پیش‌نمایش را تازه کنید."}, status_code=404)(scope, receive, send)
+            return
+        try:
+            info = await run_in_threadpool(os.fstat, file.fileno())
+            headers = {"Content-Length": str(info.st_size), "Cache-Control": "no-store"}
+
+            async def chunks():
+                while chunk := await file.read(64 * 1024):
+                    yield chunk
+
+            if scope.get("method") == "HEAD":
+                response = Response(media_type="image/png", headers=headers)
+            else:
+                # No range advertisement: PNG clients receive one consistent
+                # full generation, not a mixture of versions across requests.
+                response = StreamingResponse(chunks(), media_type="image/png", headers=headers)
+            await response(scope, receive, send)
+        finally:
+            # Disconnect cancellation must not leave a file/Windows lock open.
+            with anyio.CancelScope(shield=True):
+                await file.aclose()
 
 
 class _CleanupFileResponse(FileResponse):
@@ -910,6 +950,8 @@ def create_app() -> FastAPI:
                 path = store.image_path(project_id, image_id, edited)
         except (KeyError, FileNotFoundError) as exc:
             raise HTTPException(404, "تصویر موردنظر پیدا نشد.") from exc
+        if path.name == f"{image_id}-edited.png":
+            return _RenderedImageResponse(path)
         return FileResponse(path, headers={"Cache-Control": "no-store"})
 
     def _save_rendered_and_release(project_id: str, image_id: str, content: bytes) -> dict[str, Any]:

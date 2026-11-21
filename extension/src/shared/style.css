@@ -2,19 +2,19 @@
 
 :root {
   color-scheme: dark;
-  --bg: #090b0f; --surface: #11151c; --surface2: #171c26; --surface3: #1f2632;
+  --bg: #101a20; --surface: #15242c; --surface2: #1c303a; --surface3: #243e47;
   --line: rgba(255,255,255,.08); --line2: rgba(255,255,255,.16);
-  --text: #e9ecf3; --muted: #8c94a8; --faint: #5d6579;
-  --a1: #8b7bff; --a2: #4f8cff;
-  --grad: linear-gradient(135deg, #8b7bff 0%, #4f8cff 100%);
+  --text: #e1eef2; --muted: #829da8; --faint: #6c898d;
+  --a1: #6bd7ce; --a2: #218b88;
+  --grad: linear-gradient(135deg, #6bd7ce 0%, #218b88 100%);
   --grad-ok: linear-gradient(135deg, #34d399 0%, #10b981 100%);
-  --glow: 0 10px 30px -8px rgba(99,115,255,.6);
+  --glow: 0 10px 30px -8px rgba(33,139,136,.6);
   --glow-ok: 0 10px 30px -8px rgba(16,185,129,.55);
 }
 * { box-sizing: border-box; }
 select { color-scheme: dark; background-color: var(--surface); color: var(--text); }
 select option { background-color: var(--surface2); color: var(--text); }
-html { scrollbar-color: #2a3140 transparent; }
+html { scrollbar-color: #29404a transparent; }
 body {
   margin: 0; color: var(--text); font-family: 'Vazirmatn', sans-serif;
   background:
@@ -23,19 +23,19 @@ body {
     var(--bg);
   background-attachment: fixed;
 }
-::selection { background: rgba(139,123,255,.45); }
+::selection { background: rgba(107,215,206,.45); }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb { background: #2a3140; border-radius: 99px; border: 2px solid var(--bg); }
+::-webkit-scrollbar-thumb { background: #29404a; border-radius: 99px; border: 2px solid var(--bg); }
 
 .brand { display: flex; align-items: center; gap: 12px; }
 .brand-logo { width: 46px; height: 46px; flex: none; border-radius: 14px; overflow: hidden; display: grid; place-items: center;
-  background: var(--grad); box-shadow: 0 8px 22px -8px rgba(99,115,255,.8); padding: 4px; }
+  background: var(--grad); box-shadow: 0 8px 22px -8px rgba(33,139,136,.8); padding: 4px; }
 .brand-logo img { width: 100%; height: 100%; border-radius: 10px; display: block; }
 .brand-text { min-width: 0; }
 .brand-text h1 { margin: 0; font: 800 18px/1.3 'Vazirmatn', sans-serif; letter-spacing: .2px; direction: ltr; text-align: right; }
 .brand-text p { margin: 1px 0 0; direction: rtl; color: var(--muted); font: 500 11.5px/1.5 'Vazirmatn', sans-serif; }
-.version-pill { margin-inline-start: auto; flex: none; font: 700 10.5px 'Vazirmatn', sans-serif; color: #c9c2ff;
-  background: rgba(139,123,255,.14); border: 1px solid rgba(139,123,255,.35); padding: 4px 11px; border-radius: 999px; }
+.version-pill { margin-inline-start: auto; flex: none; font: 700 10.5px 'Vazirmatn', sans-serif; color: var(--a1);
+  background: rgba(107,215,206,.14); border: 1px solid rgba(107,215,206,.35); padding: 4px 11px; border-radius: 999px; }
 
 label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 6px; }
 input[type=text], input[type=number] {
@@ -44,7 +44,7 @@ input[type=text], input[type=number] {
   direction: ltr; text-align: left; transition: border-color .15s, box-shadow .15s, background .15s;
 }
 input[type=text]::placeholder, input[type=number]::placeholder { color: var(--faint); direction: rtl; }
-input[type=text]:focus, input[type=number]:focus { border-color: var(--a1); background: rgba(255,255,255,.06); box-shadow: 0 0 0 3px rgba(139,123,255,.22); }
+input[type=text]:focus, input[type=number]:focus { border-color: var(--a1); background: rgba(255,255,255,.06); box-shadow: 0 0 0 3px rgba(107,215,206,.22); }
 input[type=number] { direction: rtl; text-align: right; }
 input[type=number]::placeholder { direction: rtl; }
 
@@ -74,7 +74,7 @@ input[type=number]::placeholder { direction: rtl; }
 }
 .ext-modal-card {
   width: min(420px, 100%); display: flex; flex-direction: column; gap: 12px;
-  background: linear-gradient(155deg, rgba(139,123,255,.11), var(--surface) 46%);
+  background: linear-gradient(155deg, rgba(107,215,206,.11), var(--surface) 46%);
   border: 1px solid var(--line2); border-radius: 18px; padding: 18px 20px;
   box-shadow: 0 24px 60px -20px rgba(0,0,0,.88);
 }

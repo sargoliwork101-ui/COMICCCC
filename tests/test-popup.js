@@ -30,6 +30,15 @@ window.document.body.appendChild(img({ src: 'https://cdn.test/small.gif' }, 100,
 const srcset = img({ src: 'https://cdn.test/loading.gif' }, 300, 300);
 srcset.setAttribute('srcset', 'https://cdn.test/set-1x.jpg 1x, https://cdn.test/set-2x.jpg 2x');
 window.document.body.appendChild(srcset);
+// Regressions: stale explicit originals, density-corrected intrinsic width,
+// and commas inside CDN transformation URLs must not pick a smaller source.
+const staleOriginal = img({src:'https://cdn.test/stale-loaded.jpg', 'data-original':'https://cdn.test/original?w=240', srcset:'https://cdn.test/stale-best.jpg 2000w'}, 300, 400);
+window.document.body.appendChild(staleOriginal);
+const densityImage = img({src:'https://cdn.test/density-one.jpg', srcset:'https://cdn.test/density-one.jpg 1x, https://cdn.test/density-two.jpg 2x'}, 800, 1000);
+Object.defineProperty(densityImage, 'clientWidth', {value:200});
+window.document.body.appendChild(densityImage);
+window.document.body.appendChild(img({src:'https://cdn.test/comma-thumb.jpg', srcset:'https://cdn.test/image/upload/w_400,q_auto/book.jpg 400w, https://cdn.test/image/upload/w_2400,q_auto/book.jpg 2400w'}, 300, 400));
+
 // Regression: the browser has already loaded a small src candidate, but a larger responsive file exists.
 const responsiveLoaded = img({ src: 'https://cdn.test/comic-page-300.jpg' }, 300, 420);
 responsiveLoaded.setAttribute('srcset', 'https://cdn.test/comic-page-300.jpg 300w, https://cdn.test/comic-page-1800.jpg 1800w');
@@ -168,7 +177,7 @@ check('popup reveals the box only via showError', /const showError = \(text\)/.t
   check('helper: scroll mode shows the scroll fields', !scrollStub.classList.contains('hidden'));
   window.eval('applyModeFields("auto")');
   check('helper: auto mode reveals the paged fields', !pagedStub.classList.contains('hidden'));
-  check('helper: auto mode hides the scroll fields', scrollStub.classList.contains('hidden'));
+  check('helper: auto mode preserves common deep search', !scrollStub.classList.contains('hidden'));
   window.eval('applyModeFields("manual")');
   check('helper: manual mode keeps the paged fields visible', !pagedStub.classList.contains('hidden'));
   window.eval('applyModeFields("scroll")');
@@ -207,6 +216,9 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
   vm.runInContext(popupCode, c, { filename: 'popup.js' });
   if (clickStart) {
     w.document.getElementById('startBtn').click();
+    w.document.querySelector('[data-mode=scroll]').click();
+    w.document.getElementById('collectionReview').click();
+    w.document.getElementById('extModalOk').click();
     await new Promise((r) => setTimeout(r, 10));
   }
   return {
@@ -231,6 +243,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     };
     vm.runInContext(popupCode, pdfDom.getInternalVMContext(), { filename: 'popup.js' });
     pdfWindow.document.getElementById('pdfConvertBtn').click();
+    pdfWindow.document.getElementById('extModalOk').click();
     await new Promise((resolve) => setTimeout(resolve, 10));
     check('PDF shortcut opens a dedicated empty preview workspace',
       openedUrl === 'chrome-extension://ext/src/viewer/viewer.html?pdfWorkspace=1', openedUrl);
@@ -293,6 +306,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
       !translateWindow.document.getElementById('pageTranslationConsent'));
     check('translation is available directly without any consent checkbox', translateButton.disabled === false);
     translateButton.click();
+    translateWindow.document.getElementById('extModalOk').click();
     await new Promise((resolve) => setTimeout(resolve, 20));
     check('page translation launches a direct copy request with the selected engine, not a consent tab',
       calls.launched.length === 1 && calls.launched[0].type === 'WTPDF_PAGE_TRANSLATE_CREATE_COPY' &&
@@ -334,6 +348,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     check('legacy top-level Gemini key keeps the saved Gemini engine selectable in the popup',
       legacyButton.disabled === false);
     legacyButton.click();
+    legacyWindow.document.getElementById('extModalOk').click();
     await new Promise((resolve) => setTimeout(resolve, 20));
     check('popup launches the copy request with the legacy-resolved Gemini engine',
       calls.launched.length === 1 && calls.launched[0].engine === 'ai:gemini', calls);
@@ -356,6 +371,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     vm.runInContext(popupCode, sameTabDom.getInternalVMContext(), { filename: 'popup.js' });
     await new Promise((resolve) => setTimeout(resolve, 10));
     sameTabWindow.document.getElementById('translatePageBtn').click();
+    sameTabWindow.document.getElementById('extModalOk').click();
     await new Promise((resolve) => setTimeout(resolve, 10));
     check('retranslate from the popup opens paragraph selection in the existing copy tab',
       requested && requested.type === 'WTPDF_PAGE_TRANSLATE_OPEN_SELECTION' && created === 0, { requested, created });
@@ -381,6 +397,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     await new Promise((resolve) => setTimeout(resolve, 10));
     const translateButton = blockedWindow.document.getElementById('translatePageBtn');
     if (translateButton) translateButton.click();
+    blockedWindow.document.getElementById('extModalOk').click();
     await new Promise((resolve) => setTimeout(resolve, 10));
     check('page translation refuses browser-internal pages with a clear error',
       created === 0 && !blockedWindow.document.getElementById('statusBox').classList.contains('hidden') &&
@@ -401,7 +418,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     'msg: !!document.querySelector(".wtpdf-msg"),' +
     'spinner: !!document.querySelector(".wtpdf-spinner"),' +
     'hintText: hint ? hint.textContent : "",' +
-    'hasDarkBackdrop: style.includes("rgba(3,5,10,.88)"),' +
+    'hasDarkBackdrop: style.includes("--wtpdf-scrim:rgba(6,17,24,.82)") && style.includes("background:var(--wtpdf-scrim)"),' +
     'hasCenteredFlex: style.includes("align-items:center") && style.includes("justify-content:center"),' +
     'hasBigFont: /font:700 26px/.test(style),' +
     'hasMaxZ: style.includes("z-index:2147483647")}; })()');
@@ -409,7 +426,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
   check('overlay advertises ESC cancellation hint', /ESC/.test(probe.hintText), probe.hintText);
   check('full-screen overlay shown while scraping', probe.overlay && probe.card && probe.msg && probe.spinner, probe);
   check('overlay centered on screen', probe.hasCenteredFlex, probe);
-  check('overlay dark backdrop', probe.hasDarkBackdrop, probe);
+  check('overlay uses the theme-scoped Focus backdrop', probe.hasDarkBackdrop, probe);
   check('message font about 2x (26px)', probe.hasBigFont, probe);
   check('overlay on top of page (max z-index)', probe.hasMaxZ, probe);
   check('overlay removed after finish', !window.document.querySelector('.wtpdf-overlay') && !window.document.querySelector('style'));
@@ -436,10 +453,21 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     urls.includes('https://cdn.test/comic-linked-original.jpg') && !urls.includes('https://cdn.test/comic-linked-thumb.jpg'), urls);
   check('picture source uses its highest candidate',
     urls.includes('https://cdn.test/picture-page-1600.jpg') && !urls.includes('https://cdn.test/picture-page-320.jpg'), urls);
+  check('stale size-limited data-original does not override a larger advertised candidate', urls.includes('https://cdn.test/stale-best.jpg') && !urls.includes('https://cdn.test/original?w=240'));
+  check('density candidates use intrinsic rather than shrunken CSS width', urls.includes('https://cdn.test/density-two.jpg') && !urls.includes('https://cdn.test/density-one.jpg'));
+  check('CDN URLs with commas remain intact when choosing maximum srcset width', urls.includes('https://cdn.test/image/upload/w_2400,q_auto/book.jpg') && !urls.includes('https://cdn.test/comma-thumb.jpg'));
   check('css background collected', urls.includes('https://cdn.test/bg.webp'));
   check('no duplicates', new Set(urls).size === urls.length);
   check('message payload fields', sent[0].type === 'WTPDF_URLS' && sent[0].name === 'comic.pdf' && sent[0].pageUrl === 'https://comic.test/episode/1?x=1');
   check('running flag reset', window.__wtpdfRunning === false);
+
+  const selectedSource = window.document.createElement('source');
+  selectedSource.id = 'source-only-regression';
+  selectedSource.setAttribute('srcset', 'https://cdn.test/selector-small.jpg 300w, https://cdn.test/selector-original.jpg 2400w');
+  window.document.body.appendChild(selectedSource);
+  await window.eval('scrapeAndSend("source.pdf", "scroll", {imageSelector:"#source-only-regression"})');
+  check('manual SOURCE selector chooses maximum width rather than first candidate', sent.at(-1).urls.length === 1 && sent.at(-1).urls[0] === 'https://cdn.test/selector-original.jpg');
+  selectedSource.remove();
 
   // busy guard
   window.__wtpdfRunning = true;
@@ -485,7 +513,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
   mpw.document.querySelector('.mode-btn[data-mode="auto"]').click();
   check('switching to auto mode reveals the paged controls on any site',
     !fieldsEl.classList.contains('hidden') && mpw.document.getElementById('pageLimit'));
-  check('switching to auto mode hides the deep-search checkbox', scrollEl.classList.contains('hidden'));
+  check('switching to auto mode keeps the deep-search checkbox', !scrollEl.classList.contains('hidden'));
   mpw.document.querySelector('.mode-btn[data-mode="manual"]').click();
   check('manual mode keeps the paged controls visible', !fieldsEl.classList.contains('hidden'));
   mpw.document.querySelector('.mode-btn[data-mode="scroll"]').click();
@@ -519,6 +547,9 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     };
     vm.runInContext(popupCode, dom3.getInternalVMContext(), { filename: 'popup.js' });
     w3.document.getElementById('startBtn').click();
+    w3.document.querySelector('[data-mode=scroll]').click();
+    w3.document.getElementById('collectionReview').click();
+    w3.document.getElementById('extModalOk').click();
     await new Promise((r) => setTimeout(r, 10));
     check('frame probe runs across all frames', calls[0] && calls[0].target && calls[0].target.allFrames === true, calls[0]);
     check('scrape injected into the reader frame only',
@@ -540,6 +571,9 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     };
     vm.runInContext(popupCode, dom4.getInternalVMContext(), { filename: 'popup.js' });
     w4.document.getElementById('startBtn').click();
+    w4.document.querySelector('[data-mode=scroll]').click();
+    w4.document.getElementById('collectionReview').click();
+    w4.document.getElementById('extModalOk').click();
     await new Promise((r) => setTimeout(r, 10));
     const statusBox = w4.document.getElementById('statusBox');
     check('v2.68 missing active tab displays clean Persian error and re-enables start button',

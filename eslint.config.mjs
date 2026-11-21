@@ -7,7 +7,7 @@ export default [
       sourceType: 'script',
       globals: {
         window: 'readonly', document: 'readonly', console: 'readonly', fetch: 'readonly', indexedDB: 'readonly',
-        Blob: 'readonly', URL: 'readonly', FileReader: 'readonly', Promise: 'readonly',
+        Blob: 'readonly', URL: 'readonly', FileReader: 'readonly', Promise: 'readonly', Image: 'readonly',
         setTimeout: 'readonly', clearTimeout: 'readonly', setInterval: 'readonly', clearInterval: 'readonly',
         MutationObserver: 'readonly',
         requestAnimationFrame: 'readonly', navigator: 'readonly', location: 'readonly',
