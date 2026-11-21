@@ -10,6 +10,13 @@ const {JSDOM}=require('jsdom');
  w.AvalaiCredit.mount(row,key);
  const button=row.querySelector('button'),report=row.querySelector('.credit-report');
  const tick=()=>new Promise(r=>setTimeout(r,0));
+ // Supply real Response.text semantics to the existing JSON fixtures.
+ let fetchImpl;
+ Object.defineProperty(w,'fetch',{get:()=>async(...args)=>{
+   const res=await fetchImpl(...args);
+   if(!res.text)res.text=async()=>res.json?JSON.stringify(await res.json()):'';
+   return res;
+ },set:fn=>{fetchImpl=fn;}});
  let calls=[];
  w.fetch=async(url,opts)=>{calls.push({url,opts});return {ok:true,json:async()=>({remaining_irt:1234,limit:5000,credit_sources:{packages:[{remaining_irt:12,end_date:'2030-01-01T00:00:00Z'}]}})};};
  button.click();await tick();assert.equal(calls.length,0);
@@ -53,5 +60,15 @@ const {JSDOM}=require('jsdom');
  id.value='9';id.dispatchEvent(new w.Event('input'));finish({ok:true,json:async()=>({totals:{},by_api_key:[]})});
  await tick();assert.equal(report.textContent,'');assert.equal(usage.disabled,false);
  w.fetch=async()=>({ok:true,json:async()=>({wrong:1})});usage.click();await tick();assert.match(report.textContent,/ساختار پاسخ مصرف/);
+
+ const raw=row.querySelector('.credit-raw');
+ w.fetch=async()=>({ok:false,status:401,text:async()=>'{"error":"secret-abcd","detail":"provider-error"}'});
+ button.click();await tick();assert.match(raw.textContent,/HTTP 401/);assert.match(raw.textContent,/provider-error/);
+ assert.ok(!raw.textContent.includes('secret-abcd'));assert.match(raw.textContent,/API KEY HIDDEN/);
+ w.fetch=async()=>({ok:true,status:200,text:async()=>'<img src=x onerror=alert(1)>not-json'});
+ usage.click();await tick();assert.match(raw.textContent,/not-json/);assert.equal(raw.querySelector('img'),null);
+ key.dispatchEvent(new w.Event('input'));assert.equal(raw.textContent,'');
+ w.fetch=async()=>({ok:true,status:200,text:async()=>'{"unexpected":42}'});
+ button.click();await tick();assert.match(raw.textContent,/unexpected/);assert.match(report.textContent,/ساختار پاسخ/);
  dom.window.close();console.log('PASS: AvalAI read-only inquiry endpoint, labels, key edits, stale responses, HTTP errors and secret-safe failures');
 })().catch(e=>{console.error(e);process.exitCode=1;});

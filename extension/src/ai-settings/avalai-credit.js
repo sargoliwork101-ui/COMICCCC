@@ -14,10 +14,11 @@
     const keyId = document.createElement('input'); keyId.type = 'text'; keyId.inputMode = 'numeric';
     keyId.className = 'credit-key-id'; keyId.placeholder = 'مثلاً 123؛ خالی = گزارش گروه‌بندی‌شده';
     idLabel.append(keyId);
-    box.append(button, idLabel, usageButton, report); row.append(box);
+    const raw = document.createElement('div'); raw.className = 'credit-raw';
+    box.append(button, idLabel, usageButton, report, raw); row.append(box);
     let generation = 0, controller;
     const invalidate = () => {
-      generation++; controller?.abort(); report.replaceChildren(); button.disabled = false; usageButton.disabled = false;
+      generation++; controller?.abort(); report.replaceChildren(); raw.replaceChildren(); button.disabled = false; usageButton.disabled = false;
     };
     keyInput.addEventListener('input', invalidate);
     keyId.addEventListener('input', invalidate);
@@ -31,7 +32,7 @@
     const inquire = async (usage = false) => {
       if (button.disabled) return;
       const apiKey = keyInput.value.trim();
-      report.replaceChildren();
+      report.replaceChildren(); raw.replaceChildren();
       if (!apiKey) { line('خطا', 'ابتدا کلید API را وارد کنید.'); keyInput.focus(); return; }
       const id = keyId.value.trim();
       if (usage && id && !/^[1-9][0-9]*$/.test(id)) { line('خطا', 'شناسه باید عدد صحیح مثبت با رقم انگلیسی باشد؛ خود کلید API را اینجا ننویسید.'); return; }
@@ -40,18 +41,21 @@
       const requestController = controller;
       const timer = setTimeout(() => requestController.abort(), 15000);
       button.disabled = true; usageButton.disabled = true; line('وضعیت', 'در حال دریافت اطلاعات از AvalAI…');
+      let rawBody = null, httpStatus = null;
       try {
         const url = usage ? 'https://api.avalai.ir/user/v1/transactions/summary?group_by=api_key&hours_ago=24' + (id ? '&api_key_id=' + encodeURIComponent(id) : '') : endpoint;
         const response = await fetch(url, {
           method: 'GET', headers: { Authorization: 'Bearer ' + apiKey },
           signal: requestController.signal, credentials: 'omit', cache: 'no-store', redirect: 'error'
         });
+        httpStatus = response.status;
+        rawBody = await response.text();
         if (!response.ok) {
           const messages = { 401: 'کلید معتبر نیست یا منقضی شده است.', 403: 'دسترسی مجاز نیست یا حساب غیرفعال است.', 429: 'تعداد استعلام‌ها زیاد است؛ کمی بعد دوباره امتحان کنید.' };
           throw new Error(messages[response.status] || 'استعلام ناموفق بود (HTTP ' + response.status + ').');
         }
         let data;
-        try { data = await response.json(); } catch { throw new Error('پاسخ سرویس JSON معتبر نیست.'); }
+        try { data = JSON.parse(rawBody); } catch { throw new Error('پاسخ سرویس JSON معتبر نیست.'); }
         if (usage) {
           if (!data || typeof data !== 'object' || !data.totals || !Object.hasOwn(data, 'by_api_key') || (data.by_api_key !== null && !Array.isArray(data.by_api_key))) throw new Error('ساختار پاسخ مصرف شناخته نشد.');
           if (current !== generation || !row.isConnected || keyInput.value.trim() !== apiKey) return;
@@ -108,10 +112,25 @@
       } catch (error) {
         if (current !== generation || !row.isConnected) return;
         report.replaceChildren();
-        // Never display server bodies, URLs or arbitrary error messages that might contain a key.
+        // Keep interpreted errors generic; the separately labelled raw body is secret-redacted.
         const allowed = /^(کلید معتبر|دسترسی مجاز|تعداد استعلام|استعلام ناموفق|پاسخ سرویس|ساختار پاسخ)/;
         line('خطا', error.name === 'AbortError' ? 'مهلت استعلام تمام شد؛ دوباره امتحان کنید.' : allowed.test(error.message) ? error.message : 'اتصال به AvalAI برقرار نشد؛ اینترنت یا VPN را بررسی کنید.');
       } finally {
+        if (current === generation && row.isConnected && keyInput.value.trim() === apiKey && rawBody !== null) {
+          const title = document.createElement('p');
+          title.textContent = 'پاسخ خام سرویس — HTTP ' + httpStatus + ' (کلید واردشده در صورت تکرار مخفی می‌شود)';
+          const pre = document.createElement('pre'); pre.tabIndex = 0;
+          let safe = rawBody;
+          for (const secret of new Set([apiKey, JSON.stringify(apiKey).slice(1, -1), encodeURIComponent(apiKey)])) {
+            if (secret) safe = safe.split(secret).join('[API KEY HIDDEN]');
+          }
+          const limit = 200000;
+          pre.textContent = safe.length ? safe.slice(0, limit) : '(بدنهٔ پاسخ خالی است)';
+          raw.replaceChildren(title, pre);
+          if (safe.length > limit) {
+            const note = document.createElement('p'); note.textContent = 'پاسخ طولانی است؛ فقط ۲۰۰ هزار نویسهٔ اول نمایش داده شد.'; raw.append(note);
+          }
+        }
         clearTimeout(timer);
         if (current === generation) { button.disabled = false; usageButton.disabled = false; }
       }
