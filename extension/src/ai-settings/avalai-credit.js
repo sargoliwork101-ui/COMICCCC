@@ -28,7 +28,10 @@
     const lookupButton = makeButton('هزینهٔ درخواست‌های مشخص', 'lookup-check');
     const allButton = makeButton('استعلام همهٔ روش‌های مستند', 'all-credit-check');
     const buttons = [button, usageButton, transactionsButton, lookupButton, allButton];
-    box.append(button, idLabel, usageButton, hours.wrap, page.wrap, transactionsButton, requests.wrap, lookupButton, allButton, report, raw); row.append(box);
+    const advanced = document.createElement('details'); advanced.className = 'credit-advanced';
+    const summary = document.createElement('summary'); summary.textContent = 'بررسی پیشرفته';
+    advanced.append(summary, idLabel, usageButton, hours.wrap, page.wrap, transactionsButton, requests.wrap, lookupButton, allButton);
+    box.append(button, advanced, report, raw); row.append(box);
     let generation = 0, controller;
     const invalidate = () => {
       generation++; controller?.abort(); report.replaceChildren(); raw.replaceChildren(); buttons.forEach(b => { b.disabled = false; });
@@ -59,15 +62,29 @@
       const requestController = controller;
       const timer = setTimeout(() => requestController.abort(), 15000);
       buttons.forEach(b => { b.disabled = true; }); line('وضعیت', 'در حال دریافت اطلاعات از AvalAI…');
+      const redact = value => {
+        let safe = value;
+        for (const secret of new Set([apiKey, JSON.stringify(apiKey).slice(1, -1), encodeURIComponent(apiKey)])) {
+          if (secret) safe = safe.split(secret).join('[API KEY HIDDEN]');
+        }
+        return safe;
+      };
       let rawBody = null, httpStatus = null;
       let url = endpoint;
       try {
         url = usage ? 'https://api.avalai.ir/user/v1/transactions/summary?group_by=api_key&hours_ago=24' + (id ? '&api_key_id=' + encodeURIComponent(id) : '') : endpoint;
         if (mode === 'transactions') url = 'https://api.avalai.ir/user/v1/transactions?hours_ago=' + hours.input.value + '&page=' + page.input.value + '&page_size=100' + (id ? '&api_key_id=' + id : '');
         if (mode === 'lookup') url = 'https://api.avalai.ir/user/v1/transactions/lookup';
+        const method = mode === 'lookup' ? 'POST' : 'GET';
+        const body = mode === 'lookup' ? JSON.stringify({ transaction_ids: ids }) : null;
+        const outgoing = document.createElement('p'); outgoing.textContent = 'درخواست ارسالی (کلید محرمانه مخفی است)';
+        const requestPre = document.createElement('pre'); requestPre.className = 'credit-request'; requestPre.tabIndex = 0;
+        requestPre.textContent = redact(method + ' ' + url + '\nAuthorization: Bearer [API KEY HIDDEN]' +
+          (body === null ? '\n\n(بدون بدنه)' : '\nContent-Type: application/json\n\n' + body));
+        raw.append(outgoing, requestPre);
         const response = await fetch(url, {
-          method: mode === 'lookup' ? 'POST' : 'GET', headers: { Authorization: 'Bearer ' + apiKey, ...(mode === 'lookup' ? { 'Content-Type': 'application/json' } : {}) },
-          ...(mode === 'lookup' ? { body: JSON.stringify({ transaction_ids: ids }) } : {}),
+          method, headers: { Authorization: 'Bearer ' + apiKey, ...(mode === 'lookup' ? { 'Content-Type': 'application/json' } : {}) },
+          ...(body === null ? {} : { body }),
           signal: requestController.signal, credentials: 'omit', cache: 'no-store', redirect: 'error'
         });
         httpStatus = response.status;
@@ -151,18 +168,18 @@
         if (current === generation && row.isConnected && keyInput.value.trim() === apiKey && rawBody !== null) {
           const title = document.createElement('p');
           title.textContent = (mode === 'lookup' ? 'POST ' : 'GET ') + url + ' — پاسخ خام سرویس — HTTP ' + httpStatus + ' (کلید واردشده در صورت تکرار مخفی می‌شود)';
-          const pre = document.createElement('pre'); pre.tabIndex = 0;
-          let safe = rawBody;
-          for (const secret of new Set([apiKey, JSON.stringify(apiKey).slice(1, -1), encodeURIComponent(apiKey)])) {
-            if (secret) safe = safe.split(secret).join('[API KEY HIDDEN]');
-          }
+          title.textContent = redact(title.textContent);
+          const pre = document.createElement('pre'); pre.className = 'credit-response'; pre.tabIndex = 0;
+          const safe = redact(rawBody);
           const limit = 200000;
           pre.textContent = safe.length ? safe.slice(0, limit) : '(بدنهٔ پاسخ خالی است)';
-          if (!append) raw.replaceChildren();
           raw.append(title, pre);
           if (safe.length > limit) {
             const note = document.createElement('p'); note.textContent = 'پاسخ طولانی است؛ فقط ۲۰۰ هزار نویسهٔ اول نمایش داده شد.'; raw.append(note);
           }
+        }
+        if (current === generation && row.isConnected && keyInput.value.trim() === apiKey && rawBody === null) {
+          const missing = document.createElement('p'); missing.textContent = 'پاسخ خام دریافت نشد؛ وضعیت HTTP در دسترس نیست.'; raw.append(missing);
         }
         clearTimeout(timer);
         if (current === generation) { buttons.forEach(b => { b.disabled = false; }); }
