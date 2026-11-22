@@ -124,8 +124,8 @@ const $ = (id) => window.document.getElementById(id);
   check('manifest name and action title use HASAYA', manifest.name === 'HASAYA' &&
     manifest.action.default_title === 'HASAYA');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
-  check('manifest and viewer version badge are synchronized at 3.36', manifest.version === '3.36' &&
-    window.document.querySelector('.version-pill').textContent.includes('۳.۳۶'));
+  check('manifest and viewer version badge are synchronized at 3.28', manifest.version === '3.28' &&
+    window.document.querySelector('.version-pill').textContent.includes('۳.۲۸'));
   const viewerCss = fs.readFileSync(path.join(ROOT, 'src/viewer/viewer.css'), 'utf8');
   check('topbar keeps the hamburger visible while the page scrolls',
     /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(viewerCss));
