@@ -27,10 +27,11 @@
     const transactionsButton = makeButton('فهرست تراکنش‌ها', 'transactions-check');
     const lookupButton = makeButton('هزینهٔ درخواست‌های مشخص', 'lookup-check');
     const allButton = makeButton('استعلام همهٔ روش‌های مستند', 'all-credit-check');
-    const buttons = [button, usageButton, transactionsButton, lookupButton, allButton];
+    const compareButton = makeButton('مقایسهٔ اعتبار دو کلید', 'compare-credit-check');
+    const buttons = [button, usageButton, transactionsButton, lookupButton, allButton, compareButton];
     const advanced = document.createElement('details'); advanced.className = 'credit-advanced';
     const summary = document.createElement('summary'); summary.textContent = 'بررسی پیشرفته';
-    advanced.append(summary, idLabel, usageButton, hours.wrap, page.wrap, transactionsButton, requests.wrap, lookupButton, allButton);
+    advanced.append(summary, idLabel, usageButton, hours.wrap, page.wrap, transactionsButton, requests.wrap, lookupButton, allButton, compareButton);
     box.append(button, advanced, report, raw); row.append(box);
     let generation = 0, controller;
     const invalidate = () => {
@@ -46,10 +47,11 @@
       if ((typeof value !== 'number' && typeof value !== 'string') || String(value).trim() === '') return 'اعلام نشده';
       const n = Number(value); return Number.isFinite(n) ? n.toLocaleString('fa-IR', { maximumFractionDigits: digits }) : 'نامعتبر';
     };
-    const inquire = async (mode = 'credit', append = false) => {
+    const inquire = async (mode = 'credit', append = false, comparison = null) => {
       const usage = mode === 'summary';
       if (button.disabled) return;
-      const apiKey = keyInput.value.trim();
+      const originalKey = keyInput.value.trim();
+      const apiKey = comparison ? comparison.key : originalKey;
       if (!append) { report.replaceChildren(); raw.replaceChildren(); }
       if (!apiKey) { line('خطا', 'ابتدا کلید API را وارد کنید.'); keyInput.focus(); return; }
       const id = keyId.value.trim();
@@ -64,7 +66,7 @@
       buttons.forEach(b => { b.disabled = true; }); line('وضعیت', 'در حال دریافت اطلاعات از AvalAI…');
       const redact = value => {
         let safe = value;
-        for (const secret of new Set([apiKey, JSON.stringify(apiKey).slice(1, -1), encodeURIComponent(apiKey)])) {
+        for (const secret of new Set((comparison ? comparison.secrets : [apiKey]).flatMap(value => [value, JSON.stringify(value).slice(1, -1), encodeURIComponent(value)]))) {
           if (secret) safe = safe.split(secret).join('[API KEY HIDDEN]');
         }
         return safe;
@@ -77,7 +79,7 @@
         if (mode === 'lookup') url = 'https://api.avalai.ir/user/v1/transactions/lookup';
         const method = mode === 'lookup' ? 'POST' : 'GET';
         const body = mode === 'lookup' ? JSON.stringify({ transaction_ids: ids }) : null;
-        const outgoing = document.createElement('p'); outgoing.textContent = 'درخواست ارسالی (کلید محرمانه مخفی است)';
+        const outgoing = document.createElement('p'); outgoing.textContent = (comparison ? comparison.label + ' — ' : '') + 'درخواست ارسالی (کلید محرمانه مخفی است)';
         const requestPre = document.createElement('pre'); requestPre.className = 'credit-request'; requestPre.tabIndex = 0;
         requestPre.textContent = redact(method + ' ' + url + '\nAuthorization: Bearer [API KEY HIDDEN]' +
           (body === null ? '\n\n(بدون بدنه)' : '\nContent-Type: application/json\n\n' + body));
@@ -96,7 +98,7 @@
         let data;
         try { data = JSON.parse(rawBody); } catch { throw new Error('پاسخ سرویس JSON معتبر نیست.'); }
         if (mode === 'transactions' || mode === 'lookup') {
-          if (current !== generation || !row.isConnected || keyInput.value.trim() !== apiKey) return;
+          if (current !== generation || !row.isConnected || keyInput.value.trim() !== originalKey) return;
           if (!append) report.replaceChildren();
           line('روش', mode === 'lookup' ? 'هزینهٔ درخواست‌های مشخص' : 'فهرست تراکنش‌ها');
           if (!data || !Array.isArray(data.transactions)) throw new Error('ساختار پاسخ تراکنش‌ها شناخته نشد.');
@@ -107,7 +109,7 @@
         }
         if (usage) {
           if (!data || typeof data !== 'object' || !data.totals || !Object.hasOwn(data, 'by_api_key') || (data.by_api_key !== null && !Array.isArray(data.by_api_key))) throw new Error('ساختار پاسخ مصرف شناخته نشد.');
-          if (current !== generation || !row.isConnected || keyInput.value.trim() !== apiKey) return;
+          if (current !== generation || !row.isConnected || keyInput.value.trim() !== originalKey) return;
           if (!append) report.replaceChildren();
           line('گزارش آزمایشی', 'مصرف حداکثر ۲۴ ساعت است، نه مصرف کل عمر یا ماندهٔ اعتبار. پاسخ ممکن است تا ۲ دقیقه کش باشد.');
           line('فیلتر شناسه', id || 'اعمال نشده؛ ممکن است اطلاعات کلیدهای دیگر همین حساب هم برگردد.');
@@ -141,11 +143,15 @@
           return;
         }
         if (!data || typeof data !== 'object' || Array.isArray(data) || !Object.hasOwn(data, 'remaining_irt')) throw new Error('ساختار پاسخ اعتبار شناخته نشد.');
-        if (current !== generation || !row.isConnected || keyInput.value.trim() !== apiKey) return;
+        if (current !== generation || !row.isConnected || keyInput.value.trim() !== originalKey) return;
         if (!append) report.replaceChildren();
         line('اطلاعات حساب برگشتی از سرویس', 'این پاسخ لزوماً بودجهٔ اختصاصی همین کلید نیست.');
+        if (comparison) line('مقایسه', comparison.label);
         line('اعتبار باقی‌ماندهٔ حساب (تومان)', number(data.remaining_irt));
-        line('سقف اعتبار حساب (تومان)', number(data.limit));
+        line('limit برگشتی (تومان؛ معنای اختصاصی کلید تأیید نشده)', number(data.limit));
+        line('remaining_unit برگشتی', number(data.remaining_unit, 8));
+        line('total_unit برگشتی', number(data.total_unit, 8));
+        line('نرخ تبدیل برگشتی', number(data.exchange_rate));
         line('انقضای اختصاصی کلید', 'از این پاسخ قابل تعیین نیست.');
         for (const [field, title] of [['packages', 'بسته'], ['grants', 'اعتبار تشویقی']]) {
           const sources = data.credit_sources?.[field];
@@ -165,9 +171,9 @@
         const allowed = /^(کلید معتبر|دسترسی مجاز|تعداد استعلام|استعلام ناموفق|پاسخ سرویس|ساختار پاسخ)/;
         line('خطا', error.name === 'AbortError' ? 'مهلت استعلام تمام شد؛ دوباره امتحان کنید.' : allowed.test(error.message) ? error.message : 'اتصال به AvalAI برقرار نشد؛ اینترنت یا VPN را بررسی کنید.');
       } finally {
-        if (current === generation && row.isConnected && keyInput.value.trim() === apiKey && rawBody !== null) {
+        if (current === generation && row.isConnected && keyInput.value.trim() === originalKey && rawBody !== null) {
           const title = document.createElement('p');
-          title.textContent = (mode === 'lookup' ? 'POST ' : 'GET ') + url + ' — پاسخ خام سرویس — HTTP ' + httpStatus + ' (کلید واردشده در صورت تکرار مخفی می‌شود)';
+          title.textContent = (comparison ? comparison.label + ' — ' : '') + (mode === 'lookup' ? 'POST ' : 'GET ') + url + ' — پاسخ خام سرویس — HTTP ' + httpStatus + ' (کلید واردشده در صورت تکرار مخفی می‌شود)';
           title.textContent = redact(title.textContent);
           const pre = document.createElement('pre'); pre.className = 'credit-response'; pre.tabIndex = 0;
           const safe = redact(rawBody);
@@ -178,7 +184,7 @@
             const note = document.createElement('p'); note.textContent = 'پاسخ طولانی است؛ فقط ۲۰۰ هزار نویسهٔ اول نمایش داده شد.'; raw.append(note);
           }
         }
-        if (current === generation && row.isConnected && keyInput.value.trim() === apiKey && rawBody === null) {
+        if (current === generation && row.isConnected && keyInput.value.trim() === originalKey && rawBody === null) {
           const missing = document.createElement('p'); missing.textContent = 'پاسخ خام دریافت نشد؛ وضعیت HTTP در دسترس نیست.'; raw.append(missing);
         }
         clearTimeout(timer);
@@ -189,6 +195,31 @@
     usageButton.addEventListener('click', () => inquire('summary'));
     transactionsButton.addEventListener('click', () => inquire('transactions'));
     lookupButton.addEventListener('click', () => inquire('lookup'));
+    let comparing = false;
+    compareButton.addEventListener('click', async () => {
+      if (comparing || button.disabled) return;
+      report.replaceChildren(); raw.replaceChildren();
+      // Use the two existing AvalAI profile rows; never ask for a dashboard session.
+      const inputs = [...row.parentElement.querySelectorAll('.profile-key')].filter(input => input.value.trim());
+      if (inputs.length !== 2 || inputs[0].value.trim() === inputs[1].value.trim()) {
+        line('راهنمای مقایسه', 'در تنظیمات AvalAI دقیقاً دو کلید متفاوت وارد کنید: یکی محدود و یکی بدون محدودیت. سپس مقایسه را بزنید.'); return;
+      }
+      const secrets = inputs.map(input => input.value.trim());
+      let cancelled = false;
+      const cancel = () => { cancelled = true; invalidate(); };
+      inputs.forEach(input => input.addEventListener('input', cancel));
+      comparing = true;
+      try {
+        for (let i = 0; i < inputs.length; i++) {
+          if (cancelled || !row.isConnected || inputs.some((input, index) => !input.isConnected || input.value.trim() !== secrets[index])) return;
+          await inquire('credit', true, { key: secrets[i], secrets, label: 'کلید ردیف ' + (i + 1) });
+        }
+        if (!cancelled && row.isConnected) line('نتیجهٔ آزمایش', 'پاسخ دو کلید جدا نمایش داده شد. تفاوت یا برابری اعداد به‌تنهایی اثبات ماندهٔ اختصاصی کلید نیست؛ با سقف‌های تنظیم‌شده در پنل مقایسه کنید. هیچ مصرف ترجمه‌ای ایجاد نشد.');
+      } finally {
+        inputs.forEach(input => input.removeEventListener('input', cancel));
+        comparing = false;
+      }
+    });
     let batch = false;
     allButton.addEventListener('click', async () => {
       if (batch) return;
