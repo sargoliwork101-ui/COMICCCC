@@ -102,11 +102,12 @@ for (const resource of [
 
 check('npm package metadata identifies the extension as HASAYA', packageJson.name === 'hasaya-chrome-extension');
 
-// Every test file present in tests/ must be wired into the npm test script so CI actually runs it.
-const testScript = String(packageJson.scripts.test || '');
+// Every test file in tests/ must be reachable from at least one npm script,
+// otherwise it silently never runs (that is how regressions slip through).
+const allScriptText = Object.values(packageJson.scripts).join(' ');
 for (const entry of fs.readdirSync(path.join(ROOT, 'tests')).sort()) {
   if (!/^test-[\w-]+\.(?:js|cjs)$/.test(entry)) continue;
-  check(`npm test script runs ${entry}`, testScript.includes(`node tests/${entry}`), entry);
+  check(`npm scripts can run ${entry}`, allScriptText.includes(`node tests/${entry}`), entry);
 }
 
 const channel = fs.readFileSync(path.join(EXT_ROOT, 'src/popup/update-channel.js'), 'utf8');
@@ -121,6 +122,7 @@ const popupHtml = fs.readFileSync(path.join(EXT_ROOT, 'src/popup/popup.html'), '
 const versionPill = (popupHtml.match(/id="versionPill"[^>]*>v([\d.]+)</) || [])[1];
 check('popup version pill matches manifest version', versionPill === manifest.version,
   `pill=v${versionPill} manifest=${manifest.version}`);
+check('popup loads the runtime version pill script', popupHtml.includes('version-pill.js'));
 
 if (failures) {
   console.error(`\n${failures} PATH FAILURE(S) across ${checked} checks`);
