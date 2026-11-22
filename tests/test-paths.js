@@ -62,6 +62,8 @@ for (const group of [manifest.icons, manifest.action.default_icon]) {
     checkFile(`manifest ${size}px icon exists`, reference);
   }
 }
+check('manifest and package.json versions stay in sync', manifest.version === packageJson.version,
+  `manifest=${manifest.version} package.json=${packageJson.version}`);
 
 const sourceFiles = walk(path.join(EXT_ROOT, 'src'));
 for (const file of sourceFiles) {
@@ -100,12 +102,25 @@ for (const resource of [
 
 check('npm package metadata identifies the extension as HASAYA', packageJson.name === 'hasaya-chrome-extension');
 
+// Every test file present in tests/ must be wired into the npm test script so CI actually runs it.
+const testScript = String(packageJson.scripts.test || '');
+for (const entry of fs.readdirSync(path.join(ROOT, 'tests')).sort()) {
+  if (!/^test-[\w-]+\.(?:js|cjs)$/.test(entry)) continue;
+  check(`npm test script runs ${entry}`, testScript.includes(`node tests/${entry}`), entry);
+}
+
 const channel = fs.readFileSync(path.join(EXT_ROOT, 'src/popup/update-channel.js'), 'utf8');
 const updater = fs.readFileSync(path.join(EXT_ROOT, 'src/popup/update.js'), 'utf8');
 check('updater targets this build branch', channel.includes("window.PIC_TO_PDF_UPDATE_BRANCH = 'main';"));
 check('updater targets the correct repository', updater.includes("const REPO = 'sargoliwork101-ui/COMICCCC';"));
 check('updater reads the extension manifest on main', updater.includes('/contents/extension/manifest.json?ref='));
 check('updater downloads from GitHub codeload', updater.includes('https://codeload.github.com/${REPO}/zip/refs/heads/'));
+
+// The popup version pill must match the shipped manifest version (no stale hardcoded labels).
+const popupHtml = fs.readFileSync(path.join(EXT_ROOT, 'src/popup/popup.html'), 'utf8');
+const versionPill = (popupHtml.match(/id="versionPill"[^>]*>v([\d.]+)</) || [])[1];
+check('popup version pill matches manifest version', versionPill === manifest.version,
+  `pill=v${versionPill} manifest=${manifest.version}`);
 
 if (failures) {
   console.error(`\n${failures} PATH FAILURE(S) across ${checked} checks`);
