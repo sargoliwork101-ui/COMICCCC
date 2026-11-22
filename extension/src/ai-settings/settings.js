@@ -82,7 +82,6 @@ function renderProfiles() {
       await saveSettings();
     });
     row.append(name, key, test, remove, status);
-    if (activeProvider === 'avalai' && window.AvalaiCredit) window.AvalaiCredit.mount(row, key);
     container.appendChild(row);
   });
 }

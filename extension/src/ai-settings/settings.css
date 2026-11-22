@@ -40,11 +40,3 @@ h1 { margin: 2px 0 4px; font-size: clamp(20px, 4vw, 26px); }
   .profile-row .profile-status { grid-column: 1; }
   .profile-row button { justify-self: start; }
 }
-
-.credit-inquiry{grid-column:1/-1;border:1px solid var(--line2);border-radius:10px;padding:10px;min-width:0}.credit-inquiry .credit-check{width:auto;min-height:34px}.credit-report{font-size:12px;line-height:1.9;overflow-wrap:anywhere}.credit-report p{margin:5px 0}.credit-help{font-size:12px;line-height:1.9}.credit-help summary{cursor:pointer;color:var(--a1)}
-
-.credit-inquiry .usage-check{width:auto;min-height:34px;margin-top:8px}.credit-inquiry label{display:block;margin-top:10px}.credit-inquiry .credit-key-id{display:block;margin-top:6px;direction:ltr;text-align:left;box-sizing:border-box}
-
-.credit-raw{min-width:0;font-size:11px}.credit-raw pre{direction:ltr;text-align:left;unicode-bidi:plaintext;white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto;padding:12px;border:1px solid var(--line2);border-radius:9px;background:var(--surface2,var(--surface));color:var(--text);user-select:text}
-
-.credit-advanced{margin-top:8px;font-size:12px;line-height:1.8}.credit-advanced summary{cursor:pointer;color:var(--a1);padding:5px 0}.credit-advanced button{margin:8px 0 0 6px}.credit-advanced input{box-sizing:border-box;direction:ltr;text-align:left}.credit-raw p{overflow-wrap:anywhere}
