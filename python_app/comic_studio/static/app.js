@@ -6193,7 +6193,7 @@ function syncEditorShapeControls() {
     if (sizeInp) {
       sizeInp.disabled = false;
       if (document.activeElement !== sizeInp) {
-        sizeInp.value = hasTarget && Number(target.size) > 0 ? String(Math.round(Number(target.size))) : '';
+        sizeInp.value = hasTarget ? String(Math.round(effectiveInlineSize(target))) : '';
       }
     }
     if (sizeUp) sizeUp.disabled = false;
@@ -6438,6 +6438,15 @@ function inlineSelectionStyleState(range) {
   });
   return { bold, italic, underline, strike };
 }
+// Read the live output size, not the editor's CSS size or a stale saved draft.
+// Displaying an automatic size must never mark it as a user-selected size.
+function inlineBaseFontSize() {
+  const block = draftBlockForPreview() || inlineDraft?.block;
+  if (!block) return 24;
+  const output = overlayBlock(block);
+  const box = clampedBoxOf(output);
+  return Math.round(overlaySize(output, box.x1 - box.x0, box.y1 - box.y0));
+}
 function syncInlineLineControls() {
   const badge = $('inlineTargetBadge');
   const sizeInput = $('inlineLineSize');
@@ -6460,7 +6469,7 @@ function syncInlineLineControls() {
     if (badge) { badge.textContent = `بخش انتخابی: «${snippet}»`; badge.classList.remove('hidden'); badge.classList.add('is-word'); }
     const span = inlineSelectionSpan(inlineDraft.range) || (inlineDraft.range.startContainer.nodeType === Node.ELEMENT_NODE ? inlineDraft.range.startContainer : inlineDraft.range.startContainer.parentElement);
     const sizeVal = inlineInheritedLogicalSize(span);
-    if (!typingSize && sizeInput) sizeInput.value = sizeVal != null ? String(sizeVal) : '';
+    if (!typingSize && sizeInput) sizeInput.value = String(sizeVal ?? inlineBaseFontSize());
     if (fontSelect) {
       const spanFont = inlineInheritedStyle(span, 'fontFamily');
       fontSelect.value = canonicalFontOption(spanFont || $('inlineEditorFont')?.value || inlineDraft.block?.fontFamily);
@@ -6472,7 +6481,7 @@ function syncInlineLineControls() {
   if (fieldIsEmpty) {
     if (badge) { badge.textContent = 'هدف: کل کادر'; badge.classList.remove('hidden', 'is-word'); }
     if (!typingSize && sizeInput) {
-      sizeInput.value = inlineDraft.initialAutoSize && !inlineDraft.sizeTouched ? '' : $('inlineEditorSize').value;
+      sizeInput.value = String(inlineBaseFontSize());
     }
     if (fontSelect) fontSelect.value = canonicalFontOption($('inlineEditorFont')?.value || inlineDraft.block?.fontFamily);
     const boxHex = inlineDraft.color || effectiveInlineColor(inlineDraft.block);
@@ -6482,7 +6491,7 @@ function syncInlineLineControls() {
   if (badge) { badge.textContent = 'هدف: خط فعلی'; badge.classList.remove('hidden', 'is-word'); }
   const line = inlineParagraphFrom(inlineDraft.range?.startContainer);
   const lineSize = logicalFontSizeOf(line);
-  if (!typingSize && sizeInput) sizeInput.value = lineSize != null ? String(Math.round(lineSize)) : (inlineDraft.sizeTouched ? $('inlineEditorSize').value : '');
+  if (!typingSize && sizeInput) sizeInput.value = String(inlineInheritedLogicalSize(inlineDraft.range?.startContainer) ?? lineSize ?? inlineBaseFontSize());
   if (fontSelect) {
     const lineFont = line?.style?.fontFamily || '';
     fontSelect.value = canonicalFontOption(lineFont || $('inlineEditorFont')?.value || inlineDraft.block?.fontFamily);
@@ -6919,7 +6928,7 @@ function stepSelectionOrLineSize(delta) {
   ensureValidInlineRange();
   const currentInput = Number($('inlineLineSize').value);
   const inherited = inlineInheritedLogicalSize(inlineSelectionSpan(inlineDraft.range) || inlineDraft.range?.startContainer);
-  const base = Number.isFinite(currentInput) && currentInput >= 8 ? currentInput : (inherited ?? effectiveInlineSize(inlineDraft.block));
+  const base = Number.isFinite(currentInput) && currentInput >= 8 ? currentInput : (inherited ?? inlineBaseFontSize());
   const next = Math.max(8, Math.min(160, Math.round(base + delta)));
   $('inlineLineSize').value = String(next);
   setSelectionOrLineSize(`${next}px`);

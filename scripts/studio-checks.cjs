@@ -12,6 +12,7 @@ function plan({ browser = false, realOcr = false, python, npmCli }) {
   const suites = [
     js('tester', 'tests/test-studio-checks.cjs'),
     { id: 'python', command: [python, '-m', 'pytest', 'python_app/tests'] },
+    js('font-size-controls', 'python_app/tests/font_size_controls.test.cjs'),
     js('studio-ui', 'python_app/tests/app_ui.test.js'),
     js('groups', 'python_app/tests/groups.test.js'),
     js('inline-edit', 'python_app/tests/inline_edit_session.test.cjs'),
