@@ -15,6 +15,7 @@
       if (mode === 'ocr') {
         next.text = String(value.text ?? '');
         if ('ocrRichHtml' in value && value.ocrRichHtml !== undefined) next.ocrRichHtml = String(value.ocrRichHtml ?? '');
+        if (['left', 'right', 'center', 'justify'].includes(value.ocrAlign)) next.ocrAlign = value.ocrAlign;
         if ('ocrDir' in value && (value.ocrDir === 'rtl' || value.ocrDir === 'ltr' || value.ocrDir === '')) next.ocrDir = value.ocrDir;
       } else {
         next.tr = String(value.text ?? '');
@@ -56,6 +57,7 @@
         if (mode === 'ocr') {
           block.text = next.text;
           if ('ocrRichHtml' in rawValue && rawValue.ocrRichHtml !== undefined) block.ocrRichHtml = next.ocrRichHtml;
+          if ('ocrAlign' in rawValue && rawValue.ocrAlign !== undefined) block.ocrAlign = next.ocrAlign;
           if ('ocrDir' in rawValue && rawValue.ocrDir !== undefined) block.ocrDir = next.ocrDir;
         } else {
           block.tr = next.tr; block.richHtml = next.richHtml; if ('dir' in next) block.dir = next.dir;

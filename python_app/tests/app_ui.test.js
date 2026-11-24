@@ -437,6 +437,10 @@ function check(name, condition) {
   await vm.runInContext('renderAndUpload(state.project.images[0])', context);
   check('OCR preview renders the recognized source text', renderedBlocks[0].tr === 'HELLO WORLD' && renderedBlocks[0]._plainText === true && renderedBlocks[0].richHtml === '');
   check('OCR mode respects explicit justified alignment', vm.runInContext("overlayBlock({ text: 'one two', align: 'justify' }, 'ocr').align === 'justify'", context));
+  check('English OCR output ignores Persian translation right alignment', renderedBlocks[0].dir === 'ltr' && renderedBlocks[0].align === 'left');
+  check('Persian OCR with English terms remains RTL and right aligned', vm.runInContext("(() => { const b = overlayBlock({text: 'در این بخش اصول طراحی مدار و استاندارد IPC بررسی می‌شود', align: 'left'}, 'ocr'); return b.dir === 'rtl' && b.align === 'right'; })()", context));
+  check('Arabic digits do not turn English OCR into RTL', vm.runInContext("textDirectionOf('Figure ۱۲۳ English description') === 'ltr'", context));
+  check('explicit source alignment overrides remain supported independently of translation', vm.runInContext("overlayBlock({text: 'English source', align: 'right', ocrAlign: 'center'}, 'ocr').align === 'center'", context));
   check('OCR preview does not overwrite the saved translation', vm.runInContext("state.project.images[0].blocks[0].tr === 'سلام دنیا'", context));
   vm.runInContext("setOverlayMode('translation', false)", context);
   await vm.runInContext('renderAndUpload(state.project.images[0])', context);
@@ -453,6 +457,10 @@ function check(name, condition) {
   check('none mode hides image text boxes but keeps sidebar editors', $('editorBoxes').children.length === 0 && $('blockList').querySelectorAll('.block-card').length === 2);
   vm.runInContext("setOverlayMode('ocr', false); buildBlockList(); renderEditorBoxes()", context);
   const ocrOverlay = $('editorBoxes').querySelector('.editor-box-text');
+  check('English source and Persian translation cards have independent direction and alignment despite Persian labels',
+    $('blockList').querySelector('.block-source-edit').dir === 'ltr' && $('blockList').querySelector('.block-source-edit').style.textAlign === 'left'
+    && $('blockList').querySelector('.block-tr-edit').dir === 'rtl' && $('blockList').querySelector('.block-tr-edit').style.textAlign === 'right');
+
   check('editor shows recognized OCR text directly on the image', ocrOverlay?.textContent === 'HELLO WORLD' && ocrOverlay?.dir === 'ltr');
   scrollIntoViewCalls.length = 0;
   const secondOcrOverlay = $('editorBoxes').querySelectorAll('.editor-box-text')[1];
@@ -461,6 +469,7 @@ function check(name, condition) {
   check('clicking OCR overlay selects its sidebar editor without moving the page', ocrCard.classList.contains('active') && secondOcrOverlay.parentElement.classList.contains('active') && !ocrOverlay.parentElement.classList.contains('active') && scrollIntoViewCalls.length === 0);
   check('OCR overlay is a click target, not a second editor', ocrOverlay.contentEditable === 'false' && !$('blockList').querySelector('textarea,[contenteditable="true"]'));
   vm.runInContext('openInlineEditor(state.project.images[0].blocks[0])', context);
+  check('opening English OCR starts LTR and left aligned without changing Persian translation', $('inlineEditorField').dir === 'ltr' && $('inlineEditorField').style.textAlign === 'left' && $('inlineEditorAlign').value === 'left');
   $('inlineVerticalAlign').value = 'top'; $('inlineVerticalAlign').dispatchEvent(new window.Event('change', { bubbles: true }));
   check('vertical placement is auto-applied without a separate registration action', vm.runInContext("state.project.images[0].blocks[0].verticalAlign === 'top'", context));
   vm.runInContext("state.project.images[0].blocks[0].verticalAlign = 'bottom'", context);
@@ -470,6 +479,7 @@ function check(name, condition) {
   const editorField = $('inlineEditorField'); editorField.textContent = 'CORRECTED OCR'; editorField.dispatchEvent(new window.Event('input', { bubbles: true }));
   check('the same on-image editor auto-applies OCR without changing translation', vm.runInContext("state.project.images[0].blocks[0].text === 'CORRECTED OCR' && state.project.images[0].blocks[0].tr === 'سلام دنیا'", context));
   vm.runInContext('closeInlineEditor(); clearTimeout(saveTimer); saveTimer = null', context);
+  check('saving English OCR preserves Persian translation direction and alignment', vm.runInContext("state.project.images[0].blocks[0].ocrDir === 'ltr' && state.project.images[0].blocks[0].ocrAlign === 'left' && state.project.images[0].blocks[0].dir === 'rtl' && state.project.images[0].blocks[0].align === 'right'", context));
   check('OCR display is synchronized with the read-only source card', $('blockList').querySelector('.block-readonly').textContent.includes('CORRECTED OCR'));
   vm.runInContext("setOverlayMode('translation', false); renderEditorBoxes()", context);
   check('editor selector restores the translated overlay', $('editorBoxes').querySelector('.editor-box-text')?.textContent === 'سلام دنیا');
@@ -721,7 +731,7 @@ function check(name, condition) {
   check('translation progress dialog closes after success', !$('translationDialog').open);
   check('finishing translation automatically selects translation display mode', $('overlayMode').value === 'translation' && $('exportOverlayMode').value === 'translation');
   check('finishing translation places translated text on the image', renderedBlocks[0].tr === 'ترجمهٔ تازه' && !renderedBlocks[0]._plainText);
-  check('v4.64 completed translation report counts the persisted tr field, not a nonexistent translated field', $('jobReportBody').textContent.includes('درصد ترجمه‌شده: 100٪') && $('jobReportBody').textContent.includes('ترجمه‌شده: 1 از 1 متن') && !$('jobReportBody').textContent.includes('ترجمه‌نشده:'));
+  check('v4.65 completed translation report counts the persisted tr field, not a nonexistent translated field', $('jobReportBody').textContent.includes('درصد ترجمه‌شده: 100٪') && $('jobReportBody').textContent.includes('ترجمه‌شده: 1 از 1 متن') && !$('jobReportBody').textContent.includes('ترجمه‌نشده:'));
   await vm.runInContext('openEditor(state.project.images[0].id)', context);
   const retranslateButton = [...$('blockList').querySelectorAll('button')].find((button) => button.textContent === 'ترجمهٔ دوباره');
   retranslateButton.click(); await sleep(20);
@@ -2196,7 +2206,7 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.64 processes 32 OCR pages in order without mid-batch engine recycling, places each page before the next, reuses grid images, and clears preview bitmaps',
+      'v4.65 processes 32 OCR pages in order without mid-batch engine recycling, places each page before the next, reuses grid images, and clears preview bitmaps',
       v399PerPageCheck.img1Reused === true
         && v399PerPageCheck.sequence === Array.from({length: 32}, (_, i) => `ocr:pg-${i + 1}:keep=${i < 31} -> placed:pg-${i + 1}`).join(' -> ')
         && v399PerPageCheck.hadPreviewSrc === true
@@ -2205,7 +2215,7 @@ function check(name, condition) {
     );
   }
 
-  // v4.64: persisted content, not source/AI flags/empty HTML, defines completion.
+  // v4.65: persisted content, not source/AI flags/empty HTML, defines completion.
   {
     const parserContext = vm.createContext({document: window.document, module: {exports: {}}});
     vm.runInContext(fs.readFileSync(path.join(root, 'typeset.js'), 'utf8'), parserContext);
@@ -2235,10 +2245,10 @@ function check(name, condition) {
       })()
     `, context);
     window.Typeset.richHtmlWords = originalRichParser;
-    check('v4.64 translation stats count saved plain/rich text and exclude empty markup, stale flags, disabled and source-free blocks', stats.total === 5 && stats.translated === 2 && stats.untranslated === 3 && stats.percentage === 40 && stats.zero && stats.partial);
+    check('v4.65 translation stats count saved plain/rich text and exclude empty markup, stale flags, disabled and source-free blocks', stats.total === 5 && stats.translated === 2 && stats.untranslated === 3 && stats.percentage === 40 && stats.zero && stats.partial);
   }
 
-  // v4.64: localize presentation without destroying copyable diagnostics.
+  // v4.65: localize presentation without destroying copyable diagnostics.
   {
     const noticeCheck = vm.runInContext(`
       (() => {
@@ -2264,10 +2274,10 @@ function check(name, condition) {
           && !output.includes('/api/') && noMarkup && noStaleCopy;
       })()
     `, context);
-    check('v4.64 Persian notices preserve exact technical diagnostics, error semantics and text-only safety', noticeCheck);
+    check('v4.65 Persian notices preserve exact technical diagnostics, error semantics and text-only safety', noticeCheck);
   }
 
-  // v4.64: offscreen image eviction must preserve metadata, click handlers,
+  // v4.65: offscreen image eviction must preserve metadata, click handlers,
   // reloads, and ignore observer callbacks queued by an older grid/project.
   {
     const result = await vm.runInContext(`
@@ -2316,7 +2326,7 @@ function check(name, condition) {
         }
       })()
     `, context);
-    check('v4.64 bounds grid pixel ownership to visible pages, preserves reload/click metadata, and ignores stale/detached callbacks', result);
+    check('v4.65 bounds grid pixel ownership to visible pages, preserves reload/click metadata, and ignores stale/detached callbacks', result);
   }
 
   // v4.00: Version 4.00 + Optional Custom Storage & Downloads Directory Settings UI (#storageBtn, #modelsStorageBtn, #storageDialog)
@@ -2425,7 +2435,7 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.30 displays version 4.64 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      'v4.00/v4.30 displays version 4.65 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
       v400StorageCheck.verHas426 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
@@ -4764,7 +4774,7 @@ function check(name, condition) {
       const detail = document.getElementById('serverAlertDetail').textContent || '';
       window.fetch = async (url, opts = {}) => {
         const parsed = new URL(url, 'http://127.0.0.1:8765');
-        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.64' });
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.65' });
         return origFetch(url, opts);
       };
       document.getElementById('serverAlertRetry').click();

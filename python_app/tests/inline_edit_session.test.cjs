@@ -64,3 +64,17 @@ assert.equal(ocrRichBlock.tr, 'سلام', 'OCR rich edits never overwrite transl
 assert.equal(ocrRichBlock.richHtml, '<i>سلام</i>', 'OCR rich edits never overwrite translation richHtml');
 
 console.log('PASS: inline edit sessions preview, auto-commit, preserve geometry, and protect concurrent edits');
+
+const separate = { text: 'English', tr: 'متن فارسی', dir: 'rtl', align: 'right' };
+let revision = JSON.stringify(separate);
+const sourceOnly = createInlineEditSession({ block: separate, mode: 'ocr',
+  read: () => ({ text: 'English edited', ocrDir: 'ltr', ocrAlign: 'left' }),
+  snapshot: JSON.stringify, getBaseline: () => revision,
+  onCommit: (_b, next) => { revision = next; },
+});
+assert.equal(sourceOnly.previewBlock().ocrAlign, 'left');
+assert.equal(sourceOnly.commit(), true);
+assert.equal(separate.ocrDir, 'ltr'); assert.equal(separate.ocrAlign, 'left');
+assert.equal(separate.dir, 'rtl'); assert.equal(separate.align, 'right');
+assert.equal(separate.tr, 'متن فارسی');
+assert.equal(sourceOnly.commit(), true, 'repeated save remains a no-op');

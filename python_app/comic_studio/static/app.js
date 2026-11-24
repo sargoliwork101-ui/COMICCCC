@@ -1177,20 +1177,33 @@ function blockTextMode(block, mode = currentOverlayMode()) {
 function blockOverlayMode(block, mode = currentOverlayMode()) {
   return mode === 'none' ? 'none' : blockTextMode(block, mode);
 }
+function textDirectionOf(text, fallback = 'ltr') {
+  // Count letters, not Arabic digits/punctuation; Persian prose may contain
+  // English model names and terms without becoming an English paragraph.
+  const letters = String(text || '').match(/\p{L}/gu) || [];
+  const rtl = letters.filter((ch) => /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]/.test(ch)).length;
+  const ltr = letters.length - rtl;
+  return rtl || ltr ? (rtl > ltr ? 'rtl' : 'ltr') : fallback;
+}
+function ocrBlockAlignment(block, direction) {
+  if (['left', 'right', 'center', 'justify'].includes(block.ocrAlign)) return block.ocrAlign;
+  // Old right/left values belong to the translation, not the recognized source.
+  if (['center', 'justify'].includes(block.align)) return block.align;
+  return direction === 'rtl' ? 'right' : 'left';
+}
 function overlayBlock(block, mode = currentOverlayMode()) {
   const effectiveMode = blockOverlayMode(block, mode);
   if (effectiveMode === 'none') return { ...block, tr: '', richHtml: '', manual: false };
   if (effectiveMode !== 'ocr') return block;
   if (block.manual && !String(block.text || '').trim() && (String(block.tr || '').trim() || String(block.richHtml || '').trim())) return block;
-  const ocrRtl = /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]/.test(block.text || '') && !/[A-Za-z]{3,}/.test(block.text || '');
-  const resolvedDir = (block.ocrDir === 'rtl' || block.ocrDir === 'ltr') ? block.ocrDir : (ocrRtl ? 'rtl' : 'ltr');
+  const resolvedDir = (block.ocrDir === 'rtl' || block.ocrDir === 'ltr') ? block.ocrDir : textDirectionOf(block.text);
   const ocrRich = String(block.ocrRichHtml || '').trim();
   return {
     ...block,
     tr: block.text || '',
     richHtml: ocrRich,
     dir: resolvedDir,
-    align: ['left', 'right', 'center', 'justify'].includes(block.align) ? block.align : (resolvedDir === 'rtl' ? 'right' : 'left'),
+    align: ocrBlockAlignment(block, resolvedDir),
     _plainText: !ocrRich,
   };
 }
@@ -6295,7 +6308,7 @@ function setInlineOutputPreview(enabled) {
 function inlineBlockSnapshot(block) {
   return JSON.stringify([
     block.text || '', block.tr || '', block.richHtml || '', block.ocrRichHtml || '',
-    block.dir || '', block.ocrDir || '', block.align || '',
+    block.dir || '', block.ocrDir || '', block.align || '', block.ocrAlign || '',
     block.size ?? null, block.color || null, block.verticalAlign || '',
     block.fontFamily || '', block.bold !== false, !!block.italic, !!block.underline, !!block.strike,
   ]);
@@ -6791,12 +6804,14 @@ function setInlineLineStyle(property, value, options = {}) {
     recordEditorPageHistory();
     targets.forEach((b) => {
       if (property === 'textAlign') {
-        b.align = value;
+        if (blockOverlayMode(b) === 'ocr') b.ocrAlign = value;
+        else b.align = value;
         cleanBlockRichOverrides(b, { stripAlign: true });
       } else if (property === 'direction') {
         if (blockOverlayMode(b) === 'ocr') b.ocrDir = value;
         else b.dir = value;
-        if (!b.align || b.align === (value === 'rtl' ? 'left' : 'right')) b.align = value === 'rtl' ? 'right' : 'left';
+        const alignKey = blockOverlayMode(b) === 'ocr' ? 'ocrAlign' : 'align';
+        if (!b[alignKey] || b[alignKey] === (value === 'rtl' ? 'left' : 'right')) b[alignKey] = value === 'rtl' ? 'right' : 'left';
         cleanBlockRichOverrides(b, { stripDir: true });
       } else if (property === 'color') {
         b.color = value;
@@ -7349,7 +7364,8 @@ function openInlineEditor(block, clickEvent = null) {
         ocrRichHtml: mode === 'ocr' ? (ocrMeaningful ? htmlVal : '') : undefined,
         dir: mode === 'ocr' ? (block.dir || 'rtl') : curDir,
         ocrDir: mode === 'ocr' ? curDir : undefined,
-        align: $('inlineEditorAlign').value,
+        align: mode === 'ocr' ? block.align : $('inlineEditorAlign').value,
+        ocrAlign: mode === 'ocr' ? $('inlineEditorAlign').value : undefined,
         verticalAlign: keepLegacyVertical ? undefined : $('inlineVerticalAlign').value,
         size: keepAuto ? null : (rawSize ? Number(rawSize) : null), color: inlineDraft?.color ?? null,
         fontFamily: storedFont,
@@ -7585,7 +7601,7 @@ function splitSingleEditorBlock(block, item, nextIdRef) {
   const hasTr = Boolean(String(block.tr || '').trim() || String(block.richHtml || '').trim());
   const trLines = nonEmptyLines(block.tr);
   const ocrLines = nonEmptyLines(block.text);
-  const inheritedKeys = ['dir', 'ocrDir', 'align', 'size', 'verticalAlign', 'color', 'bg', 'fontFamily', 'bold', 'italic', 'underline', 'strike', 'shape', 'cornerRadius', 'angle'];
+  const inheritedKeys = ['dir', 'ocrDir', 'align', 'ocrAlign', 'size', 'verticalAlign', 'color', 'bg', 'fontFamily', 'bold', 'italic', 'underline', 'strike', 'shape', 'cornerRadius', 'angle'];
   if (!hasTr) {
     if (hasSource && String(block.text || '') === joinedOcrText(block.sourceLines)) {
       const originals = JSON.parse(JSON.stringify(block.sourceLines));
@@ -8638,13 +8654,13 @@ function buildBlockList() {
       chip.title = tip;
       languageRow.appendChild(chip);
     });
-    const source = document.createElement('p'); source.className = 'block-readonly block-source-edit'; source.dir = 'auto'; source.textContent = `متن اصلی: ${block.text || '—'}`; source.tabIndex = 0; source.setAttribute('role', 'button'); source.setAttribute('aria-label', `ویرایش متن انگلیسی/OCR کادر ${block.id}`); source.title = 'برای ویرایش متن اصلی کلیک کنید';
+    const source = document.createElement('p'); source.className = 'block-readonly block-source-edit'; source.dir = textDirectionOf(block.text); source.style.textAlign = source.dir === 'rtl' ? 'right' : 'left'; source.textContent = `متن اصلی: ${block.text || '—'}`; source.tabIndex = 0; source.setAttribute('role', 'button'); source.setAttribute('aria-label', `ویرایش متن انگلیسی/OCR کادر ${block.id}`); source.title = 'برای ویرایش متن اصلی کلیک کنید';
     if (block.bold) source.style.fontWeight = '700';
     if (block.italic) source.style.fontStyle = 'italic';
     if (!isHeading && (Number(block.sourceIndent) || 0) > 0) source.style.paddingInlineStart = `${Math.min(36, Math.round((Number(block.sourceIndent) || 0) * 3.5))}px`;
     source.addEventListener('click', () => editOcrText(block));
     source.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); editOcrText(block); } });
-    const translation = document.createElement('p'); translation.className = 'block-readonly block-tr-edit'; translation.dir = 'auto'; translation.textContent = `ترجمه: ${block.tr || '—'}`; translation.tabIndex = 0; translation.setAttribute('role', 'button'); translation.setAttribute('aria-label', `ویرایش ترجمهٔ کادر ${block.id} روی تصویر`); translation.title = 'برای ویرایش ترجمه روی تصویر کلیک کنید';
+    const translation = document.createElement('p'); translation.className = 'block-readonly block-tr-edit'; translation.dir = textDirectionOf(block.tr, 'rtl'); translation.style.textAlign = translation.dir === 'rtl' ? 'right' : 'left'; translation.textContent = `ترجمه: ${block.tr || '—'}`; translation.tabIndex = 0; translation.setAttribute('role', 'button'); translation.setAttribute('aria-label', `ویرایش ترجمهٔ کادر ${block.id} روی تصویر`); translation.title = 'برای ویرایش ترجمه روی تصویر کلیک کنید';
     if (block.bold) translation.style.fontWeight = '700';
     if (block.italic) translation.style.fontStyle = 'italic';
     const openBlockTranslation = () => { if (!block.enabled || blockOverlayMode(block) === 'none') { toast('ابتدا نمایش متن روی تصویر را فعال کنید.', true); return; } if (blockTextMode(block) === 'ocr') setBlockTextMode(block, 'translation'); openInlineEditor(block); };
