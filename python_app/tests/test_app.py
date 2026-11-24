@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.63"
+    assert health.json()["version"] == "4.64"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -3344,7 +3344,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.63"
+    assert APP_VERSION == "4.64"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "HaSaYaStudio"
@@ -5787,3 +5787,35 @@ def test_ocr_photo_filters_reach_engine_without_changing_original(client, monkey
     assert exported.status_code == 200
     with zipfile.ZipFile(io.BytesIO(exported.content)) as archive:
         assert all(archive.read(name) == png_bytes() for name in archive.namelist())
+
+
+@pytest.mark.parametrize('language', ['eng', 'fas'])
+@pytest.mark.parametrize('group_lines', [True, False])
+def test_ocr_long_spaced_paragraph_grouping_end_to_end(client, monkeypatch, language, group_lines):
+    project = client.post('/api/projects', json={'name': 'Long paragraph'}).json()
+    imported = client.post(f"/api/projects/{project['id']}/files", files=[
+        ('files', ('book.png', png_bytes((800, 1600)), 'image/png')),
+    ])
+    assert imported.status_code == 200
+    item = imported.json()['images'][0]
+    text = ('این متن ادامهٔ یک پاراگراف طولانی کتاب است و باید به هم متصل شود'
+            if language == 'fas' else 'This is a continuing line of a long book paragraph with ordinary prose')
+    raw = [{'id': i + 1, 'text': f'{text} {i}', 'conf': 95, 'enabled': True,
+            'x0': 70, 'x1': 720, 'y0': 80 + i * 40, 'y1': 98 + i * 40, 'lineH': 18}
+           for i in range(32)]
+    monkeypatch.setattr('comic_studio.main.recognize_image', lambda *args, **kwargs: raw)
+    response = client.post(f"/api/projects/{project['id']}/ocr", json={
+        'image_ids': [item['id']], 'engine': 'rapidocr-v5', 'language': language,
+        'page_mode': 'document', 'group_lines': group_lines,
+    })
+    assert response.status_code == 200, response.text
+    blocks = response.json()['images'][0]['blocks']
+    if group_lines:
+        assert len(blocks) == 1
+        assert blocks[0]['text'] == ' '.join(b['text'] for b in raw)
+        assert len(blocks[0]['sourceLines']) == 32
+        assert blocks[0]['y1'] == 1338
+    else:
+        assert len(blocks) == 32
+    saved = client.get(f"/api/projects/{project['id']}").json()
+    assert saved['images'][0]['blocks'] == blocks

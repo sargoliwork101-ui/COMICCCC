@@ -200,3 +200,70 @@ def test_v423_rtl_horizontal_word_and_subword_coalescing_preserves_side_by_side_
 
 
 
+
+
+def _long_book_column(rtl=False, x=60, start_id=1, count=32, step=40):
+    text = ('این متن ادامهٔ یک پاراگراف بلند از کتاب است و باید پیوسته خوانده شود'
+            if rtl else 'This is a continuing line of a long book paragraph with ordinary prose')
+    return [line(start_id + i, f'{text} {i}', x, 80 + i * step, width=480, height=18)
+            for i in range(count)]
+
+
+def test_long_widely_spaced_book_paragraphs_join_in_both_directions():
+    import copy
+    from comic_studio.ocr_grouping import organize_ocr_blocks
+    for rtl in (False, True):
+        raw = _long_book_column(rtl)
+        snapshot = copy.deepcopy(raw)
+        for mode in ('document', 'auto'):
+            result, effective = organize_ocr_blocks(raw, page_mode=mode, group_lines=True, page_size=(650, 1600))
+            assert effective == 'document'
+            assert len(result) == 1
+            assert result[0]['text'] == ' '.join(b['text'] for b in raw)
+            assert result[0]['sourceLines'] == raw
+            assert result[0]['lineH'] == 18
+        ungrouped, _ = organize_ocr_blocks(raw, page_mode='document', group_lines=False)
+        assert len(ungrouped) == len(raw)
+        assert raw == snapshot
+
+
+def test_long_paragraph_gap_learning_stays_inside_columns_and_preserves_breaks():
+    from comic_studio.ocr_grouping import organize_ocr_blocks
+    for rtl in (False, True):
+        right = _long_book_column(rtl, x=650, start_id=101, count=12, step=40)
+        left = _long_book_column(rtl, x=60, count=12, step=24)
+        # One actual paragraph break; should not be swallowed by the learned spacing.
+        for b in right[6:]:
+            b['y0'] += 55
+            b['y1'] += 55
+        raw = sorted(left + right, key=lambda b: b['y0'])
+        result, _ = organize_ocr_blocks(raw, page_mode='document', page_size=(1250, 1000))
+        expected = [right[:6], right[6:], left] if rtl else [left, right[:6], right[6:]]
+        assert [b['text'] for b in result] == [' '.join(b['text'] for b in group) for group in expected]
+
+
+def test_long_paragraphs_keep_new_indents_headings_and_list_items_separate():
+    from comic_studio.ocr_grouping import organize_ocr_blocks
+    for rtl in (False, True):
+        raw = _long_book_column(rtl, count=20)
+        # A new first-line indent at the normal cadence.
+        if rtl:
+            raw[8]['x1'] -= 32
+        else:
+            raw[8]['x0'] += 32
+        raw[14]['text'] = '• مورد تازه' if rtl else '• A separate list item'
+        raw[17]['pageRole'] = 'heading'
+        result, _ = organize_ocr_blocks(raw, page_mode='document')
+        texts = [b['text'] for b in result]
+        assert texts[0] == ' '.join(b['text'] for b in raw[:8])
+        assert texts[1] == ' '.join(b['text'] for b in raw[8:14])
+        assert any(b['pageRole'] == 'list' and b['text'].startswith('•') for b in result)
+        assert any(b['pageRole'] == 'heading' and b['text'] == raw[17]['text'] for b in result)
+
+
+def test_sparse_distant_blocks_do_not_establish_paragraph_spacing():
+    from comic_studio.ocr_grouping import group_document_lines
+    raw = _long_book_column(count=3, step=40)
+    assert len(group_document_lines(raw)) == 3
+    far = _long_book_column(count=20, step=100)
+    assert len(group_document_lines(far)) == 20

@@ -595,6 +595,38 @@ def group_document_lines(
     typical_gap = median(small_gaps) if small_gaps else med_lh * 0.25
     max_para_gap = max(med_lh * 0.65, typical_gap + med_lh * 0.32)
 
+    # OCR boxes often hug the ink, not the full typographic line height. In
+    # double-spaced books the normal gap can therefore exceed the old fixed
+    # 0.85*lineH sampling limit, leaving every line of a long paragraph separate.
+    # Learn a repeated prose cadence per column, never from isolated blocks,
+    # heading/list rows, or across a column boundary.
+    column_para_gaps: dict[int, float] = {}
+    for c_idx, items in col_lines_map.items():
+        if c_idx == -1:
+            continue
+        candidates = []
+        for prev, nxt in zip(items, items[1:]):
+            _, left, right = _column_bounds(prev)
+            width = right - left
+            lh = min(_line_h(prev), _line_h(nxt))
+            gap = float(nxt.get("y0", 0)) - float(prev.get("y1", 0))
+            leading_edge = "x1" if effective_rtl else "x0"
+            if (
+                not _is_multi_line_box(prev) and not _is_multi_line_box(nxt)
+                and _classify_document_line_role(prev, med_lh, width) == "paragraph"
+                and _classify_document_line_role(nxt, med_lh, width) == "paragraph"
+                and min(_width(prev), _width(nxt)) >= width * 0.60
+                and abs(float(prev.get(leading_edge, 0)) - float(nxt.get(leading_edge, 0))) <= lh * 0.60
+                and max(_line_h(prev), _line_h(nxt)) <= lh * 1.35
+                and 0 <= gap <= med_lh * 1.8
+            ):
+                candidates.append(gap)
+        if len(candidates) >= 3:
+            center = median(candidates)
+            repeated = [gap for gap in candidates if abs(gap - center) <= med_lh * 0.25]
+            if len(repeated) >= 3 and len(repeated) >= len(candidates) * 0.60:
+                column_para_gaps[c_idx] = max(max_para_gap, median(repeated) + med_lh * 0.32)
+
     groups: list[tuple[str, int, list[dict[str, Any]]]] = []
     cur_lines: list[dict[str, Any]] = []
     cur_role = "paragraph"
@@ -709,7 +741,7 @@ def group_document_lines(
             and not style_changed
             and not structured_label
             and lh_ratio <= 1.35
-            and -0.35 * min(prev_lh, cur_lh) <= v_gap <= max_para_gap
+            and -0.35 * min(prev_lh, cur_lh) <= v_gap <= column_para_gaps.get(col_idx, max_para_gap)
             and (x_overlap >= 0.15 * min(_width(prev), _width(line)) or aligned_margin)
             and not first_line_indent
             and not outdent_break
