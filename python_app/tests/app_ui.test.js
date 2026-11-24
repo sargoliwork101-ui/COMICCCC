@@ -669,6 +669,18 @@ function check(name, condition) {
   $('editorSplitText').click();
   check('splitting never discards a translation', vm.runInContext("state.project.images[0].blocks.length === 1 && state.project.images[0].blocks[0].tr === 'ترجمه'", context));
   vm.runInContext("state.project.images[0].blocks = window._priorBlocks; state.selectedBlockIds = []; buildBlockList(); drawEditor(); state.editorId = null; appendLocalActivity('OLD JOB')", context);
+  check('photo filter defaults to off and normal contrast strength', !$('ocrPhotoSharpen').checked && $('ocrContrastStrength').value === '1');
+  $('ocrPhotoSharpen').checked = true;
+  $('ocrPhotoSharpen').dispatchEvent(new window.Event('change', { bubbles: true }));
+  $('ocrContrastStrength').value = '1.8';
+  $('ocrContrastStrength').dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('photo OCR preferences are saved in project settings', vm.runInContext('state.project.settings.photoSharpen === true && state.project.settings.contrastStrength === 1.8', context));
+  $('ocrContrast').checked = false;
+  $('ocrContrast').dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('contrast strength is disabled independently of photo sharpening', $('ocrContrastStrength').disabled && $('ocrPhotoSharpen').checked);
+  $('ocrContrast').checked = true;
+  $('ocrContrast').dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('contrast strength re-enables without losing value', !$('ocrContrastStrength').disabled && $('ocrContrastStrength').value === '1.8');
   const clearsBeforeOcr = activityClears;
   $('ocrConfidence').value = '0';
   const ocrRun = vm.runInContext('runOcr()', context);
@@ -678,6 +690,7 @@ function check(name, condition) {
   await ocrRun;
   check('v4.52 OCR asks once after the page run and lets the test choose the new result', askedForOcrReview);
   check('OCR accepts zero confidence without substituting the default', ocrRequests.at(-1).min_confidence === 0);
+  check('OCR request forwards numeric contrast and optional photo sharpening', ocrRequests.at(-1).contrast_strength === 1.8 && ocrRequests.at(-1).photo_sharpen === true);
   check('automatic paragraph grouping is requested by default', ocrRequests.at(-1).group_lines === true);
   $('ocrGroupLines').checked = false;
   vm.runInContext('collectOcrSettings()', context);
@@ -708,7 +721,7 @@ function check(name, condition) {
   check('translation progress dialog closes after success', !$('translationDialog').open);
   check('finishing translation automatically selects translation display mode', $('overlayMode').value === 'translation' && $('exportOverlayMode').value === 'translation');
   check('finishing translation places translated text on the image', renderedBlocks[0].tr === 'ترجمهٔ تازه' && !renderedBlocks[0]._plainText);
-  check('v4.62 completed translation report counts the persisted tr field, not a nonexistent translated field', $('jobReportBody').textContent.includes('درصد ترجمه‌شده: 100٪') && $('jobReportBody').textContent.includes('ترجمه‌شده: 1 از 1 متن') && !$('jobReportBody').textContent.includes('ترجمه‌نشده:'));
+  check('v4.63 completed translation report counts the persisted tr field, not a nonexistent translated field', $('jobReportBody').textContent.includes('درصد ترجمه‌شده: 100٪') && $('jobReportBody').textContent.includes('ترجمه‌شده: 1 از 1 متن') && !$('jobReportBody').textContent.includes('ترجمه‌نشده:'));
   await vm.runInContext('openEditor(state.project.images[0].id)', context);
   const retranslateButton = [...$('blockList').querySelectorAll('button')].find((button) => button.textContent === 'ترجمهٔ دوباره');
   retranslateButton.click(); await sleep(20);
@@ -2183,7 +2196,7 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.62 processes 32 OCR pages in order without mid-batch engine recycling, places each page before the next, reuses grid images, and clears preview bitmaps',
+      'v4.63 processes 32 OCR pages in order without mid-batch engine recycling, places each page before the next, reuses grid images, and clears preview bitmaps',
       v399PerPageCheck.img1Reused === true
         && v399PerPageCheck.sequence === Array.from({length: 32}, (_, i) => `ocr:pg-${i + 1}:keep=${i < 31} -> placed:pg-${i + 1}`).join(' -> ')
         && v399PerPageCheck.hadPreviewSrc === true
@@ -2192,7 +2205,7 @@ function check(name, condition) {
     );
   }
 
-  // v4.62: persisted content, not source/AI flags/empty HTML, defines completion.
+  // v4.63: persisted content, not source/AI flags/empty HTML, defines completion.
   {
     const parserContext = vm.createContext({document: window.document, module: {exports: {}}});
     vm.runInContext(fs.readFileSync(path.join(root, 'typeset.js'), 'utf8'), parserContext);
@@ -2222,10 +2235,10 @@ function check(name, condition) {
       })()
     `, context);
     window.Typeset.richHtmlWords = originalRichParser;
-    check('v4.62 translation stats count saved plain/rich text and exclude empty markup, stale flags, disabled and source-free blocks', stats.total === 5 && stats.translated === 2 && stats.untranslated === 3 && stats.percentage === 40 && stats.zero && stats.partial);
+    check('v4.63 translation stats count saved plain/rich text and exclude empty markup, stale flags, disabled and source-free blocks', stats.total === 5 && stats.translated === 2 && stats.untranslated === 3 && stats.percentage === 40 && stats.zero && stats.partial);
   }
 
-  // v4.62: localize presentation without destroying copyable diagnostics.
+  // v4.63: localize presentation without destroying copyable diagnostics.
   {
     const noticeCheck = vm.runInContext(`
       (() => {
@@ -2251,10 +2264,10 @@ function check(name, condition) {
           && !output.includes('/api/') && noMarkup && noStaleCopy;
       })()
     `, context);
-    check('v4.62 Persian notices preserve exact technical diagnostics, error semantics and text-only safety', noticeCheck);
+    check('v4.63 Persian notices preserve exact technical diagnostics, error semantics and text-only safety', noticeCheck);
   }
 
-  // v4.62: offscreen image eviction must preserve metadata, click handlers,
+  // v4.63: offscreen image eviction must preserve metadata, click handlers,
   // reloads, and ignore observer callbacks queued by an older grid/project.
   {
     const result = await vm.runInContext(`
@@ -2303,7 +2316,7 @@ function check(name, condition) {
         }
       })()
     `, context);
-    check('v4.62 bounds grid pixel ownership to visible pages, preserves reload/click metadata, and ignores stale/detached callbacks', result);
+    check('v4.63 bounds grid pixel ownership to visible pages, preserves reload/click metadata, and ignores stale/detached callbacks', result);
   }
 
   // v4.00: Version 4.00 + Optional Custom Storage & Downloads Directory Settings UI (#storageBtn, #modelsStorageBtn, #storageDialog)
@@ -2412,7 +2425,7 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.30 displays version 4.62 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      'v4.00/v4.30 displays version 4.63 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
       v400StorageCheck.verHas426 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
@@ -4751,7 +4764,7 @@ function check(name, condition) {
       const detail = document.getElementById('serverAlertDetail').textContent || '';
       window.fetch = async (url, opts = {}) => {
         const parsed = new URL(url, 'http://127.0.0.1:8765');
-        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.62' });
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.63' });
         return origFetch(url, opts);
       };
       document.getElementById('serverAlertRetry').click();

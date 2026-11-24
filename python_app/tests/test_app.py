@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.62"
+    assert health.json()["version"] == "4.63"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -3344,7 +3344,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.62"
+    assert APP_VERSION == "4.63"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "HaSaYaStudio"
@@ -5755,3 +5755,35 @@ def test_v446_pending_translation_explains_reason_and_stale_result_can_be_manual
     assert ocr_apply.status_code == 200, ocr_apply.text
     assert client.get(route).json()['images'][0]['blocks'][0]['text'] == 'متن جدید OCR'
     assert client.get(route + '/pending').json() == []
+
+
+@pytest.mark.parametrize('parallel', [False, True])
+@pytest.mark.parametrize('strength,sharpen,contrast', [(1, False, True), (1.8, True, True), (3, True, False)])
+def test_ocr_photo_filters_reach_engine_without_changing_original(client, monkeypatch, parallel, strength, sharpen, contrast):
+    import contextlib
+    from comic_studio.ocr import RapidEngine
+    project, item = make_project(client)
+    ids = [item['id']]
+    if parallel:
+        duplicate = client.post(f"/api/projects/{project['id']}/duplicate", json=ids).json()
+        ids = [entry['id'] for entry in duplicate['images']]
+    monkeypatch.setattr(RapidEngine, 'configure_batch', contextlib.contextmanager(
+        lambda self, total_pages, threads_per_worker=None: (yield 2 if parallel else 1)))
+    received = []
+    def fake_ocr(engine, image, language, engine_contrast, precise, confidence, **kwargs):
+        received.append((image.size, image.tobytes(), engine_contrast))
+        return [{'id': 1, 'text': 'TEST', 'x0': 12, 'y0': 15, 'x1': 70, 'y1': 40, 'lineH': 25, 'enabled': True}]
+    monkeypatch.setattr('comic_studio.main.recognize_image', fake_ocr)
+    response = client.post(f"/api/projects/{project['id']}/ocr", json={
+        'image_ids': ids, 'engine': 'rapidocr-v6', 'contrast': contrast,
+        'contrast_strength': strength, 'photo_sharpen': sharpen,
+    })
+    assert response.status_code == 200, response.text
+    assert len(received) == len(ids)
+    assert all(size == (320, 200) and flag == (contrast and strength == 1) for size, _, flag in received)
+    for entry in response.json()['images']:
+        assert entry['blocks'][0]['x0'] == 12
+    exported = client.post(f"/api/projects/{project['id']}/export", json={'kind': 'images', 'image_ids': ids, 'image_format': 'orig'})
+    assert exported.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(exported.content)) as archive:
+        assert all(archive.read(name) == png_bytes() for name in archive.namelist())

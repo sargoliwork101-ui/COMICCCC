@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>HaSaYa Studio</title>
-  <link rel="stylesheet" href="/style.css?v=4.62">
-  <link rel="stylesheet" href="/rich-editor.css?v=4.62">
+  <link rel="stylesheet" href="/style.css?v=4.63">
+  <link rel="stylesheet" href="/rich-editor.css?v=4.63">
 </head>
 <body>
   <header class="topbar">
@@ -301,10 +301,12 @@
       <label>نوع صفحه و چیدمان<select id="ocrPageMode"><option value="comic">کمیک و مانگا (حباب گفتگو)</option><option value="document">کتاب، مقاله و جزوه (پاراگراف و ستون)</option></select></label>
       <label>موتور OCR<select id="ocrEngine" title="علامت کنار هر موتور: ✓ آماده به کار · ◐ نصب‌شده (نیازمند فایل زبان انتخابی) · ⬇ نصب‌نشده"></select></label>
       <label>زبان متن<select id="ocrLanguage"><option value="eng">English</option><option value="fas">فارسی</option><option value="kor">한국어</option><option value="jpn">日本語</option><option value="chi_sim">中文</option></select></label>
+      <label>شدت کنتراست OCR (۰٫۵ تا ۳؛ ۱ = حالت معمول) <input id="ocrContrastStrength" type="number" min="0.5" max="3" step="0.1" value="1" dir="ltr"></label>
       <label>حداقل اطمینان<input id="ocrConfidence" type="number" min="0" max="0.95" step="0.05" value="0.35"></label>
     </div>
     <div class="checks">
       <label><input id="ocrOnlySelected" type="checkbox" checked> فقط تصاویر انتخاب‌شده</label>
+      <label><input id="ocrPhotoSharpen" type="checkbox"> بهبود عکس تار (تقویت لبهٔ متن؛ فقط نسخهٔ موقت OCR)</label>
       <label><input id="ocrContrast" type="checkbox" checked> افزایش کنتراست نسخهٔ موقت OCR</label>
       <label><input id="ocrPrecise" type="checkbox" checked> بزرگ‌نمایی برای دقت بیشتر</label>
       <label><input id="ocrPersianPreprocess" type="checkbox" title="استخراج متن کادرهای رنگی و تیره، صاف‌کردن خودکار کجی اسکن، حذف سایه، حفظ سرکش گ و نقطه‌ها و تصحیح هوشمند واژگانی و نیم‌فاصله فارسی"> پیش‌پردازش ویژه فارسی (کادر رنگی، رفع کجی و سایه، تقویت نقطه و تصحیح هوشمند)</label>
@@ -1036,12 +1038,12 @@
     </div>
   </div>
   <div id="toast" role="status" popover="manual"></div>
-<script src="/typeset.js?v=4.62"></script>
-<script src="/groups.js?v=4.62"></script>
-<script src="/rich-sanitize.js?v=4.62"></script>
-<script src="/rich-editor.js?v=4.62"></script>
-<script src="/inline-edit-session.js?v=4.62"></script>
-<script src="/help-guide.js?v=4.62"></script>
-<script src="/app.js?v=4.62"></script>
+<script src="/typeset.js?v=4.63"></script>
+<script src="/groups.js?v=4.63"></script>
+<script src="/rich-sanitize.js?v=4.63"></script>
+<script src="/rich-editor.js?v=4.63"></script>
+<script src="/inline-edit-session.js?v=4.63"></script>
+<script src="/help-guide.js?v=4.63"></script>
+<script src="/app.js?v=4.63"></script>
 </body>
 </html>

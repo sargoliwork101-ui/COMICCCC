@@ -138,6 +138,8 @@ class ProjectStore:
                 "ocrLanguage": "eng",
                 "ocrPageMode": "comic",
                 "contrast": True,
+                "contrastStrength": 1.0,
+                "photoSharpen": False,
                 "precise": True,
                 "persianPreprocess": False,
                 "eraseOriginal": True,

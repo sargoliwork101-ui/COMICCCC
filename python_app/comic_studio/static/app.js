@@ -1105,6 +1105,8 @@ function adoptProject(project, options = {}) {
     $('ocrEngine').value = settings.ocrEngine || 'rapidocr-v6';
   }
   $('ocrContrast').checked = settings.contrast !== false;
+  if ($('ocrContrastStrength')) { $('ocrContrastStrength').value = String(settings.contrastStrength ?? 1); $('ocrContrastStrength').disabled = !$('ocrContrast').checked; }
+  if ($('ocrPhotoSharpen')) $('ocrPhotoSharpen').checked = settings.photoSharpen === true;
   $('ocrPrecise').checked = settings.precise !== false;
   if ($('ocrPersianPreprocess')) {
     $('ocrPersianPreprocess').checked = settings.persianPreprocessCustomized === true
@@ -1729,6 +1731,10 @@ function collectOutputSettings() {
   const effectiveName = rawExport || projName;
   state.project.settings.output = { name: effectiveName, nameCustomized, seamless: $('exportSeamless').checked, uniformSize: $('exportUniform').checked, twoPerPage: $('exportTwo').checked, imageFormat: $('exportFormat').value, folderName: $('exportFolder').value, docxLayout: $('exportDocxLayout')?.value || 'visual', pptxLayout: $('exportPptxLayout')?.value || 'visual' };
 }
+function ocrContrastStrength() {
+  const value = Number($('ocrContrastStrength')?.value || 1);
+  return Number.isFinite(value) ? Math.max(0.5, Math.min(3, value)) : 1;
+}
 function collectOcrSettings() {
   if (!state.project) return;
   state.project.settings = state.project.settings || {};
@@ -1737,6 +1743,8 @@ function collectOcrSettings() {
     ocrLanguage: $('ocrLanguage').value,
     ocrPageMode: normalizePageMode($('ocrPageMode')?.value),
     contrast: $('ocrContrast').checked,
+    contrastStrength: ocrContrastStrength(),
+    photoSharpen: Boolean($('ocrPhotoSharpen')?.checked),
     precise: $('ocrPrecise').checked,
     persianPreprocess: Boolean($('ocrPersianPreprocess')?.checked),
     persianPreprocessCustomized: Boolean(state.project.settings.persianPreprocessCustomized),
@@ -2715,6 +2723,8 @@ async function runOcr() {
         language: $('ocrLanguage').value,
         page_mode: normalizePageMode($('ocrPageMode')?.value),
         contrast: $('ocrContrast').checked,
+        contrast_strength: ocrContrastStrength(),
+        photo_sharpen: Boolean($('ocrPhotoSharpen')?.checked),
         precise: $('ocrPrecise').checked,
         persian_preprocess: Boolean($('ocrPersianPreprocess')?.checked),
         group_lines: $('ocrGroupLines').checked,
@@ -9403,6 +9413,10 @@ function bindEvents() {
     if (!isModuleLicensed('ocr')) { ensureModuleLicensed('ocr').catch(() => {}); return; }
     clearPendingTranslationOcr(); $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden'); updateEngineOptions(); showDialog('ocrDialog');
   });
+  ['ocrPhotoSharpen', 'ocrContrastStrength', 'ocrContrast'].forEach((id) => $(id)?.addEventListener('change', () => {
+    if ($('ocrContrastStrength')) $('ocrContrastStrength').disabled = !$('ocrContrast').checked;
+    collectOcrSettings(); scheduleSave();
+  }));
   $('ocrEngine').addEventListener('change', () => { collectOcrSettings(); updateOcrEngineStatus(); scheduleSave(); });
   $('ocrPersianPreprocess')?.addEventListener('change', () => {
     if (state.project) {
