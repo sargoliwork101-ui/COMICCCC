@@ -363,9 +363,9 @@ body.light .dock-pptx .btn-ico{color:#ea580c}
 @media(max-width:900px){.drag-guide-wrap{margin-inline-start:0}.dock-sep{display:none}}
 
 /* v3.83: Categorized icon capsules and visual decluttering inside #editorDialog */
-.editor-dialog>.dialog-head{gap:8px;padding:4px 0 8px;margin:-4px 0 8px}
-.editor-dialog>.dialog-head h2{font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
-.editor-head-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.editor-dialog>.dialog-head{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;padding:4px 0 8px;margin:-4px 0 8px;min-width:0}
+.editor-dialog>.dialog-head h2{min-width:0;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.editor-head-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;min-width:0;max-width:100%}
 .editor-head-group{display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap;padding:3px 6px;border-radius:10px;border:1px solid var(--line-2);background:color-mix(in srgb,var(--surface) 74%,var(--surface-2))}
 .editor-head-group.ehg-view{border-color:color-mix(in srgb,#38bdf8 32%,var(--line-2));background:color-mix(in srgb,#38bdf8 5%,var(--surface))}
 .editor-head-group.ehg-finish{border-color:color-mix(in srgb,#10b981 36%,var(--line-2));background:color-mix(in srgb,#10b981 5%,var(--surface))}
@@ -682,3 +682,6 @@ body.auth-locked #mainwrap,body.auth-locked #dock,body.auth-locked #menuBtn,body
 
 #toast.show{pointer-events:auto}
 #toast .notice-copy{display:inline-flex;margin-inline-start:10px;padding:3px 8px;font-size:11px}
+
+/* Keep long book names from squeezing the editor actions. */
+@media(max-width:1200px){.editor-dialog>.dialog-head{grid-template-columns:minmax(0,1fr)}.editor-head-actions{justify-content:flex-start}.editor-head-group{min-width:0;max-width:100%;box-sizing:border-box}}

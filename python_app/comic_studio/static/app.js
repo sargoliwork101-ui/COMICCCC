@@ -5598,7 +5598,9 @@ async function saveAiSettings(options = {}) {
 function editorItem() { return state.project?.images.find((item) => item.id === state.editorId); }
 function syncEditorApprovalHeader(item = editorItem()) {
   if (!item) return;
-  $('editorTitle').textContent = `ویرایش — ${item.name}${item.approved ? ' (✓ تأییدشده)' : ''}`;
+  const title = `ویرایش — ${item.name}${item.approved ? ' (✓ تأییدشده)' : ''}`;
+  $('editorTitle').textContent = title;
+  $('editorTitle').title = title;
   $('editorUnapproveBtn')?.classList.toggle('hidden', !item.approved);
 }
 function readProjectImageDrafts(projectId, imageId) {

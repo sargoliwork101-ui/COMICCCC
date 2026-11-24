@@ -21,6 +21,7 @@ function plan({ browser = false, realOcr = false, python, npmCli }) {
     { id: 'extension', command: [node, npmCli, 'test'] },
   ];
   if (browser) suites.push(
+    js('browser-editor-header', 'python_app/tests/editor_header_browser.test.cjs'),
     js('browser-extension', 'tests/test-extension-browser.cjs'),
     js('browser-grid-notices', 'python_app/tests/grid_memory_browser.test.cjs'),
     js('browser-workflow', 'python_app/tests/app_browser.test.cjs'),
