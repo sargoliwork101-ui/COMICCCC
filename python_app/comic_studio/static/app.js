@@ -1107,6 +1107,7 @@ function adoptProject(project, options = {}) {
   $('ocrContrast').checked = settings.contrast !== false;
   if ($('ocrContrastStrength')) { $('ocrContrastStrength').value = String(settings.contrastStrength ?? 1); $('ocrContrastStrength').disabled = !$('ocrContrast').checked; }
   if ($('ocrPhotoSharpen')) $('ocrPhotoSharpen').checked = settings.photoSharpen === true;
+  if ($('ocrDocumentBinarize')) $('ocrDocumentBinarize').checked = settings.documentBinarize === true;
   $('ocrPrecise').checked = settings.precise !== false;
   if ($('ocrPersianPreprocess')) {
     $('ocrPersianPreprocess').checked = settings.persianPreprocessCustomized === true
@@ -1758,6 +1759,7 @@ function collectOcrSettings() {
     contrast: $('ocrContrast').checked,
     contrastStrength: ocrContrastStrength(),
     photoSharpen: Boolean($('ocrPhotoSharpen')?.checked),
+    documentBinarize: Boolean($('ocrDocumentBinarize')?.checked),
     precise: $('ocrPrecise').checked,
     persianPreprocess: Boolean($('ocrPersianPreprocess')?.checked),
     persianPreprocessCustomized: Boolean(state.project.settings.persianPreprocessCustomized),
@@ -2738,6 +2740,7 @@ async function runOcr() {
         contrast: $('ocrContrast').checked,
         contrast_strength: ocrContrastStrength(),
         photo_sharpen: Boolean($('ocrPhotoSharpen')?.checked),
+        document_binarize: Boolean($('ocrDocumentBinarize')?.checked),
         precise: $('ocrPrecise').checked,
         persian_preprocess: Boolean($('ocrPersianPreprocess')?.checked),
         group_lines: $('ocrGroupLines').checked,
@@ -9439,7 +9442,7 @@ function bindEvents() {
     if (!isModuleLicensed('ocr')) { ensureModuleLicensed('ocr').catch(() => {}); return; }
     clearPendingTranslationOcr(); $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden'); updateEngineOptions(); showDialog('ocrDialog');
   });
-  ['ocrPhotoSharpen', 'ocrContrastStrength', 'ocrContrast'].forEach((id) => $(id)?.addEventListener('change', () => {
+  ['ocrDocumentBinarize', 'ocrPhotoSharpen', 'ocrContrastStrength', 'ocrContrast'].forEach((id) => $(id)?.addEventListener('change', () => {
     if ($('ocrContrastStrength')) $('ocrContrastStrength').disabled = !$('ocrContrast').checked;
     collectOcrSettings(); scheduleSave();
   }));
