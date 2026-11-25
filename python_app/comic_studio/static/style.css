@@ -685,3 +685,6 @@ body.auth-locked #mainwrap,body.auth-locked #dock,body.auth-locked #menuBtn,body
 
 /* Keep long book names from squeezing the editor actions. */
 @media(max-width:1200px){.editor-dialog>.dialog-head{grid-template-columns:minmax(0,1fr)}.editor-head-actions{justify-content:flex-start}.editor-head-group{min-width:0;max-width:100%;box-sizing:border-box}}
+
+/* Keep every page action together below the live-height app header. */
+.main-toolbar-panel{position:sticky;top:var(--studio-topbar-height,64px);z-index:40;background:var(--panel);box-shadow:0 5px 14px #0002}

@@ -9214,7 +9214,17 @@ async function removeWatermarkFromDialog() {
 }
 
 // ---------- Events and startup ----------
+function initStickyMainToolbar() {
+  const topbar = document.querySelector('.topbar');
+  if (!topbar) return;
+  const update = () => document.documentElement.style.setProperty('--studio-topbar-height', `${Math.ceil(topbar.getBoundingClientRect().height)}px`);
+  update();
+  // Font loading, license badges, and narrow windows can all change header height.
+  if (window.ResizeObserver) new window.ResizeObserver(update).observe(topbar, { box: 'border-box' });
+  window.addEventListener('resize', update);
+}
 function bindEvents() {
+  initStickyMainToolbar();
   const finishBrowserSession = () => { if (inlineDraft && !sessionCloseSent) classicEditor.saveDraft(); closeSession(); };
   window.addEventListener('pagehide', finishBrowserSession);
   window.addEventListener('beforeunload', finishBrowserSession);
