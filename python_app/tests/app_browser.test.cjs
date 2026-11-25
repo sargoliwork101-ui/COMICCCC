@@ -40,6 +40,50 @@ async function api(base, route, options = {}) {
   return response.json();
 }
 
+async function verifyEnhancementLocation(browser) {
+  const tab = await browser.newPage();
+  try {
+    await tab.setViewport({ width: 1440, height: 1000 });
+    const staticDir = path.join(pythonApp, 'comic_studio', 'static');
+    await tab.setContent('<html dir="rtl"><body><dialog open class="dlg ocr-dialog"><section id="panel"></section></dialog></body></html>');
+    await tab.addStyleTag({ content: fs.readFileSync(path.join(staticDir, 'style.css'), 'utf8') });
+    await tab.addScriptTag({ content: fs.readFileSync(path.join(staticDir, 'document-enhancement.js'), 'utf8') });
+    await tab.evaluate(() => {
+      const canvas = document.createElement('canvas'); canvas.width = 600; canvas.height = 1800;
+      const context = canvas.getContext('2d'); context.fillStyle = 'white'; context.fillRect(0, 0, 600, 1800);
+      context.fillStyle = 'black'; for (let y = 0; y < 1800; y += 30) context.fillText(`Line ${y}`, 20, y + 15);
+      window.testPreviewImage = canvas.toDataURL(); window.previewCalls = 0; window.previewDone = 0;
+      DocumentEnhancement.mount(document.getElementById('panel'), () => {}, {
+        pages: () => [{ id: 'one', name: 'test page', original: window.testPreviewImage }],
+        render: async () => {
+          window.previewCalls += 1;
+          await new Promise(resolve => setTimeout(resolve, 150));
+          window.previewDone += 1;
+          return { image: window.testPreviewImage, width: 600, height: 1800, active: true };
+        },
+      });
+      DocumentEnhancement.setDocumentMode(true);
+    });
+    await tab.waitForFunction(() => document.querySelectorAll('.enhancement-image-viewport img').length === 2 && [...document.querySelectorAll('.enhancement-image-viewport img')].every(image => image.naturalWidth > 0));
+    await tab.evaluate(() => {
+      document.querySelectorAll('.enhancement-image-viewport').forEach(viewport => {
+        const image = viewport.querySelector('img'); image.style.width = '900px'; image.style.maxWidth = 'none';
+        viewport.scrollLeft = 100; viewport.scrollTop = 700;
+      });
+      document.querySelector('[data-master]').click();
+    });
+    const afterRebuild = await tab.$$eval('.enhancement-image-viewport', nodes => nodes.map(node => [node.scrollLeft, node.scrollTop]));
+    assert.deepEqual(afterRebuild, [[100, 700], [100, 700]], 'rebuilding controls must not reset either preview viewport');
+    await tab.waitForFunction(() => window.previewCalls === 2);
+    await tab.evaluate(() => { document.querySelectorAll('.enhancement-image-viewport')[1].scrollTop = 830; });
+    await tab.waitForFunction(() => window.previewDone === 2 && document.querySelector('.enhancement-preview [role=status]').textContent.includes('آماده است'));
+    await tab.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const finalView = await tab.$$eval('.enhancement-image-viewport', nodes => nodes.map(node => [node.scrollLeft, node.scrollTop, node.querySelector('img').getBoundingClientRect().width]));
+    assert.deepEqual(finalView, [[100, 700, 900], [100, 830, 900]], 'decoded refresh preserves latest pan including interaction during processing');
+    console.log('PASS: real Chromium preserves original/result pan through control rebuild and decoded live refresh');
+  } finally { await tab.close(); }
+}
+
 async function previewDifference(page) {
   return page.evaluate(async () => {
     const item = state.project.images[0];
@@ -278,6 +322,7 @@ main()
       args: fastArgs, executablePath: await chromium.executablePath(), headless: 'new',
       defaultViewport: { width: 1440, height: 1000 },
     });
+    await verifyEnhancementLocation(browser);
     const page = await browser.newPage(); await page.setCacheEnabled(false);
     const browserErrors = [];
     const nativeBrowserDialogs = [];

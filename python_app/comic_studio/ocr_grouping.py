@@ -28,6 +28,14 @@ _HEADING_PREFIX_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+# References to a chapter/figure in running prose are not section titles.
+_PREFIX_PROSE_RE = re.compile(
+    r"^\s*(?:chapter|section|part|appendix|annex|table|figure|fig\.)\s+"
+    r"(?:[0-9IVXLCDM]+(?:[.\-][0-9]+)*|[A-Z])\s+"
+    r"(?:explains?|describes?|introduces?|discusses?|presents?|shows?|illustrates?|"
+    r"provides?|contains?|covers?|summarizes?|examines?|demonstrates?|is|are|was|were)\b",
+    re.IGNORECASE,
+)
 _STRUCTURED_LABEL_LINE_RE = re.compile(
     r"^\s*(?:class\s*[0-9,/\s]+|note\s*\d*|warning|caution|target|acceptable|defect|process\s+indicator|minimum|maximum|"
     r"کلاس\s*[۰-۹0-9]+|تبصره|نکته|هشدار|حداقل|حداکثر)\b[^.!?]{0,32}[:\-–—]\s*\S",
@@ -326,7 +334,7 @@ def _classify_document_line_role(
     if lh >= med_lh * 1.24 and len(txt) <= 140 and not txt.endswith((".", "،", ",", ";", "؛")):
         return "heading"
     if (
-        (_MULTI_LEVEL_NUM_HEADING_RE.match(txt) or _HEADING_PREFIX_RE.match(txt))
+        (_MULTI_LEVEL_NUM_HEADING_RE.match(txt) or (_HEADING_PREFIX_RE.match(txt) and not _PREFIX_PROSE_RE.match(txt)))
         and len(txt) <= 130
         and word_count <= 22
         and not txt.endswith(".")

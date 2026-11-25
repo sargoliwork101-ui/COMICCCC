@@ -267,3 +267,24 @@ def test_sparse_distant_blocks_do_not_establish_paragraph_spacing():
     assert len(group_document_lines(raw)) == 3
     far = _long_book_column(count=20, step=100)
     assert len(group_document_lines(far)) == 20
+
+
+def test_chapter_reference_at_start_is_running_prose_not_heading():
+    first = 'Chapter 1 explains switch-mode power supply techniques and types of converters, and it introduces'
+    raw = [line(1, first, 44, 10, width=970, height=20),
+           line(2, 'a few important results to help you better understand averaging techniques. This second edition includes', 14, 36, width=1000, height=20),
+           line(3, 'the comprehensive derivation of root mean square current constraints of the basic switching cells,', 14, 62, width=1000, height=20),
+           line(4, 'buck, boost, and buck-boost operated in continuous or discontinuous conduction modes.', 14, 88, width=1000, height=20)]
+    blocks = group_ocr_lines(raw, page_mode='document', page_size=(1041, 582))
+    assert len(blocks) == 1
+    assert blocks[0]['pageRole'] == 'paragraph'
+    assert blocks[0]['text'].startswith(first + ' a few')
+    assert len(blocks[0]['sourceLines']) == 4
+
+
+def test_real_chapter_title_stays_separate_from_body():
+    raw = [line(1, 'Chapter 1 Power Supply Techniques', 40, 10, width=600, height=24),
+           line(2, 'This chapter introduces several important design techniques', 14, 55, width=1000, height=20),
+           line(3, 'and the following line continues the same ordinary paragraph.', 14, 81, width=1000, height=20)]
+    blocks = group_ocr_lines(raw, page_mode='document', page_size=(1041, 582))
+    assert len(blocks) == 2 and blocks[0]['pageRole'] == 'heading'

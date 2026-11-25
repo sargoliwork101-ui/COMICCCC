@@ -52,6 +52,7 @@
     if (!host) return;
     previewRevision += 1;
     const existingPreview = keepPreview ? host.querySelector('.enhancement-preview') : null;
+    const heldViews = existingPreview ? [...existingPreview.querySelectorAll('.enhancement-image-viewport')].map(viewport => ({ viewport, left: viewport.scrollLeft, top: viewport.scrollTop })) : [];
     const openDetails = new Set([...host.querySelectorAll('[data-stage] details[open]')].map(node => node.closest('[data-stage]').dataset.stage));
     host.replaceChildren(); host.classList.toggle('hidden', !documentMode);
     const heading = el('h3', 'بهبود تصویر برای OCR'); host.append(heading);
@@ -118,7 +119,7 @@
       list.append(row);
     });
     controls.append(note);
-    host.append(button('بازگرداندن همه به پیش‌فرض (خاموش)', () => { config = defaults(); render(); changed(collect()); }));
+    host.append(button('بازگرداندن همه به پیش‌فرض (خاموش)', () => { config = defaults(); reorder = false; previewPage = ''; previewApi?.reset?.(); render(false); changed(collect()); }));
     if (previewApi?.save) {
       const saveStatus = el('span', '', 'hint'); saveStatus.dataset.enhancementSaveStatus = ''; saveStatus.setAttribute('role', 'status');
       const save = button('ذخیرهٔ تنظیمات', async () => {
@@ -130,7 +131,12 @@
       });
       save.dataset.saveEnhancement = ''; host.append(save, saveStatus);
     }
-    if (existingPreview) workspace.append(existingPreview); else appendPreview();
+    if (existingPreview) {
+      workspace.append(existingPreview);
+      // Detaching a scroll container can reset scroll offsets even if its image
+      // and zoom styles survive. Restore immediately after layout, not at fetch.
+      for (const view of heldViews) { void view.viewport.offsetHeight; view.viewport.scrollLeft = view.left; view.viewport.scrollTop = view.top; }
+    } else appendPreview();
     master.addEventListener('change', () => { collect(); render(); changed(collect()); });
     host.querySelectorAll('input[data-param]').forEach(input => input.addEventListener('input', () => {
       if (input.value === '' || !input.validity.valid) return;
@@ -180,13 +186,27 @@
       previewRunning = true; update.disabled = true; status.textContent = 'در حال ساخت پیش‌نمایش… تصویر قبلی تا آماده‌شدن نتیجه حفظ می‌شود.';
       try {
         const result = await previewApi.render(page.id, collect());
+        // Decode offscreen first: replacing src before decoding can temporarily
+        // collapse the image and clamp scrollTop/Left to zero in real browsers.
+        if (typeof Image.prototype.decode === 'function') {
+          const decoded = new Image(); decoded.src = result.image; await decoded.decode();
+        }
         if (revision !== previewRevision || !section.isConnected) return;
         const previousImages = [...output.querySelectorAll('.enhancement-image-viewport')];
         if (previousImages.length === 2 && output.dataset.pageId === page.id && output.dataset.original === page.original) {
           const viewport = previousImages[1]; const image = viewport.querySelector('img');
           const left = viewport.scrollLeft; const top = viewport.scrollTop;
-          image.onload = () => { viewport.scrollLeft = left; viewport.scrollTop = top; image.onload = null; };
+          const rect = image.getBoundingClientRect();
+          const oldHeight = image.style.height;
+          // Reserve current geometry through the src swap. Keep the current
+          // visible region, including pans performed while processing ran.
+          if (rect.height) image.style.height = `${rect.height}px`;
+          image.onload = () => {
+            image.style.height = oldHeight;
+            viewport.scrollLeft = left; viewport.scrollTop = top; image.onload = null;
+          };
           image.src = result.image;
+          viewport.scrollLeft = left; viewport.scrollTop = top;
         } else {
         output.replaceChildren(); output.dataset.pageId = page.id; output.dataset.original = page.original;
         const zoomLabel = el('label', null, 'enhancement-switch'); const zoom = el('input'); zoom.type = 'checkbox';

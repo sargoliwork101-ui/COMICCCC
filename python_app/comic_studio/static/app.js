@@ -9486,6 +9486,13 @@ function bindEvents() {
   });
   window.DocumentEnhancement.mount($('documentEnhancement'), () => { collectOcrSettings(); scheduleSave(); }, {
     save: async () => { collectOcrSettings(); await saveProject(); },
+    reset: () => {
+      $('ocrContrast').checked = true;
+      $('ocrContrastStrength').value = '1'; $('ocrContrastStrength').disabled = false;
+      $('ocrPhotoSharpen').checked = false; $('ocrPrecise').checked = true;
+      $('ocrPersianPreprocess').checked = $('ocrLanguage').value === 'fas';
+      if (state.project?.settings) state.project.settings.persianPreprocessCustomized = false;
+    },
     pages: () => selectedImages().map(item => ({ id: item.id, name: item.name, original: imageUrl(item) })),
     render: async (imageId, enhancement) => {
       const projectId = state.project?.id;
