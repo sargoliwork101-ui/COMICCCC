@@ -12,6 +12,23 @@ STAGES = ['upscale', 'grayscale', 'clahe', 'denoise', 'unsharp', 'threshold']
 MAX_PIXELS = 16_000_000
 
 
+class EnhancementError(ValueError):
+    """Safe, actionable message; never include paths or native diagnostics."""
+
+
+def check_size(size: tuple[int, int], factor: int = 1) -> None:
+    width, height = size
+    target_w, target_h = width * factor, height * factor
+    if target_w * target_h > MAX_PIXELS:
+        action = ('ضریب بزرگ‌نمایی را کمتر یا فیلتر بزرگ‌نمایی را خاموش کنید.'
+                  if factor > 1 else 'برای این صفحه، نسخه‌ای کوچک‌تر یا یک برش از متن وارد کنید.')
+        raise EnhancementError(
+            f'اندازهٔ صفحه {width} × {height} پیکسل است؛ '
+            f'خروجی {target_w} × {target_h} ({target_w * target_h / 1_000_000:.1f} مگاپیکسل) '
+            f'از سقف ۱۶ مگاپیکسل بیشتر است. {action} تصویر خودکار کوچک نشده است.'
+        )
+
+
 class FilterSettings(BaseModel):
     model_config = ConfigDict(allow_inf_nan=False, extra='forbid')
     enabled: bool = False
@@ -78,8 +95,7 @@ def _array(image):
 
 def _upscale(image, settings):
     size = (image.width * settings.factor, image.height * settings.factor)
-    if size[0] * size[1] > MAX_PIXELS:
-        raise ValueError('Upscaling exceeds the 16 megapixel safety limit')
+    check_size(image.size, settings.factor)
     return image.resize(size, Image.Resampling.LANCZOS)
 
 
@@ -139,8 +155,9 @@ FILTERS = dict(zip(STAGES, [_upscale, _grayscale, _clahe, _denoise, _unsharp, _t
 
 def prepare_document(image: Image.Image, settings: EnhancementSettings) -> Image.Image:
     """Owned temporary image; caller closes it. A failed stage discards all work."""
-    if image.width * image.height > MAX_PIXELS:
-        raise ValueError('Image exceeds the 16 megapixel preprocessing safety limit')
+    check_size(image.size)
+    if settings.upscale.enabled:
+        check_size(image.size, settings.upscale.factor)
     if image.mode in ('RGB', 'L'):
         work = image.copy()
     else:
@@ -152,7 +169,18 @@ def prepare_document(image: Image.Image, settings: EnhancementSettings) -> Image
         for name in settings.order:
             options = getattr(settings, name)
             if options.enabled:
-                updated = FILTERS[name](work, options)
+                try:
+                    updated = FILTERS[name](work, options)
+                except EnhancementError:
+                    raise
+                except Exception as exc:
+                    from .activity import JobCancelledError
+                    if isinstance(exc, JobCancelledError):
+                        raise
+                    raise EnhancementError(
+                        f'فیلتر {name} اجرا نشد ({type(exc).__name__}). '
+                        'این فیلتر را خاموش کنید و دوباره پیش‌نمایش بگیرید.'
+                    ) from exc
                 work.close()
                 work = updated
         return work

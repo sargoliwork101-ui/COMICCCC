@@ -35,7 +35,7 @@ from .exporter import build_docx, build_images_zip, build_pdf, build_pptx, build
 from .watermark_render import has_active_watermark
 from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, _INSTALL_LOCK, recognize_image
 from .ocr_filters import prepare_ocr_photo
-from .document_enhancement import EnhancementSettings, prepare_document, run_document_ocr
+from .document_enhancement import EnhancementError, EnhancementSettings, check_size, prepare_document, run_document_ocr
 from .ocr_grouping import organize_ocr_blocks
 from .ocr_managed import (
     _stop_lingering_surya_server,
@@ -1314,10 +1314,9 @@ def create_app() -> FastAPI:
             # No OCR, state writes, model loads or source replacements occur here.
             try:
                 with Image.open(path) as source:
-                    if source.width * source.height > 16_000_000:
-                        raise ValueError("Preview exceeds 16 megapixels")
+                    check_size(source.size)
                     active = values.enhancement.active("document")
-                    result = prepare_document(source, values.enhancement) if active else source.copy()
+                    result = prepare_document(source, values.enhancement) if active else (source.copy() if source.mode in ("RGB", "RGBA", "L", "LA", "P", "1", "I", "I;16") else source.convert("RGB"))
                     try:
                         with io.BytesIO() as buffer:
                             result.save(buffer, format="PNG")
@@ -1326,8 +1325,10 @@ def create_app() -> FastAPI:
                                 "width": result.width, "height": result.height, "active": active}
                     finally:
                         result.close()
+            except EnhancementError as exc:
+                raise HTTPException(400, str(exc)) from exc
             except (ValueError, OSError, RuntimeError) as exc:
-                raise HTTPException(400, "ساخت پیش‌نمایش ناموفق بود؛ تنظیمات یا اندازهٔ تصویر را بررسی کنید.") from exc
+                raise HTTPException(400, f"خواندن یا ساخت تصویر پیش‌نمایش ناموفق بود ({type(exc).__name__})؛ فرمت فایل را بررسی یا نسخهٔ PNG/RGB را وارد کنید.") from exc
         return await run_in_threadpool(render_preview)
 
     @app.post("/api/projects/{project_id}/ocr")

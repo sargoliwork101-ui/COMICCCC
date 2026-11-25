@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.73"
+    assert health.json()["version"] == "4.74"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -3344,7 +3344,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.73"
+    assert APP_VERSION == "4.74"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "HaSaYaStudio"
@@ -5883,3 +5883,17 @@ def test_enhancement_preview_rejects_errors_without_fallback(client, monkeypatch
     assert client.post(route, json={**payload, 'image_id': 'missing'}).status_code == 404
     assert client.post(route, json={**payload, 'page_mode': 'comic'}).status_code == 422
     assert client.post(route, json={**payload, 'enhancement': {'threshold': {'window': 4}}}).status_code == 422
+
+
+def test_enhancement_preview_cmyk_without_filters(client):
+    import base64
+    project = client.post('/api/projects', json={'name': 'CMYK book'}).json()
+    with Image.new('CMYK', (50, 40), (0, 10, 20, 0)) as source, io.BytesIO() as buffer:
+        source.save(buffer, 'JPEG')
+        imported = client.post(f"/api/projects/{project['id']}/files", files=[('files', ('cmyk.jpg', buffer.getvalue(), 'image/jpeg'))])
+    assert imported.status_code == 200
+    item = imported.json()['images'][0]
+    response = client.post(f"/api/projects/{project['id']}/enhancement-preview", json={'image_id': item['id']})
+    assert response.status_code == 200, response.text
+    with Image.open(io.BytesIO(base64.b64decode(response.json()['image'].split(',')[1]))) as preview:
+        assert preview.mode == 'RGB' and preview.size == (50, 40)

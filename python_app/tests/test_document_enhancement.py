@@ -65,3 +65,21 @@ def test_validation_and_local_otsu():
         cfg = de.EnhancementSettings(threshold={'enabled': True, 'method': 'adaptive_otsu'})
         with de.prepare_document(image, cfg) as result:
             assert result.size == image.size
+
+
+def test_oversize_upscale_rejected_before_filters(monkeypatch):
+    cfg = de.EnhancementSettings(enabled=True, grayscale={'enabled': True}, upscale={'enabled': True})
+    monkeypatch.setitem(de.FILTERS, 'grayscale', lambda *_: pytest.fail('preflight must reject first'))
+    with Image.new('L', (2500, 2000)) as image:
+        with pytest.raises(de.EnhancementError, match='20.0') as exc:
+            de.prepare_document(image, cfg)
+        assert 'بزرگ‌نمایی' in str(exc.value) and '2500' in str(exc.value)
+
+
+def test_filter_failure_names_stage_without_leaking_path(monkeypatch):
+    cfg = de.EnhancementSettings(enabled=True, clahe={'enabled': True})
+    monkeypatch.setitem(de.FILTERS, 'clahe', lambda *_: (_ for _ in ()).throw(RuntimeError('/private/path')))
+    with Image.new('RGB', (20, 20)) as image:
+        with pytest.raises(de.EnhancementError) as exc:
+            de.prepare_document(image, cfg)
+        assert 'clahe' in str(exc.value) and '/private' not in str(exc.value)
