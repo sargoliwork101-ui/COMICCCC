@@ -20,6 +20,19 @@
     threshold: [['method', 'روش', ['sauvola', 'adaptive_otsu']], ['window', 'Window / Otsu Tile — عدد فرد', 3, 201, 2], ['k', 'Sauvola k', 0.01, 0.5, 0.01], ['r', 'Sauvola R', 32, 255, 1], ['despeckle_area', 'حذف ذرات تا چند پیکسل؟ (۰ خاموش)', 0, 8, 1]],
   };
   let config = defaults(); let host; let changed = () => {}; let documentMode = false; let previewApi; let previewRevision = 0; let previewPage = ''; let workspace; let reorder = false;
+  let previewTimer; let previewRunning = false; let previewPending = false; let refreshPreview;
+  function requestAutoPreview() {
+    clearTimeout(previewTimer); previewRevision += 1;
+    const status = host?.querySelector('.enhancement-preview [role=status]');
+    if (status) status.textContent = 'تنظیمات تغییر کرده؛ پیش‌نمایش خودکار در حال آماده‌سازی است…';
+    previewTimer = setTimeout(() => {
+      const dialog = host?.closest('dialog');
+      if (!documentMode || (dialog && !dialog.open)) return;
+      if (config.enabled && [...host.querySelectorAll('[data-param]')].some(input => !input.checkValidity())) return;
+      if (previewRunning) { previewPending = true; return; }
+      refreshPreview?.();
+    }, 300);
+  }
   const copy = value => JSON.parse(JSON.stringify(value));
   function collect() {
     if (!host) return copy(config);
@@ -35,9 +48,11 @@
   }
   function el(tag, text, cls) { const node = document.createElement(tag); if (text) node.textContent = text; if (cls) node.className = cls; return node; }
   function button(text, action) { const b = el('button', text, 'bt'); b.type = 'button'; b.addEventListener('click', action); return b; }
-  function render() {
+  function render(keepPreview = true) {
     if (!host) return;
     previewRevision += 1;
+    const existingPreview = keepPreview ? host.querySelector('.enhancement-preview') : null;
+    const openDetails = new Set([...host.querySelectorAll('[data-stage] details[open]')].map(node => node.closest('[data-stage]').dataset.stage));
     host.replaceChildren(); host.classList.toggle('hidden', !documentMode);
     const heading = el('h3', 'بهبود تصویر برای OCR'); host.append(heading);
     const subtitle = el('p', 'ویژهٔ کتاب و مقاله · پردازش نسخهٔ موقت', 'enhancement-subtitle'); host.append(subtitle);
@@ -84,7 +99,7 @@
       const up = button('↑', () => move(-1)); up.disabled = index === 0; up.setAttribute('aria-label', `بالا بردن ${key}`); up.title = 'اجرای زودتر';
       const down = button('↓', () => move(1)); down.disabled = index === config.order.length - 1; down.setAttribute('aria-label', `پایین بردن ${key}`); down.title = 'اجرای دیرتر'; head.append(up, down); row.append(head);
       if (fields[key].length) {
-        const details = el('details'); details.append(el('summary', 'تنظیمات فیلتر'));
+        const details = el('details'); details.open = openDetails.has(key); details.append(el('summary', 'تنظیمات فیلتر'));
         const params = el('fieldset', null, 'enhancement-params'); params.disabled = !config[key].enabled || !config.enabled;
         fields[key].forEach(([param, title, min, max, step]) => {
           const wrap = el('label'); const fieldTitle = el('bdi', title); fieldTitle.dir = 'auto'; wrap.append(fieldTitle); let input;
@@ -115,24 +130,24 @@
       });
       save.dataset.saveEnhancement = ''; host.append(save, saveStatus);
     }
-    appendPreview();
+    if (existingPreview) workspace.append(existingPreview); else appendPreview();
     master.addEventListener('change', () => { collect(); render(); changed(collect()); });
     host.querySelectorAll('input[data-param]').forEach(input => input.addEventListener('input', () => {
       if (input.value === '' || !input.validity.valid) return;
       collect(); previewRevision += 1;
       const savedStatus = host.querySelector('[data-enhancement-save-status]');
       if (savedStatus) savedStatus.textContent = 'تغییرات جدید؛ ذخیرهٔ خودکار فعال است.';
-      host.querySelector('[data-preview-output]')?.replaceChildren();
+
       const update = host.querySelector('[data-preview-update]');
-      if (update) { update.disabled = !previewApi.pages().length; host.querySelector('.enhancement-preview [role=status]').textContent = 'تنظیمات تغییر کرده؛ پیش‌نمایش را به‌روز کنید.'; }
+      if (update) update.disabled = !previewApi.pages().length;
       changed(collect());
     }));
     host.querySelectorAll('[data-on], [data-param]').forEach(input => input.addEventListener('change', () => {
       collect();
       previewRevision += 1;
-      host.querySelector('[data-preview-output]')?.replaceChildren();
+
       const update = host.querySelector('[data-preview-update]');
-      if (update) { update.disabled = !previewApi.pages().length; host.querySelector('.enhancement-preview [role=status]').textContent = 'تنظیمات تغییر کرده؛ پیش‌نمایش را به‌روز کنید.'; }
+      if (update) update.disabled = !previewApi.pages().length;
       if (input.hasAttribute('data-on') || input.dataset.param === 'method') render();
       changed(collect());
     }));
@@ -145,7 +160,7 @@
     const label = el('label', 'صفحه'); const select = el('select'); select.dataset.previewPage = '';
     select.setAttribute('aria-label', 'صفحهٔ پیش‌نمایش'); label.append(select);
     const output = el('div'); output.dataset.previewOutput = '';
-    const status = el('p', 'پس از تغییر تنظیمات، پیش‌نمایش را به‌روز کنید. OCR اجرا نمی‌شود.', 'hint'); status.setAttribute('role', 'status');
+    const status = el('p', 'پیش‌نمایش با تغییر تنظیمات خودکار عوض می‌شود. OCR اجرا نمی‌شود.', 'hint'); status.setAttribute('role', 'status');
     const refreshPages = () => {
       const pages = previewApi.pages(); select.replaceChildren();
       pages.forEach(page => { const option = el('option', page.name); option.value = page.id; select.append(option); });
@@ -154,16 +169,26 @@
       update.disabled = !pages.length;
       if (!pages.length) status.textContent = 'ابتدا حداقل یک صفحه در پروژه انتخاب کنید.';
     };
-    const update = button('به‌روزرسانی پیش‌نمایش', async () => {
+    const runPreview = async () => {
+      clearTimeout(previewTimer);
+      if (previewRunning) { previewPending = true; return; }
       if (!root.DocumentEnhancement.validate()) return;
       refreshPages();
       const page = previewApi.pages().find(item => item.id === select.value);
       if (!page) return;
       const revision = ++previewRevision;
-      update.disabled = true; output.replaceChildren(); status.textContent = 'در حال ساخت پیش‌نمایش…';
+      previewRunning = true; update.disabled = true; status.textContent = 'در حال ساخت پیش‌نمایش… تصویر قبلی تا آماده‌شدن نتیجه حفظ می‌شود.';
       try {
         const result = await previewApi.render(page.id, collect());
         if (revision !== previewRevision || !section.isConnected) return;
+        const previousImages = [...output.querySelectorAll('.enhancement-image-viewport')];
+        if (previousImages.length === 2 && output.dataset.pageId === page.id && output.dataset.original === page.original) {
+          const viewport = previousImages[1]; const image = viewport.querySelector('img');
+          const left = viewport.scrollLeft; const top = viewport.scrollTop;
+          image.onload = () => { viewport.scrollLeft = left; viewport.scrollTop = top; image.onload = null; };
+          image.src = result.image;
+        } else {
+        output.replaceChildren(); output.dataset.pageId = page.id; output.dataset.original = page.original;
         const zoomLabel = el('label', null, 'enhancement-switch'); const zoom = el('input'); zoom.type = 'checkbox';
         zoomLabel.append(zoom, document.createTextNode('نمایش در اندازهٔ واقعی (با اسکرول)'));
         const comparison = el('div', null, 'enhancement-comparison');
@@ -178,20 +203,25 @@
         });
         output.append(el('p', 'Ctrl + اسکرول: زوم حول نشانگر · کشیدن تصویر: جابه‌جایی · دوبار کلیک: نمایش کامل', 'hint'));
         output.append(zoomLabel, comparison);
+        }
         status.textContent = result.active
           ? `پیش‌نمایش فیلترها آماده است (${result.width} × ${result.height}). ظاهر بهتر، تضمین دقت OCR نیست.`
           : 'فیلتر فعالی وجود ندارد؛ نتیجه همان تصویر اصلی است، نه پیش‌پردازش قدیمی OCR.';
       } catch (error) {
         if (revision === previewRevision && section.isConnected) { output.replaceChildren(); status.textContent = `پیش‌نمایش ساخته نشد: ${error.message}`; }
       } finally {
-        if (revision === previewRevision && section.isConnected) update.disabled = false;
+        previewRunning = false;
+        if (section.isConnected) update.disabled = false;
+        if (previewPending) { previewPending = false; requestAutoPreview(); }
       }
-    });
+    };
+    refreshPreview = runPreview;
+    const update = button('تلاش دوباره', runPreview);
     update.dataset.previewUpdate = '';
-    select.addEventListener('change', () => { previewPage = select.value; previewRevision += 1; output.replaceChildren(); update.disabled = false; status.textContent = 'برای صفحهٔ جدید، پیش‌نمایش را به‌روز کنید.'; });
+    select.addEventListener('change', () => { previewPage = select.value; output.replaceChildren(); update.disabled = false; requestAutoPreview(); });
     select.addEventListener('focus', refreshPages);
     toolbar.append(label, update); section.append(toolbar, status, output); workspace.append(section); refreshPages();
-    output.append(el('p', 'یک صفحه انتخاب کنید و «به‌روزرسانی پیش‌نمایش» را بزنید تا اصل و نتیجه همین‌جا نمایش داده شوند.', 'enhancement-preview-empty'));
+    output.append(el('p', 'پیش‌نمایش صفحهٔ انتخابی به‌صورت خودکار همین‌جا نمایش داده می‌شود.', 'enhancement-preview-empty'));
   }
   function enableNavigation(viewport, image) {
     let drag = null;
@@ -241,11 +271,11 @@
       if (Array.isArray(saved.order) && [6, 7].includes(saved.order.length) && new Set(saved.order).size === saved.order.length && saved.order.every(k => Object.hasOwn(names, k)) && (saved.order.length === 7 || !saved.order.includes('contrast'))) config.order = [...saved.order, ...(saved.order.length === 6 ? ['contrast'] : [])];
       Object.keys(names).forEach(key => { Object.keys(config[key]).forEach(param => { if (saved[key] && Object.hasOwn(saved[key], param)) config[key][param] = saved[key][param]; }); });
     }
-    render();
+    render(false); requestAutoPreview();
   }
   root.DocumentEnhancement = { defaults, collect, load,
-    mount(node, onChange, preview) { host = node; changed = onChange; previewApi = preview; render(); },
-    setDocumentMode(value) { documentMode = value; render(); },
+    mount(node, onChange, preview) { host = node; changed = value => { onChange(value); requestAutoPreview(); }; previewApi = preview; render(false); },
+    setDocumentMode(value) { documentMode = value; render(false); requestAutoPreview(); },
     validate() { return !documentMode || !config.enabled || [...host.querySelectorAll('[data-param]')].every(input => input.reportValidity()); },
   };
 })(typeof window === 'undefined' ? globalThis : window);

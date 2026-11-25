@@ -7,5 +7,5 @@ const overview=guide.HELP_SECTIONS.find(s=>s.id==='overview');
 const text=overview.features.join(' ');
 for(const phrase of ['۳.۱۶','راهنمای کامل افزونه','ذخیره و بازیابی چیدمان','OCR و ترجمه حذف نشده‌اند','دکمهٔ جداگانهٔ فقط OCR ندارد','ذخیرهٔ متن‌ها (TXT)','هر سه روش'])assert.ok(text.includes(phrase),phrase);
 assert.ok(!text.includes('نسخهٔ ۳.۱۵'));
-assert.ok(fs.readFileSync('python_app/comic_studio/static/index.html','utf8').includes('/help-guide.js?v=4.77'));
-console.log('PASS: Python help revision 4.77 documents extension 3.16 without changing Studio features');
+assert.ok(fs.readFileSync('python_app/comic_studio/static/index.html','utf8').includes('/help-guide.js?v=4.78'));
+console.log('PASS: Python help revision 4.78 documents extension 3.16 without changing Studio features');
