@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.69"
+    assert health.json()["version"] == "4.70"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -3344,7 +3344,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.69"
+    assert APP_VERSION == "4.70"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "HaSaYaStudio"
@@ -5822,3 +5822,31 @@ def test_ocr_long_spaced_paragraph_grouping_end_to_end(client, monkeypatch, lang
         assert len(blocks) == 32
     saved = client.get(f"/api/projects/{project['id']}").json()
     assert saved['images'][0]['blocks'] == blocks
+
+@pytest.mark.parametrize('parallel', [False, True])
+@pytest.mark.parametrize('mode,enabled', [('document', True), ('document', False), ('comic', True)])
+def test_document_enhancement_scoped_api(client, monkeypatch, parallel, mode, enabled):
+    import contextlib
+    from comic_studio.ocr import RapidEngine
+    project, item = make_project(client)
+    ids = [item['id']]
+    if parallel:
+        ids = [entry['id'] for entry in client.post(f"/api/projects/{project['id']}/duplicate", json=ids).json()['images']]
+    monkeypatch.setattr(RapidEngine, 'configure_batch', contextlib.contextmanager(
+        lambda self, total_pages, threads_per_worker=None: (yield 2 if parallel else 1)))
+    received = []
+    def recognize(engine, image, language, contrast, precise, confidence, **kwargs):
+        received.append((image.size, image.mode, contrast, precise))
+        scale = image.width / 320
+        return [{'id': 1, 'text': 'TEST', 'x0': 12 * scale, 'y0': 15 * scale,
+                 'x1': 70 * scale, 'y1': 40 * scale, 'lineH': 25 * scale, 'enabled': True}]
+    monkeypatch.setattr('comic_studio.main.recognize_image', recognize)
+    response = client.post(f"/api/projects/{project['id']}/ocr", json={
+        'image_ids': ids, 'engine': 'rapidocr-v6', 'page_mode': mode,
+        'enhancement': {'enabled': enabled, 'upscale': {'enabled': True}, 'grayscale': {'enabled': True}},
+    })
+    assert response.status_code == 200, response.text
+    active = enabled and mode == 'document'
+    assert len(received) == len(ids)
+    assert all(row == ((640, 400), 'L', False, False) if active else row == ((320, 200), 'RGB', True, True) for row in received)
+    assert all(entry['blocks'][0]['x0'] == 12 for entry in response.json()['images'])

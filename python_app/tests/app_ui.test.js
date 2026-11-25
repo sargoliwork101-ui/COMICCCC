@@ -268,7 +268,7 @@ window.Typeset = {
   },
 };
 
-for (const file of ['groups.js', 'rich-sanitize.js', 'rich-editor.js', 'inline-edit-session.js', 'help-guide.js', 'app.js']) {
+for (const file of ['groups.js', 'rich-sanitize.js', 'rich-editor.js', 'inline-edit-session.js', 'help-guide.js', 'document-enhancement.js', 'app.js']) {
   vm.runInContext(fs.readFileSync(path.join(root, file), 'utf8'), context, { filename: file });
 }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -281,6 +281,24 @@ function check(name, condition) {
 (async () => {
   await sleep(60);
   const $ = (id) => window.document.getElementById(id);
+  const enhancement = window.DocumentEnhancement;
+  const enhancementPanel = $('documentEnhancement');
+  check('enhancement hidden in comic mode with every switch off', enhancementPanel.classList.contains('hidden') && !enhancement.collect().enabled && Object.values(enhancement.collect()).filter(x => x && typeof x === 'object' && !Array.isArray(x)).every(x => !x.enabled));
+  enhancement.setDocumentMode(true);
+  check('document enhancement exposes six separately controlled stages', !enhancementPanel.classList.contains('hidden') && enhancementPanel.querySelectorAll('[data-stage]').length === 6);
+  enhancementPanel.querySelector('[data-master]').click();
+  enhancementPanel.querySelector('[data-stage="grayscale"] [data-on]').click();
+  vm.runInContext('collectOcrSettings()', context);
+  check('enhancement settings persist on project independently of threshold', vm.runInContext('state.project.settings.documentEnhancement.grayscale.enabled', context) && !enhancement.collect().threshold.enabled);
+  enhancementPanel.querySelector('[data-stage="grayscale"] button').click();
+  check('stage order can be changed visibly', enhancement.collect().order[0] === 'grayscale');
+  const savedEnhancement = enhancement.collect();
+  enhancement.load(savedEnhancement);
+  check('saved enhancement settings restore', enhancement.collect().order[0] === 'grayscale' && enhancement.collect().grayscale.enabled);
+  enhancementPanel.querySelector(':scope > button').click();
+  check('reset disables master and filters', !enhancement.collect().enabled && !enhancement.collect().grayscale.enabled && enhancement.collect().order[0] === 'upscale');
+  enhancement.setDocumentMode(false);
+  vm.runInContext('collectOcrSettings()', context);
   check('one image card is rendered', window.document.querySelectorAll('#grid .item').length === 1);
   check('job, OCR, translation, model and export progress bars exist with accessible progress roles', ['jobProgress', 'ocrProgress', 'translationProgress', 'modelProgress', 'exportProgress'].every((id) => $(id) && $(id).closest('[role="progressbar"]')));
   check('image starts selected', $('grid').querySelector('.item').classList.contains('selected'));
@@ -738,7 +756,7 @@ function check(name, condition) {
   check('translation progress dialog closes after success', !$('translationDialog').open);
   check('finishing translation automatically selects translation display mode', $('overlayMode').value === 'translation' && $('exportOverlayMode').value === 'translation');
   check('finishing translation places translated text on the image', renderedBlocks[0].tr === 'ترجمهٔ تازه' && !renderedBlocks[0]._plainText);
-  check('v4.69 completed translation report counts the persisted tr field, not a nonexistent translated field', $('jobReportBody').textContent.includes('درصد ترجمه‌شده: 100٪') && $('jobReportBody').textContent.includes('ترجمه‌شده: 1 از 1 متن') && !$('jobReportBody').textContent.includes('ترجمه‌نشده:'));
+  check('v4.70 completed translation report counts the persisted tr field, not a nonexistent translated field', $('jobReportBody').textContent.includes('درصد ترجمه‌شده: 100٪') && $('jobReportBody').textContent.includes('ترجمه‌شده: 1 از 1 متن') && !$('jobReportBody').textContent.includes('ترجمه‌نشده:'));
   await vm.runInContext('openEditor(state.project.images[0].id)', context);
   const retranslateButton = [...$('blockList').querySelectorAll('button')].find((button) => button.textContent === 'ترجمهٔ دوباره');
   retranslateButton.click(); await sleep(20);
@@ -2213,7 +2231,7 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.69 processes 32 OCR pages in order without mid-batch engine recycling, places each page before the next, reuses grid images, and clears preview bitmaps',
+      'v4.70 processes 32 OCR pages in order without mid-batch engine recycling, places each page before the next, reuses grid images, and clears preview bitmaps',
       v399PerPageCheck.img1Reused === true
         && v399PerPageCheck.sequence === Array.from({length: 32}, (_, i) => `ocr:pg-${i + 1}:keep=${i < 31} -> placed:pg-${i + 1}`).join(' -> ')
         && v399PerPageCheck.hadPreviewSrc === true
@@ -2222,7 +2240,7 @@ function check(name, condition) {
     );
   }
 
-  // v4.69: persisted content, not source/AI flags/empty HTML, defines completion.
+  // v4.70: persisted content, not source/AI flags/empty HTML, defines completion.
   {
     const parserContext = vm.createContext({document: window.document, module: {exports: {}}});
     vm.runInContext(fs.readFileSync(path.join(root, 'typeset.js'), 'utf8'), parserContext);
@@ -2252,10 +2270,10 @@ function check(name, condition) {
       })()
     `, context);
     window.Typeset.richHtmlWords = originalRichParser;
-    check('v4.69 translation stats count saved plain/rich text and exclude empty markup, stale flags, disabled and source-free blocks', stats.total === 5 && stats.translated === 2 && stats.untranslated === 3 && stats.percentage === 40 && stats.zero && stats.partial);
+    check('v4.70 translation stats count saved plain/rich text and exclude empty markup, stale flags, disabled and source-free blocks', stats.total === 5 && stats.translated === 2 && stats.untranslated === 3 && stats.percentage === 40 && stats.zero && stats.partial);
   }
 
-  // v4.69: localize presentation without destroying copyable diagnostics.
+  // v4.70: localize presentation without destroying copyable diagnostics.
   {
     const noticeCheck = vm.runInContext(`
       (() => {
@@ -2281,10 +2299,10 @@ function check(name, condition) {
           && !output.includes('/api/') && noMarkup && noStaleCopy;
       })()
     `, context);
-    check('v4.69 Persian notices preserve exact technical diagnostics, error semantics and text-only safety', noticeCheck);
+    check('v4.70 Persian notices preserve exact technical diagnostics, error semantics and text-only safety', noticeCheck);
   }
 
-  // v4.69: offscreen image eviction must preserve metadata, click handlers,
+  // v4.70: offscreen image eviction must preserve metadata, click handlers,
   // reloads, and ignore observer callbacks queued by an older grid/project.
   {
     const result = await vm.runInContext(`
@@ -2333,7 +2351,7 @@ function check(name, condition) {
         }
       })()
     `, context);
-    check('v4.69 bounds grid pixel ownership to visible pages, preserves reload/click metadata, and ignores stale/detached callbacks', result);
+    check('v4.70 bounds grid pixel ownership to visible pages, preserves reload/click metadata, and ignores stale/detached callbacks', result);
   }
 
   // v4.00: Version 4.00 + Optional Custom Storage & Downloads Directory Settings UI (#storageBtn, #modelsStorageBtn, #storageDialog)
@@ -2442,7 +2460,7 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.30 displays version 4.69 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      'v4.00/v4.30 displays version 4.70 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
       v400StorageCheck.verHas426 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
@@ -4781,7 +4799,7 @@ function check(name, condition) {
       const detail = document.getElementById('serverAlertDetail').textContent || '';
       window.fetch = async (url, opts = {}) => {
         const parsed = new URL(url, 'http://127.0.0.1:8765');
-        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.69' });
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.70' });
         return origFetch(url, opts);
       };
       document.getElementById('serverAlertRetry').click();

@@ -688,3 +688,11 @@ body.auth-locked #mainwrap,body.auth-locked #dock,body.auth-locked #menuBtn,body
 
 /* Keep every page action together below the live-height app header. */
 .main-toolbar-panel{position:sticky;top:var(--studio-topbar-height,64px);z-index:40;background:var(--panel);box-shadow:0 5px 14px #0002}
+
+/* Books & Articles only: isolated preprocessing controls. */
+#documentEnhancement { margin-block: 12px; padding: 12px; border: 1px solid var(--border, #8886); border-radius: 8px; }
+.enhancement-stage { padding: 8px; border-block-end: 1px solid #8884; }
+.enhancement-stage-head, .enhancement-switch { display: flex; align-items: center; gap: 8px; }
+.enhancement-stage-head > label { flex: 1; }
+.enhancement-switch input { width: auto; }
+.enhancement-params { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; border: 0; padding: 8px 0; }

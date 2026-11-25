@@ -1107,6 +1107,8 @@ function adoptProject(project, options = {}) {
   $('ocrContrast').checked = settings.contrast !== false;
   if ($('ocrContrastStrength')) { $('ocrContrastStrength').value = String(settings.contrastStrength ?? 1); $('ocrContrastStrength').disabled = !$('ocrContrast').checked; }
   if ($('ocrPhotoSharpen')) $('ocrPhotoSharpen').checked = settings.photoSharpen === true;
+  window.DocumentEnhancement.load(settings.documentEnhancement);
+  window.DocumentEnhancement.setDocumentMode(pageMode === 'document');
   $('ocrPrecise').checked = settings.precise !== false;
   if ($('ocrPersianPreprocess')) {
     $('ocrPersianPreprocess').checked = settings.persianPreprocessCustomized === true
@@ -1758,6 +1760,7 @@ function collectOcrSettings() {
     contrast: $('ocrContrast').checked,
     contrastStrength: ocrContrastStrength(),
     photoSharpen: Boolean($('ocrPhotoSharpen')?.checked),
+    documentEnhancement: window.DocumentEnhancement.collect(),
     precise: $('ocrPrecise').checked,
     persianPreprocess: Boolean($('ocrPersianPreprocess')?.checked),
     persianPreprocessCustomized: Boolean(state.project.settings.persianPreprocessCustomized),
@@ -2700,6 +2703,7 @@ async function reviewTranslationReplacements(snapshot) {
   }
 }
 async function runOcr() {
+  if (!window.DocumentEnhancement.validate()) return;
   if (ocrRunning) return;
   if (!isModuleLicensed('ocr')) { await ensureModuleLicensed('ocr'); return; }
   const pending = pendingTranslationAfterOcr;
@@ -2738,6 +2742,7 @@ async function runOcr() {
         contrast: $('ocrContrast').checked,
         contrast_strength: ocrContrastStrength(),
         photo_sharpen: Boolean($('ocrPhotoSharpen')?.checked),
+        ...(normalizePageMode($('ocrPageMode')?.value) === 'document' ? { enhancement: window.DocumentEnhancement.collect() } : {}),
         precise: $('ocrPrecise').checked,
         persian_preprocess: Boolean($('ocrPersianPreprocess')?.checked),
         group_lines: $('ocrGroupLines').checked,
@@ -9478,7 +9483,9 @@ function bindEvents() {
     scheduleSave();
     if ($('modelsDialog')?.open) renderModels({ resort: true });
   });
+  window.DocumentEnhancement.mount($('documentEnhancement'), () => { collectOcrSettings(); scheduleSave(); });
   $('ocrPageMode')?.addEventListener('change', () => {
+    window.DocumentEnhancement.setDocumentMode($('ocrPageMode').value === 'document');
     const lang = $('ocrLanguage')?.value || state.project?.settings?.ocrLanguage || 'eng';
     const nextMode = normalizePageMode($('ocrPageMode')?.value);
     const curId = $('ocrEngine')?.value || '';

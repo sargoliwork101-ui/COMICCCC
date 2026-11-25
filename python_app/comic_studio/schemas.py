@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .document_enhancement import EnhancementSettings
+
 
 class BackupRequest(BaseModel):
     expected_updated_at: str | None = None
@@ -21,6 +23,7 @@ class OcrRequest(BaseModel):
     contrast: bool = True
     contrast_strength: float = Field(default=1.0, ge=0.5, le=3.0, allow_inf_nan=False)
     photo_sharpen: bool = False
+    enhancement: EnhancementSettings = Field(default_factory=EnhancementSettings)
     precise: bool = True
     persian_preprocess: bool | None = None
     group_lines: bool = False

@@ -35,6 +35,7 @@ from .exporter import build_docx, build_images_zip, build_pdf, build_pptx, build
 from .watermark_render import has_active_watermark
 from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, _INSTALL_LOCK, recognize_image
 from .ocr_filters import prepare_ocr_photo
+from .document_enhancement import EnhancementSettings, run_document_ocr
 from .ocr_grouping import organize_ocr_blocks
 from .ocr_managed import (
     _stop_lingering_surya_server,
@@ -1199,7 +1200,7 @@ def create_app() -> FastAPI:
             "memory": registry.memory_status(),
         }
 
-    def _invoke_recognize(
+    def _invoke_legacy_recognize(
         engine: Any,
         image: Any,
         language: str,
@@ -1228,6 +1229,24 @@ def create_app() -> FastAPI:
         finally:
             if prepared is not image:
                 prepared.close()
+
+    def _invoke_recognize(
+        engine, image, language, contrast, precise, min_confidence,
+        page_mode="auto", persian_preprocess=False, photo_sharpen=False,
+        contrast_strength=1.0, enhancement: EnhancementSettings | None = None,
+    ):
+        return run_document_ocr(
+            image, enhancement, page_mode,
+            enhanced=lambda prepared: _invoke_legacy_recognize(
+                engine, prepared, language, False, False, min_confidence,
+                page_mode, False, False, 1.0,
+            ),
+            legacy=lambda: _invoke_legacy_recognize(
+                engine, image, language, contrast, precise, min_confidence,
+                page_mode, persian_preprocess, photo_sharpen, contrast_strength,
+            ),
+            warn=lambda message: activity.add(message, "warning"),
+        )
 
     @app.post("/api/engines/{engine_id}/test")
     async def test_engine(engine_id: str, values: EngineTestRequest, http_request: Request) -> dict[str, Any]:
@@ -1418,7 +1437,7 @@ def create_app() -> FastAPI:
                             blocks = await run_reported(
                                 _invoke_recognize, engine, image, values.language,
                                 values.contrast, values.precise, values.min_confidence, values.page_mode,
-                                use_persian_prep, values.photo_sharpen, values.contrast_strength,
+                                use_persian_prep, values.photo_sharpen, values.contrast_strength, values.enhancement,
                                 pulse_label=f"در حال خواندن {item['name']}",
                                 progress_span=(start_page_p, round(p_lo + (p_hi - p_lo) * 0.92, 4)),
                                 job_kind="ocr",
@@ -1451,7 +1470,7 @@ def create_app() -> FastAPI:
                                 blocks = _invoke_recognize(
                                     engine, image, values.language,
                                     values.contrast, values.precise, values.min_confidence, values.page_mode,
-                                    use_persian_prep, values.photo_sharpen, values.contrast_strength,
+                                    use_persian_prep, values.photo_sharpen, values.contrast_strength, values.enhancement,
                                 )
                                 return blocks, page_size
                             finally:
