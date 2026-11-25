@@ -4,11 +4,11 @@ from __future__ import annotations
 import copy
 from typing import Literal, Callable, Any
 
-from PIL import Image, ImageFilter
+from PIL import Image, ImageEnhance, ImageFilter
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-Stage = Literal['upscale', 'grayscale', 'clahe', 'denoise', 'unsharp', 'threshold']
-STAGES = ['upscale', 'grayscale', 'clahe', 'denoise', 'unsharp', 'threshold']
+Stage = Literal['upscale', 'grayscale', 'clahe', 'denoise', 'unsharp', 'threshold', 'contrast']
+STAGES = ['upscale', 'grayscale', 'clahe', 'denoise', 'unsharp', 'threshold', 'contrast']
 MAX_PIXELS = 16_000_000
 
 
@@ -36,6 +36,10 @@ class FilterSettings(BaseModel):
 
 class Upscale(FilterSettings):
     factor: Literal[2, 3] = 2
+
+
+class Contrast(FilterSettings):
+    strength: float = Field(default=1, ge=0.5, le=3)
 
 
 class Clahe(FilterSettings):
@@ -78,6 +82,16 @@ class EnhancementSettings(BaseModel):
     denoise: Denoise = Field(default_factory=Denoise)
     unsharp: Unsharp = Field(default_factory=Unsharp)
     threshold: Threshold = Field(default_factory=Threshold)
+    contrast: Contrast = Field(default_factory=Contrast)
+
+    @model_validator(mode='before')
+    @classmethod
+    def migrate_order(cls, values):
+        if isinstance(values, dict) and isinstance(values.get('order'), list):
+            old = values['order']
+            if len(old) == 6 and all(isinstance(name, str) for name in old) and set(old) == set(STAGES) - {'contrast'}:
+                return {**values, 'order': [*old, 'contrast']}
+        return values
 
     @model_validator(mode='after')
     def valid_order(self):
@@ -174,7 +188,11 @@ def _remove_speckles(binary, max_area):
     return result
 
 
-FILTERS = dict(zip(STAGES, [_upscale, _grayscale, _clahe, _denoise, _unsharp, _threshold]))
+def _contrast(image, settings):
+    return ImageEnhance.Contrast(image).enhance(settings.strength)
+
+
+FILTERS = dict(zip(STAGES, [_upscale, _grayscale, _clahe, _denoise, _unsharp, _threshold, _contrast]))
 
 
 def prepare_document(image: Image.Image, settings: EnhancementSettings, *, enforce_size_limit: bool = True) -> Image.Image:

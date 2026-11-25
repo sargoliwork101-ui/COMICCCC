@@ -1,15 +1,17 @@
 /* Independent UI for the explicitly selected Books & Articles OCR path. */
 (function (root) {
   'use strict';
-  const names = { upscale: 'بزرگ‌نمایی', grayscale: 'خاکستری', clahe: 'کنتراست موضعی', denoise: 'کاهش نویز', unsharp: 'وضوح لبه', threshold: 'سیاه‌وسفید تطبیقی' };
-  const technical = { upscale: 'Lanczos', grayscale: 'Grayscale', clahe: 'CLAHE', denoise: 'Bilateral', unsharp: 'Unsharp Mask', threshold: 'Adaptive Threshold' };
+  const names = { upscale: 'بزرگ‌نمایی', grayscale: 'خاکستری', clahe: 'کنتراست موضعی', denoise: 'کاهش نویز', unsharp: 'وضوح لبه', threshold: 'سیاه‌وسفید تطبیقی', contrast: 'کنتراست معمولی' };
+  const technical = { upscale: 'Lanczos', grayscale: 'Grayscale', clahe: 'CLAHE', denoise: 'Bilateral', unsharp: 'Unsharp Mask', threshold: 'Adaptive Threshold', contrast: 'Contrast' };
   const defaults = () => ({ enabled: false, order: Object.keys(names),
+    contrast: { enabled: false, strength: 1 },
     upscale: { enabled: false, factor: 2 }, grayscale: { enabled: false },
     clahe: { enabled: false, clip_limit: 2, tile_grid: 8 },
     denoise: { enabled: false, diameter: 5, sigma_color: 25, sigma_space: 25 },
     unsharp: { enabled: false, amount: 1, radius: 1 },
     threshold: { enabled: false, method: 'sauvola', window: 51, k: 0.2, r: 128, despeckle_area: 0 } });
   const fields = {
+    contrast: [['strength', 'شدت کنتراست (۱ بدون تغییر)', 0.5, 3, 0.1]],
     upscale: [['factor', 'ضریب', [2, 3]]],
     grayscale: [],
     clahe: [['clip_limit', 'Clip Limit', 0.5, 8, 0.1], ['tile_grid', 'Tile Grid (N × N)', 2, 32, 1]],
@@ -51,14 +53,28 @@
     const tools = el('div', null, 'enhancement-controls-head');
     tools.append(el('h4', 'فیلترهای تصویر'));
     const orderButton = button('تغییر ترتیب', () => {
-      reorder = !reorder; controls.classList.toggle('is-reordering', reorder); orderButton.setAttribute('aria-pressed', String(reorder));
+      reorder = !reorder; controls.querySelectorAll('.enhancement-stage-head').forEach(head => { head.draggable = reorder; }); controls.classList.toggle('is-reordering', reorder); orderButton.setAttribute('aria-pressed', String(reorder));
     });
     orderButton.setAttribute('aria-pressed', String(reorder)); controls.classList.toggle('is-reordering', reorder);
     tools.append(orderButton); controls.append(tools);
     const list = el('div', null, 'enhancement-stages'); controls.append(list);
     config.order.forEach((key, index) => {
       const row = el('section', null, 'enhancement-stage'); row.dataset.stage = key;
+      row.addEventListener('dragover', event => { if (reorder) event.preventDefault(); });
+      row.addEventListener('drop', event => {
+        if (!reorder) return;
+        event.preventDefault();
+        const from = config.order.indexOf(event.dataTransfer.getData('text/plain'));
+        if (from < 0 || from === index) return;
+        collect(); const [moved] = config.order.splice(from, 1); config.order.splice(index, 0, moved);
+        render(); changed(collect());
+      });
       const head = el('div', null, 'enhancement-stage-head'); const onLabel = el('label', null, 'enhancement-switch');
+      head.draggable = reorder; head.title = 'برای تغییر ترتیب، ردیف را بکشید یا از فلش‌ها استفاده کنید';
+      head.addEventListener('dragstart', event => {
+        if (!reorder || event.target.closest('input,button')) { event.preventDefault(); return; }
+        event.dataTransfer.setData('text/plain', key); event.dataTransfer.effectAllowed = 'move';
+      });
       const on = el('input'); on.type = 'checkbox'; on.dataset.on = ''; on.checked = config[key].enabled;
       const caption = el('span', null, 'enhancement-caption');
       caption.append(el('span', `${index + 1}. ${names[key]}`, 'enhancement-name'));
@@ -154,9 +170,13 @@
         for (const [title, url] of [['تصویر اصلی', page.original], ['نتیجهٔ تنظیمات', result.image]]) {
           const figure = el('figure'); figure.append(el('figcaption', title));
           const viewport = el('div', null, 'enhancement-image-viewport'); const image = el('img'); image.alt = title; image.src = url;
-          viewport.append(image); figure.append(viewport); comparison.append(figure);
+          viewport.append(image); enableNavigation(viewport, image); figure.append(viewport); comparison.append(figure);
         }
-        zoom.addEventListener('change', () => comparison.classList.toggle('actual-size', zoom.checked));
+        zoom.addEventListener('change', () => {
+          comparison.classList.toggle('actual-size', zoom.checked);
+          comparison.querySelectorAll('.enhancement-image-viewport').forEach(viewport => viewport.dispatchEvent(new CustomEvent('preview-scale', { detail: zoom.checked ? 'actual' : 'fit' })));
+        });
+        output.append(el('p', 'Ctrl + اسکرول: زوم حول نشانگر · کشیدن تصویر: جابه‌جایی · دوبار کلیک: نمایش کامل', 'hint'));
         output.append(zoomLabel, comparison);
         status.textContent = result.active
           ? `پیش‌نمایش فیلترها آماده است (${result.width} × ${result.height}). ظاهر بهتر، تضمین دقت OCR نیست.`
@@ -173,11 +193,52 @@
     toolbar.append(label, update); section.append(toolbar, status, output); workspace.append(section); refreshPages();
     output.append(el('p', 'یک صفحه انتخاب کنید و «به‌روزرسانی پیش‌نمایش» را بزنید تا اصل و نتیجه همین‌جا نمایش داده شوند.', 'enhancement-preview-empty'));
   }
+  function enableNavigation(viewport, image) {
+    let drag = null;
+    image.draggable = false; viewport.tabIndex = 0;
+    viewport.setAttribute('aria-label', 'پیش‌نمایش؛ کنترل و اسکرول برای زوم، کشیدن برای جابه‌جایی');
+    const fit = () => {
+      image.style.width = '100%'; image.style.maxWidth = '100%';
+      viewport.scrollLeft = 0; viewport.scrollTop = 0;
+    };
+    viewport.addEventListener('preview-scale', event => {
+      if (event.detail === 'fit') fit();
+      else { image.style.width = `${image.naturalWidth || image.width}px`; image.style.maxWidth = 'none'; }
+    });
+    viewport.addEventListener('dblclick', fit);
+    viewport.addEventListener('wheel', event => {
+      if (!event.ctrlKey || !image.naturalWidth) return;
+      event.preventDefault();
+      const bounds = viewport.getBoundingClientRect();
+      const x = event.clientX - bounds.left; const y = event.clientY - bounds.top;
+      const oldWidth = image.getBoundingClientRect().width;
+      if (!oldWidth) return;
+      const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.clientHeight : 1);
+      const width = Math.max(32, Math.min(image.naturalWidth * 8, oldWidth * Math.exp(-Math.max(-200, Math.min(200, delta)) * 0.003)));
+      const ratio = width / oldWidth;
+      const left = (viewport.scrollLeft + x) * ratio - x;
+      const top = (viewport.scrollTop + y) * ratio - y;
+      image.style.width = `${width}px`; image.style.maxWidth = 'none';
+      viewport.scrollLeft = left; viewport.scrollTop = top;
+    }, { passive: false });
+    viewport.addEventListener('pointerdown', event => {
+      if (event.button !== 0) return;
+      drag = { id: event.pointerId, x: event.clientX, y: event.clientY, left: viewport.scrollLeft, top: viewport.scrollTop };
+      viewport.setPointerCapture?.(event.pointerId); viewport.classList.add('is-panning'); event.preventDefault();
+    });
+    viewport.addEventListener('pointermove', event => {
+      if (!drag || drag.id !== event.pointerId) return;
+      viewport.scrollLeft = drag.left - (event.clientX - drag.x);
+      viewport.scrollTop = drag.top - (event.clientY - drag.y);
+    });
+    const stop = () => { drag = null; viewport.classList.remove('is-panning'); };
+    viewport.addEventListener('pointerup', stop); viewport.addEventListener('pointercancel', stop); viewport.addEventListener('lostpointercapture', stop);
+  }
   function load(saved) {
     config = defaults();
     if (saved && typeof saved === 'object') {
       config.enabled = saved.enabled === true;
-      if (Array.isArray(saved.order) && saved.order.length === 6 && new Set(saved.order).size === 6 && saved.order.every(k => Object.hasOwn(names, k))) config.order = [...saved.order];
+      if (Array.isArray(saved.order) && [6, 7].includes(saved.order.length) && new Set(saved.order).size === saved.order.length && saved.order.every(k => Object.hasOwn(names, k)) && (saved.order.length === 7 || !saved.order.includes('contrast'))) config.order = [...saved.order, ...(saved.order.length === 6 ? ['contrast'] : [])];
       Object.keys(names).forEach(key => { Object.keys(config[key]).forEach(param => { if (saved[key] && Object.hasOwn(saved[key], param)) config[key][param] = saved[key][param]; }); });
     }
     render();

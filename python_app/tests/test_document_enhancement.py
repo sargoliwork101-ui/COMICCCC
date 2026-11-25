@@ -125,3 +125,23 @@ def test_threshold_despeckle_removes_isolated_dot():
             assert cleaned.getpixel((60, 60)) == 255
             assert cleaned.getpixel((22, 35)) == 0
     image.close()
+
+
+def test_legacy_order_migrates_with_disabled_contrast():
+    old = ['threshold', 'unsharp', 'denoise', 'clahe', 'grayscale', 'upscale']
+    cfg = de.EnhancementSettings(order=old)
+    assert cfg.order == old + ['contrast'] and not cfg.contrast.enabled
+    assert old == ['threshold', 'unsharp', 'denoise', 'clahe', 'grayscale', 'upscale']
+
+
+def test_contrast_order_changes_actual_pixels():
+    image = Image.fromarray(np.tile(np.arange(80, 180, dtype=np.uint8), (80, 1)))
+    cfg = de.EnhancementSettings(enabled=True, contrast={'enabled': True, 'strength': 2},
+                                 threshold={'enabled': True})
+    cfg.order.remove('contrast'); cfg.order.insert(0, 'contrast')
+    with de.prepare_document(image, cfg) as before:
+        pixels = np.array(before)
+    cfg.order.remove('contrast'); cfg.order.append('contrast')
+    with de.prepare_document(image, cfg) as after:
+        assert not np.array_equal(pixels, np.array(after))
+    image.close()

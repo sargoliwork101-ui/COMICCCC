@@ -311,7 +311,7 @@ main()
               return button.width === 0 || Math.abs((checkbox.top + checkbox.height / 2) - (button.top + button.height / 2)) < 2;
             }),
             themed: getComputedStyle(panel).backgroundColor === getComputedStyle(dialog).backgroundColor,
-            isolatedTerms: panel.querySelectorAll('bdi[dir="ltr"]').length === 6,
+            isolatedTerms: panel.querySelectorAll('bdi[dir="ltr"]').length === 7,
             integrated: panel.querySelector('.enhancement-workspace').contains(panel.querySelector('.enhancement-preview')),
             sideBySide: window.innerWidth < 801 || (() => {
               const controls = panel.querySelector('.enhancement-controls').getBoundingClientRect();

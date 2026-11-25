@@ -753,3 +753,8 @@ body.auth-locked #mainwrap,body.auth-locked #dock,body.auth-locked #menuBtn,body
 .ocr-legacy-preprocessing{border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:var(--surface)}
 .ocr-legacy-preprocessing>summary{cursor:pointer;font-size:11px;color:var(--muted)}
 .ocr-legacy-preprocessing>.checks{margin:10px 0 0}
+
+.enhancement-image-viewport{cursor:grab;touch-action:none;user-select:none}
+.enhancement-image-viewport.is-panning{cursor:grabbing}
+.enhancement-image-viewport img{user-select:none;-webkit-user-drag:none}
+.enhancement-controls.is-reordering .enhancement-stage-head{cursor:grab}

@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul
-title HaSaYa Studio 4.76 - Seller License Generator (转发)
+title HaSaYa Studio 4.77 - Seller License Generator (转发)
 
 rem The seller tool now lives in a dedicated folder: python_app\license_tool\
 rem This launcher only forwards to it so old shortcuts/setup docs keep working.
