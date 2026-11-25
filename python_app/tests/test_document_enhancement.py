@@ -83,3 +83,16 @@ def test_filter_failure_names_stage_without_leaking_path(monkeypatch):
         with pytest.raises(de.EnhancementError) as exc:
             de.prepare_document(image, cfg)
         assert 'clahe' in str(exc.value) and '/private' not in str(exc.value)
+
+
+def test_only_explicit_preview_bypasses_limit(monkeypatch):
+    monkeypatch.setattr(de, 'MAX_PIXELS', 100)
+    cfg = de.EnhancementSettings(enabled=True, upscale={'enabled': True})
+    with Image.new('RGB', (10, 10)) as image:
+        with pytest.raises(de.EnhancementError):
+            de.prepare_document(image, cfg)
+        with de.prepare_document(image, cfg, enforce_size_limit=False) as preview:
+            assert preview.size == (20, 20)
+        # A preview must not alter policy for subsequent normal OCR calls.
+        with pytest.raises(de.EnhancementError):
+            de.prepare_document(image, cfg)

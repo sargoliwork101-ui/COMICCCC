@@ -35,7 +35,7 @@ from .exporter import build_docx, build_images_zip, build_pdf, build_pptx, build
 from .watermark_render import has_active_watermark
 from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, _INSTALL_LOCK, recognize_image
 from .ocr_filters import prepare_ocr_photo
-from .document_enhancement import EnhancementError, EnhancementSettings, check_size, prepare_document, run_document_ocr
+from .document_enhancement import EnhancementError, EnhancementSettings, prepare_document, run_document_ocr
 from .ocr_grouping import organize_ocr_blocks
 from .ocr_managed import (
     _stop_lingering_surya_server,
@@ -1314,9 +1314,8 @@ def create_app() -> FastAPI:
             # No OCR, state writes, model loads or source replacements occur here.
             try:
                 with Image.open(path) as source:
-                    check_size(source.size)
                     active = values.enhancement.active("document")
-                    result = prepare_document(source, values.enhancement) if active else (source.copy() if source.mode in ("RGB", "RGBA", "L", "LA", "P", "1", "I", "I;16") else source.convert("RGB"))
+                    result = prepare_document(source, values.enhancement, enforce_size_limit=False) if active else (source.copy() if source.mode in ("RGB", "RGBA", "L", "LA", "P", "1", "I", "I;16") else source.convert("RGB"))
                     try:
                         with io.BytesIO() as buffer:
                             result.save(buffer, format="PNG")
@@ -1325,6 +1324,8 @@ def create_app() -> FastAPI:
                                 "width": result.width, "height": result.height, "active": active}
                     finally:
                         result.close()
+            except MemoryError as exc:
+                raise HTTPException(400, "حافظه برای ساخت پیش‌نمایش کافی نیست؛ بزرگ‌نمایی یا فیلترهای سنگین را خاموش کنید.") from exc
             except EnhancementError as exc:
                 raise HTTPException(400, str(exc)) from exc
             except (ValueError, OSError, RuntimeError) as exc:

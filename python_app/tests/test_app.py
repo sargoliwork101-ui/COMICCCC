@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.74"
+    assert health.json()["version"] == "4.75"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -3344,7 +3344,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.74"
+    assert APP_VERSION == "4.75"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "HaSaYaStudio"
@@ -5877,7 +5877,7 @@ def test_enhancement_preview_rejects_errors_without_fallback(client, monkeypatch
     project, item = make_project(client)
     route = f"/api/projects/{project['id']}/enhancement-preview"
     payload = {'image_id': item['id'], 'enhancement': {'enabled': True, 'grayscale': {'enabled': True}}}
-    monkeypatch.setattr('comic_studio.main.prepare_document', lambda *a: (_ for _ in ()).throw(ValueError('stage failed')))
+    monkeypatch.setattr('comic_studio.main.prepare_document', lambda *a, **k: (_ for _ in ()).throw(ValueError('stage failed')))
     response = client.post(route, json=payload)
     assert response.status_code == 400 and 'image' not in response.json()
     assert client.post(route, json={**payload, 'image_id': 'missing'}).status_code == 404
@@ -5897,3 +5897,16 @@ def test_enhancement_preview_cmyk_without_filters(client):
     assert response.status_code == 200, response.text
     with Image.open(io.BytesIO(base64.b64decode(response.json()['image'].split(',')[1]))) as preview:
         assert preview.mode == 'RGB' and preview.size == (50, 40)
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_preview_has_no_application_pixel_cap(client, monkeypatch, enabled):
+    from comic_studio import document_enhancement as de
+    project, item = make_project(client)
+    monkeypatch.setattr(de, 'MAX_PIXELS', 10)
+    response = client.post(f"/api/projects/{project['id']}/enhancement-preview", json={
+        'image_id': item['id'], 'enhancement': {'enabled': enabled, 'upscale': {'enabled': True}},
+    })
+    assert response.status_code == 200, response.text
+    assert (response.json()['width'], response.json()['height']) == ((640, 400) if enabled else (320, 200))
+    assert de.MAX_PIXELS == 10

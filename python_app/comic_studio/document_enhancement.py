@@ -95,7 +95,7 @@ def _array(image):
 
 def _upscale(image, settings):
     size = (image.width * settings.factor, image.height * settings.factor)
-    check_size(image.size, settings.factor)
+    # Size policy is enforced once by prepare_document, not by filters.
     return image.resize(size, Image.Resampling.LANCZOS)
 
 
@@ -153,11 +153,12 @@ def _threshold(image, settings):
 FILTERS = dict(zip(STAGES, [_upscale, _grayscale, _clahe, _denoise, _unsharp, _threshold]))
 
 
-def prepare_document(image: Image.Image, settings: EnhancementSettings) -> Image.Image:
+def prepare_document(image: Image.Image, settings: EnhancementSettings, *, enforce_size_limit: bool = True) -> Image.Image:
     """Owned temporary image; caller closes it. A failed stage discards all work."""
-    check_size(image.size)
-    if settings.upscale.enabled:
-        check_size(image.size, settings.upscale.factor)
+    if enforce_size_limit:
+        check_size(image.size)
+        if settings.upscale.enabled:
+            check_size(image.size, settings.upscale.factor)
     if image.mode in ('RGB', 'L'):
         work = image.copy()
     else:
@@ -171,7 +172,7 @@ def prepare_document(image: Image.Image, settings: EnhancementSettings) -> Image
             if options.enabled:
                 try:
                     updated = FILTERS[name](work, options)
-                except EnhancementError:
+                except (EnhancementError, MemoryError):
                     raise
                 except Exception as exc:
                     from .activity import JobCancelledError
