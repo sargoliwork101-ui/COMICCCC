@@ -19,6 +19,7 @@
         if ('ocrDir' in value && (value.ocrDir === 'rtl' || value.ocrDir === 'ltr' || value.ocrDir === '')) next.ocrDir = value.ocrDir;
       } else {
         next.tr = String(value.text ?? '');
+        if (next.tr !== String(block.tr ?? '')) delete next.aiTranslated;
         next.richHtml = String(value.richHtml ?? '');
         if (value.dir === 'rtl' || value.dir === 'ltr') next.dir = value.dir;
       }
@@ -60,6 +61,7 @@
           if ('ocrAlign' in rawValue && rawValue.ocrAlign !== undefined) block.ocrAlign = next.ocrAlign;
           if ('ocrDir' in rawValue && rawValue.ocrDir !== undefined) block.ocrDir = next.ocrDir;
         } else {
+          if (next.tr !== String(block.tr ?? '')) delete block.aiTranslated;
           block.tr = next.tr; block.richHtml = next.richHtml; if ('dir' in next) block.dir = next.dir;
         }
         block.align = next.align; block.verticalAlign = next.verticalAlign; block.size = next.size; block.color = next.color;

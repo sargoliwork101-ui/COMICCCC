@@ -1498,7 +1498,7 @@ function renderGrid() {
       let tlText = 'ترجمه نشده';
       let tlTitle = 'این صفحه هنوز هیچ کادر ترجمهٔ فعالی ندارد';
       if (translated.length > 0 && translated.length >= enabled.length) {
-        const aiTouched = translated.some((entry) => entry.aiTranslated === true || entry.aiTranslated === '1' || entry.aiTranslated === 1);
+        const aiTouched = translated.every((entry) => entry.aiTranslated === true || entry.aiTranslated === '1' || entry.aiTranslated === 1);
         tlClass = aiTouched ? 'tl-ai' : 'tl-manual';
         tlText = aiTouched ? 'AI ترجمه' : 'ترجمه شد';
         tlTitle = aiTouched ? 'همهٔ کادرها با ترجمهٔ هوش مصنوعی پر شده‌اند' : 'همهٔ کادرها ترجمهٔ دستی/فارسی دارند';
@@ -6324,13 +6324,6 @@ function closeInlineEditor(force = false) {
   if (!committed && !force) return false;
   if (committed) {
     classicEditor.clearDraft();
-    // v4.43: a manual edit after an AI translation means the text is no longer
-    // "pure AI output", so remove the marker (badge would lie otherwise).
-    const activeBlock = inlineEditSession?.block || null;
-    if (activeBlock && activeBlock.aiTranslated) {
-      delete activeBlock.aiTranslated;
-      drawEditor(); scheduleSave();
-    }
   } else classicEditor.saveDraft();
   classicEditor.closeModal?.({ restoreFocus: false });
   classicEditor.exitFullscreen(); classicEditor.detachField();

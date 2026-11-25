@@ -4,6 +4,7 @@ npm-debug.log*
 __pycache__/
 *.py[cod]
 .pytest_cache/
+/.venv/
 python_app/.venv/
 python_app/.venv.previous-*/
 python_app/.data/

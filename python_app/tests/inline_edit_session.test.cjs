@@ -78,3 +78,20 @@ assert.equal(separate.ocrDir, 'ltr'); assert.equal(separate.ocrAlign, 'left');
 assert.equal(separate.dir, 'rtl'); assert.equal(separate.align, 'right');
 assert.equal(separate.tr, 'متن فارسی');
 assert.equal(sourceOnly.commit(), true, 'repeated save remains a no-op');
+
+const aiBlock = { text: 'source', tr: 'AI translation', richHtml: '', aiTranslated: true };
+let aiValues = { text: aiBlock.tr, richHtml: '', bold: true };
+let aiBaseline = JSON.stringify(aiBlock);
+const aiSession = createInlineEditSession({ block: aiBlock, mode: 'translation', read: () => aiValues,
+  snapshot: JSON.stringify, getBaseline: () => aiBaseline,
+  onCommit: (_b, next) => { aiBaseline = next; },
+});
+assert.equal(aiSession.commit(), true);
+assert.equal(aiBlock.aiTranslated, true, 'opening or formatting AI text preserves provenance');
+aiValues = { ...aiValues, text: 'manually edited translation' };
+assert.equal(aiSession.commit(), true);
+assert.equal(aiBlock.aiTranslated, undefined, 'manual translation text changes clear the AI-only badge on auto-save');
+const originalAi = { text: 'source', tr: 'AI translation', aiTranslated: true };
+const originalSession = createInlineEditSession({ block: originalAi, mode: 'ocr', read: () => ({ text: 'corrected source' }), snapshot: JSON.stringify });
+assert.equal(originalSession.commit(), true);
+assert.equal(originalAi.aiTranslated, true, 'editing only OCR does not change translation provenance');

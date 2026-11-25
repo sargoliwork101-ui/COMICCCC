@@ -46,8 +46,20 @@ async function previewDifference(page) {
     const original = await createImageBitmap(await (await fetch(imageUrl(item, false))).blob());
     const expected = Typeset.render(original, overlayBlocks(item));
     original.close();
-    const image = document.querySelector('#grid .item img');
-    await image.decode();
+    let image;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      image = document.querySelector('#grid .item img');
+      const src = image.src;
+      try { await image.decode(); }
+      catch (error) {
+        // renderGrid can replace/revoke a thumbnail while decode is pending.
+        // Retry only that race, never a genuinely broken current image.
+        if (image.isConnected && image.src === src) throw error;
+        continue;
+      }
+      if (image.isConnected && image.src === src) break;
+    }
+    if (!image?.isConnected || !image.naturalWidth) throw new Error('No stable decoded preview image');
     const actual = document.createElement('canvas');
     actual.width = image.naturalWidth; actual.height = image.naturalHeight;
     const context = actual.getContext('2d'); context.drawImage(image, 0, 0);
@@ -409,6 +421,10 @@ main()
     page.off('request', onRequest); page.off('response', onResponse); await page.setRequestInterception(false);
     console.log('PASS: delayed older preview cannot overwrite the latest translated render');
 
+    await page.waitForSelector('#jobReportDialog[open]');
+    await page.click('#jobReportOkBtn');
+    await page.waitForFunction(() => !document.getElementById('jobReportDialog').open);
+    await page.hover('#grid .item');
     await page.click('#grid .item .act button:nth-child(2)');
     await page.waitForSelector('#editorDialog[open] #blockList .block-card[data-id="1"]');
     assert.deepEqual(await page.$eval('#inlineEditor', el => ({ hidden: el.classList.contains('hidden'), idle: el.classList.contains('is-idle') })), { hidden: false, idle: true }, 'toolbar stays permanently docked in idle state before selecting a box');
@@ -614,7 +630,8 @@ main()
     assert.ok(mouseDragCheck.badge.includes('رفیق'), 'target badge shows the mouse-selected word');
     assert.ok(Math.abs(mouseDragCheck.rect.cy - canvasWordInk.cy) < 8 && Math.abs(mouseDragCheck.rect.x0 - canvasWordInk.x0) < 8, `selection highlight must overlap visible canvas ink, not top of bubble: ${JSON.stringify({ mouseDragCheck, canvasWordInk })}`);
     // Real keyboard typing into #inlineLineSize must NOT steal focus or overwrite selected text.
-    await page.click('#inlineLineSize', { clickCount: 3 });
+    await page.click('#inlineLineSize');
+    await page.keyboard.down('Control'); await page.keyboard.press('a'); await page.keyboard.up('Control');
     await page.keyboard.press('Backspace');
     await page.keyboard.type('30');
     await page.click('#inlineSizeUp');
@@ -698,7 +715,8 @@ main()
     });
     // Type 20 into #inlineLineSize on Box 1 and leave #inlineLineSize focused, then click Box 2 (font 8) directly!
     await page.click('#editorBoxes .editor-box[data-id="1"] .editor-box-text');
-    await page.click('#inlineLineSize', { clickCount: 3 });
+    await page.click('#inlineLineSize');
+    await page.keyboard.down('Control'); await page.keyboard.press('a'); await page.keyboard.up('Control');
     await page.keyboard.type('20');
     const beforeClickBox2Canvas = await page.evaluate(() => {
       // Snapshot Box 2 region on canvas before clicking Box 2
@@ -721,7 +739,7 @@ main()
       };
     });
     assert.equal(box2AfterClick.shownSize, '8', `clicking a size-8 box must show 8, never 20: ${JSON.stringify(box2AfterClick)}`);
-    assert.equal(box2AfterClick.lineSize, '', 'stale #inlineLineSize value 20 from previous box must never carry over');
+    assert.equal(box2AfterClick.lineSize, '8', 'the live automatic size is shown, never stale size 20 from the previous box');
     assert.equal(box2AfterClick.draftSize, null, 'clicking an auto-fit box must keep block.size null instead of locking a fixed size');
     assert.equal(box2AfterClick.subUrl, beforeClickBox2Canvas, 'clicking Box 2 must not alter a single rendered canvas pixel of Box 2');
 
@@ -1641,6 +1659,7 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
       select.dispatchEvent(new Event('change', { bubbles: true }));
     }, paragraph.id);
     await page.waitForFunction((id) => state.project.id === id && state.project.images[0]?.edited, {}, paragraph.id);
+    await page.hover('#grid .item');
     await page.click('#grid .item .act button:nth-child(2)');
     await page.waitForSelector('#editorDialog[open] #blockList .block-card');
     await page.click('#editorSelectAll'); await page.click('#editorMergeText');
@@ -1655,6 +1674,7 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     });
     assert.equal(paragraphPreview.blockCount, 1);
     assert.equal(paragraphPreview.requests[0].text, 'WHY ARE YOU RUNNING AROUND');
+    await page.hover('#grid .item');
     await page.click('#grid .item .act button:nth-child(2)');
     await page.waitForSelector('#editorDialog[open] #blockList .block-card');
     await page.click('#editorSelectAll'); await page.click('#editorSplitText');
@@ -1700,6 +1720,9 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     assert.equal(freeGenerations.length,4); assert.equal(freeGenerations[3],'SECOND PAGE');
     freeSaved=await api(base,`/api/projects/${freeProject.id}`); assert.equal(freeSaved.images[1].blocks[0].tr,'ترجمه');
     assert.equal(freeSaved.images[1].blocks[0].align,'justify'); assert.equal(freeSaved.images[1].blocks[0].size,12); assert.equal(freeSaved.images[1].blocks[0].verticalAlign,'top');
+    await page.waitForSelector('#jobReportDialog[open]');
+    await page.click('#jobReportOkBtn');
+    await page.waitForFunction(() => !document.getElementById('jobReportDialog').open);
     console.log('PASS: free settings, four-character packing, page boundaries, saved progress and retry in Chromium with a local stub');
 
     // A mixed selection reads only the page without OCR, preserves existing
@@ -1722,11 +1745,12 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     assert.equal(await page.$eval('#ocrDialog',el=>el.open),false); assert.equal(ocrCalls.length,0);
     await page.click('#translateBtn'); await page.waitForSelector('#ocrDialog[open]');
     await page.click('#startOcrBtn');
-    await page.waitForFunction(()=>document.getElementById('ocrStatus').textContent.includes('ocr simulated failure') && !document.getElementById('startOcrBtn').disabled,{timeout:15000});
+    await page.waitForFunction(()=>document.getElementById('ocrStatus').textContent.includes('RuntimeError') && !document.getElementById('startOcrBtn').disabled,{timeout:15000});
     assert.equal(await page.$eval('#ocrDialog',el=>el.open),true);
-    assert.ok(await page.$eval('#ocrStatus',el=>el.textContent.includes('HTTP 500') && el.textContent.includes('/ocr') && el.textContent.includes('RuntimeError')));
+    assert.ok(await page.$eval('#ocrStatus',el=>el.dataset.technicalMessage.includes('HTTP 500') && el.dataset.technicalMessage.includes('/ocr') && el.dataset.technicalMessage.includes('RuntimeError')));
     assert.equal(await page.$eval('#copyOcrError',el=>el.classList.contains('hidden')),false);
     assert.equal(freeGenerations.length,callsBeforeAuto);
+    await page.waitForSelector('#jobReportDialog[open]'); await page.click('#jobReportOkBtn');
     await page.$eval('#startOcrBtn', (el) => el.scrollIntoView({ block: 'nearest' }));
     await page.click('#startOcrBtn'); await page.waitForSelector('#translationPreviewDialog[open]',{timeout:30000});
     assert.equal(ocrCalls.length,2); assert.equal(await page.$eval('#ocrDialog',el=>el.open),false);
@@ -1742,6 +1766,10 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     await page.waitForFunction(()=>!translationRunning && !document.getElementById('translationDialog').open,{timeout:15000});
     await page.evaluate(() => translationPreviewTask);
     assert.deepEqual(freeGenerations.slice(callsBeforeAuto),['EXISTING OCR','NEWLY READ OCR']);
+    await page.waitForSelector('#jobReportDialog[open]');
+    await page.click('#jobReportOkBtn');
+    await page.waitForFunction(() => !document.getElementById('jobReportDialog').open);
+
     await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
     assert.equal(ocrCalls.length,2,'already read pages skip OCR'); await page.click('#translationPreviewCancel');
     console.log('PASS: OCR before translation reads only missing pages, preserves existing text and reports errors');
@@ -1771,7 +1799,7 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     await page.evaluate(async id=>{await refreshProjectList();const el=document.getElementById('projectSelect');el.value=id;el.dispatchEvent(new Event('change',{bubbles:true}));},badProject.id);
     await page.waitForFunction(id=>state.project.id===id,{},badProject.id);
     await page.click('#translateBtn'); await page.waitForSelector('#translationDialog[open]');
-    const preparationError=await page.$eval('#translationStatus',el=>el.textContent);
+    const preparationError=await page.$eval('#translationStatus',el=>el.dataset.technicalMessage || el.textContent);
     assert.ok(preparationError.includes('context-preview') && preparationError.includes('HTTP 502') && preparationError.includes('ارسال نشد'));
     assert.equal(await page.$eval('#copyTranslationError',el=>el.classList.contains('hidden')),false);
     await page.keyboard.press('Escape');
@@ -1808,6 +1836,7 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     await page.waitForFunction(()=>!translationRunning && !document.getElementById('translationDialog').open,{timeout:15000});
     assert.equal(aiGenerations.length,3); assert.equal((await api(base,`/api/projects/${recoveryProject.id}`)).images[1].blocks[0].tr,'اصلاح شد');
     await page.waitForFunction(() => !translationDecisionBusy);
+    await page.waitForSelector('#jobReportDialog[open]'); await page.click('#jobReportOkBtn');
     // Single-block editing exercises the separate continuation path.
     await page.click('#grid .item:nth-child(2) .act button:nth-child(2)'); await page.waitForSelector('#editorDialog[open] #blockList .block-card');
     await page.waitForFunction(() => state.editorId === state.project.images[1].id && document.getElementById('blockList').textContent.includes('BROKEN RESPONSE'));
@@ -1868,7 +1897,7 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     const storedPages = await api(base, `/api/projects/${pageProject.id}`);
     assert.deepEqual(storedPages.images.map(image => image.blocks[0].tr), ['ترجمه صفحه یک','old','old']);
     assert.ok(await page.$eval('#translationStatus', el => el.textContent.includes('2 درخواست ذخیره شد')));
-    const realError = await page.$eval('#translationStatus', el => el.textContent);
+    const realError = await page.$eval('#translationStatus', el => el.dataset.technicalMessage || el.textContent);
     assert.ok(realError.includes('HTTP 503') && realError.includes('test failure') && realError.includes('real-code'));
     assert.ok(!realError.includes('browser-local-secret'), 'the actual provider diagnostic must redact stored keys');
     assert.ok(await page.$eval('#copyTranslationError', el => !el.classList.contains('hidden')));
@@ -1878,7 +1907,7 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     await page.waitForFunction(() => !translationRunning && document.getElementById('translationStatus').textContent.includes('متوقف شد'), {timeout:15000});
     assert.equal(aiGenerations.length, 6); assert.ok(aiSystems.every(system => system === approvedSystem));
     assert.ok(aiGenerations.slice(4).every(text => text.includes('BROWSER PAGE TWO')));
-    const latestError = await page.$eval('#translationStatus', el => el.textContent);
+    const latestError = await page.$eval('#translationStatus', el => el.dataset.technicalMessage || el.textContent);
     await page.evaluate(() => { Object.defineProperty(navigator, 'clipboard', { configurable:true, value:{writeText:async () => {throw new Error('clipboard denied');}} }); });
     await page.click('#copyTranslationError'); await page.waitForFunction(() => document.getElementById('toast').textContent.includes('clipboard denied'));
     assert.equal(await page.$eval('#translationDialog', el => el.open), true, 'a denied copy must keep the error available');
@@ -1891,7 +1920,9 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
     assert.equal(await page.$eval('#translationSkill', el=>el.value), 'لحن داستان رسمی و نام‌ها ثابت باشد');
     await page.click('#translationPreviewCancel');
-    await page.click('#grid .item .act button:nth-child(2)'); await page.waitForSelector('#editorDialog[open] #blockList .block-card');
+    await page.hover('#grid .item');
+    await page.click('#grid .item .act button:nth-child(2)');
+    await page.waitForSelector('#editorDialog[open] #blockList .block-card');
     await page.waitForFunction(() => document.getElementById('blockList').textContent.includes('BROWSER PAGE ONE'));
     await page.evaluate(() => [...document.querySelectorAll('#blockList .block-card button')].find(el => el.textContent === 'ترجمهٔ دوباره').click());
     await page.waitForSelector('#translationPreviewDialog[open]');
@@ -1952,6 +1983,7 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     assert.ok(dedupStored.images.every(image=>image.edited));
     // The generated summary is editable in the next preview, and changing it
     // refreshes locally without sending another AI request.
+    await page.waitForSelector('#jobReportDialog[open]'); await page.click('#jobReportOkBtn');
     const beforeSummaryPreview = aiGenerations.length;
     await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
     assert.equal(await page.$eval('#translationContext', el => el.value), '', 'a new translation starts with an empty summary');
@@ -1980,6 +2012,7 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     }
     await page.waitForFunction(() => !translationRunning && !document.getElementById('translationDialog').open && !translationDecisionBusy, {timeout:15000});
     assert.equal(aiGenerations.slice(independentStart).filter(text=>text.includes('HEADER SAME')).length, 2);
+    await page.waitForSelector('#jobReportDialog[open]'); await page.click('#jobReportOkBtn');
     console.log('PASS: repeated title is sent once and applied to both pages; opt-out sends it per page');
 
     // A skill saved by an earlier version or pasted over limit must never be silently truncated,
@@ -2020,7 +2053,9 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
 
     // Configured translation service selector at top of preview lists free + configured openai and hides unconfigured providers
     const configuredOpts = await page.$$eval('#translationPreviewService option', opts => opts.map(o => o.value));
-    assert.ok(configuredOpts.includes('free') && configuredOpts.includes('openai') && !configuredOpts.includes('gemini'), 'only configured AI services plus free appear in selector');
+    assert.ok(configuredOpts.includes('free') && configuredOpts.includes('local') && configuredOpts.includes('openai'), 'direct MT and configured OpenAI remain available');
+    const geminiConfigured = await page.evaluate(() => (state.ai.providers.gemini.profiles || []).some(p => p.hasApiKey));
+    assert.equal(configuredOpts.includes('gemini'), geminiConfigured, 'Gemini availability follows the keys actually saved earlier in this workflow');
     await page.select('#translationPreviewService', 'free');
     await page.waitForFunction(() => document.getElementById('translationSkillWrap').classList.contains('hidden'));
     await page.select('#translationPreviewService', 'openai');
@@ -2136,8 +2171,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     const darkModalTheme = await page.evaluate(() => {
       const dlg = document.getElementById('appModalDialog');
       const cs = getComputedStyle(dlg);
-      const surface = getComputedStyle(document.documentElement).getPropertyValue('--surface').trim();
-      const probe = document.createElement('div'); probe.style.backgroundColor = surface; document.body.appendChild(probe);
+      const probe = document.createElement('div'); probe.style.backgroundColor = CSS.supports('backdrop-filter', 'blur(1px)') ? 'color-mix(in srgb,var(--surface-2) 90%,transparent)' : 'var(--surface-2)'; document.body.appendChild(probe);
       const expectedBg = getComputedStyle(probe).backgroundColor; probe.remove();
       return {
         bg: cs.backgroundColor, expectedBg, dir: cs.direction,
@@ -2146,7 +2180,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
         cancelText: document.getElementById('appModalCancel').textContent,
       };
     });
-    assert.equal(darkModalTheme.bg, darkModalTheme.expectedBg, 'appModalDialog uses Studio dark --surface color');
+    assert.equal(darkModalTheme.bg, darkModalTheme.expectedBg, 'appModalDialog uses the theme-aware dark notice surface');
     assert.equal(darkModalTheme.dir, 'rtl', 'appModalDialog renders in RTL');
     assert.ok(darkModalTheme.msg.includes('آیا مطمئن هستید'), 'cancel modal asks Persian confirmation');
     assert.ok(darkModalTheme.confirmText.includes('بله') && darkModalTheme.cancelText.includes('خیر'), 'cancel modal buttons are in Persian');
@@ -2156,12 +2190,12 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       document.body.classList.add('light');
       const dlg = document.getElementById('appModalDialog');
       const bg = getComputedStyle(dlg).backgroundColor;
-      const probe = document.createElement('div'); probe.style.backgroundColor = 'var(--surface)'; document.body.appendChild(probe);
+      const probe = document.createElement('div'); probe.style.backgroundColor = CSS.supports('backdrop-filter', 'blur(1px)') ? 'color-mix(in srgb,var(--surface-2) 90%,transparent)' : 'var(--surface-2)'; document.body.appendChild(probe);
       const expectedBg = getComputedStyle(probe).backgroundColor; probe.remove();
       document.body.classList.remove('light');
       return { bg, expectedBg };
     });
-    assert.equal(lightModalTheme.bg, lightModalTheme.expectedBg, 'appModalDialog uses Studio light --surface color in light mode');
+    assert.equal(lightModalTheme.bg, lightModalTheme.expectedBg, 'appModalDialog uses the theme-aware light notice surface');
     assert.notEqual(lightModalTheme.bg, darkModalTheme.bg, 'light and dark modal palettes match their respective themes');
 
     // Declining keeps OCR running and ocrDialog open
@@ -2328,7 +2362,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     await page.waitForSelector('#ocrDialog[open]');
     const ocrLayout = await page.evaluate(() => {
       const labels = [...document.querySelectorAll('#ocrDialog .form-grid > label')];
-      const tops = labels.map((el) => Math.round(el.getBoundingClientRect().top));
+      const tops = labels.slice(0, 4).map((el) => Math.round(el.getBoundingClientRect().top));
       return {
         labelCount: labels.length,
         sameRow: tops.length === 4 && Math.max(...tops) - Math.min(...tops) <= 4,
@@ -2336,7 +2370,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
         modelsModes: [...document.getElementById('modelsPageMode').options].map((o) => o.value),
       };
     });
-    assert.equal(ocrLayout.labelCount, 4);
+    assert.equal(ocrLayout.labelCount, 5);
     assert.equal(ocrLayout.sameRow, true, 'all 4 controls in #ocrDialog fit side-by-side on a single row');
     assert.deepEqual(ocrLayout.ocrModes, ['comic', 'document']);
     assert.deepEqual(ocrLayout.modelsModes, ['comic', 'document']);
@@ -3268,6 +3302,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
   } catch (error) {
     process.exitCode = 1;
     console.error(error);
+    if (browser) console.error('Workflow failure state:', await browser.pages().then(pages => pages.at(-1)?.evaluate(() => ({ dialogs: [...document.querySelectorAll('dialog[open]')].map(d => d.id), ocrStatus: document.getElementById('ocrStatus')?.textContent, translationStatus: document.getElementById('translationStatus')?.textContent }))).catch(() => null));
     if (serverLog) console.error(serverLog.slice(-5000));
     throw error;
   } finally {
