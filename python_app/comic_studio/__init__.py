@@ -1,5 +1,5 @@
 """HaSaYa Studio — local file-based OCR and translation."""
 
 APP_NAME = "HaSaYa Studio"
-APP_VERSION = "4.75"
-__version__ = "4.7.5"
+APP_VERSION = "4.76"
+__version__ = "4.7.6"

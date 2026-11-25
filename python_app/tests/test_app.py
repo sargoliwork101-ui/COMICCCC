@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.75"
+    assert health.json()["version"] == "4.76"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -3344,7 +3344,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.75"
+    assert APP_VERSION == "4.76"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "HaSaYaStudio"
@@ -5910,3 +5910,18 @@ def test_preview_has_no_application_pixel_cap(client, monkeypatch, enabled):
     assert response.status_code == 200, response.text
     assert (response.json()['width'], response.json()['height']) == ((640, 400) if enabled else (320, 200))
     assert de.MAX_PIXELS == 10
+
+
+def test_enhancement_settings_saved_and_preview_does_not_reset(client):
+    project, item = make_project(client)
+    route = f"/api/projects/{project['id']}"
+    state = client.get(route).json()
+    config = {'enabled': True, 'threshold': {'enabled': True, 'despeckle_area': 2},
+              'order': ['grayscale', 'upscale', 'clahe', 'denoise', 'unsharp', 'threshold']}
+    state['settings']['documentEnhancement'] = config
+    response = client.put(route + '/state', json={'state': state, 'expected_updated_at': state['updatedAt']})
+    assert response.status_code == 200, response.text
+    assert client.get(route).json()['settings']['documentEnhancement'] == config
+    preview = client.post(route + '/enhancement-preview', json={'image_id': item['id'], 'enhancement': config})
+    assert preview.status_code == 200, preview.text
+    assert client.get(route).json()['settings']['documentEnhancement'] == config

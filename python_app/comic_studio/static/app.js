@@ -9485,6 +9485,7 @@ function bindEvents() {
     if ($('modelsDialog')?.open) renderModels({ resort: true });
   });
   window.DocumentEnhancement.mount($('documentEnhancement'), () => { collectOcrSettings(); scheduleSave(); }, {
+    save: async () => { collectOcrSettings(); await saveProject(); },
     pages: () => selectedImages().map(item => ({ id: item.id, name: item.name, original: imageUrl(item) })),
     render: async (imageId, enhancement) => {
       const projectId = state.project?.id;

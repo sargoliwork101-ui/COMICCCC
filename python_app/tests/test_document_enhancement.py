@@ -96,3 +96,32 @@ def test_only_explicit_preview_bypasses_limit(monkeypatch):
         # A preview must not alter policy for subsequent normal OCR calls.
         with pytest.raises(de.EnhancementError):
             de.prepare_document(image, cfg)
+
+
+def test_despeckle_is_opt_in_and_preserves_connected_strokes():
+    binary = np.full((30, 40), 255, np.uint8)
+    binary[2, 2] = 0
+    binary[4, 4:6] = 0
+    binary[10:23, 12:15] = 0  # connected letter stroke
+    binary[24:27, 25:28] = 0  # 9-pixel punctuation, larger than supported removal
+    cleaned = de._remove_speckles(binary, 2)
+    assert cleaned[2, 2] == 255 and np.all(cleaned[4, 4:6] == 255)
+    assert np.array_equal(cleaned[10:23, 12:15], binary[10:23, 12:15])
+    assert np.array_equal(cleaned[24:27, 25:28], binary[24:27, 25:28])
+    assert binary[2, 2] == 0
+    assert de.Threshold().despeckle_area == 0
+    with pytest.raises(ValueError): de.Threshold(despeckle_area=9)
+
+
+def test_threshold_despeckle_removes_isolated_dot():
+    image = Image.new('L', (80, 80), 'white')
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((20, 20, 25, 50), fill=0)
+    draw.point((60, 60), fill=0)
+    for method in ['sauvola', 'adaptive_otsu']:
+        with de._threshold(image, de.Threshold(method=method)) as raw:
+            assert raw.getpixel((60, 60)) == 0
+        with de._threshold(image, de.Threshold(method=method, despeckle_area=2)) as cleaned:
+            assert cleaned.getpixel((60, 60)) == 255
+            assert cleaned.getpixel((22, 35)) == 0
+    image.close()

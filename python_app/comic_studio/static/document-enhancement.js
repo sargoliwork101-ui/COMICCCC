@@ -8,14 +8,14 @@
     clahe: { enabled: false, clip_limit: 2, tile_grid: 8 },
     denoise: { enabled: false, diameter: 5, sigma_color: 25, sigma_space: 25 },
     unsharp: { enabled: false, amount: 1, radius: 1 },
-    threshold: { enabled: false, method: 'sauvola', window: 51, k: 0.2, r: 128 } });
+    threshold: { enabled: false, method: 'sauvola', window: 51, k: 0.2, r: 128, despeckle_area: 0 } });
   const fields = {
     upscale: [['factor', 'ضریب', [2, 3]]],
     grayscale: [],
     clahe: [['clip_limit', 'Clip Limit', 0.5, 8, 0.1], ['tile_grid', 'Tile Grid (N × N)', 2, 32, 1]],
     denoise: [['diameter', 'قطر همسایگی', 3, 9, 1], ['sigma_color', 'Sigma Color', 1, 100, 1], ['sigma_space', 'Sigma Space', 1, 100, 1]],
     unsharp: [['amount', 'Amount', 0, 3, 0.1], ['radius', 'Radius', 0.3, 4, 0.1]],
-    threshold: [['method', 'روش', ['sauvola', 'adaptive_otsu']], ['window', 'Window / Otsu Tile — عدد فرد', 3, 201, 2], ['k', 'Sauvola k', 0.01, 0.5, 0.01], ['r', 'Sauvola R', 32, 255, 1]],
+    threshold: [['method', 'روش', ['sauvola', 'adaptive_otsu']], ['window', 'Window / Otsu Tile — عدد فرد', 3, 201, 2], ['k', 'Sauvola k', 0.01, 0.5, 0.01], ['r', 'Sauvola R', 32, 255, 1], ['despeckle_area', 'حذف ذرات تا چند پیکسل؟ (۰ خاموش)', 0, 8, 1]],
   };
   let config = defaults(); let host; let changed = () => {}; let documentMode = false; let previewApi; let previewRevision = 0; let previewPage = ''; let workspace; let reorder = false;
   const copy = value => JSON.parse(JSON.stringify(value));
@@ -26,7 +26,7 @@
       const key = row.dataset.stage;
       config[key].enabled = row.querySelector('[data-on]').checked;
       row.querySelectorAll('[data-param]').forEach(input => {
-        config[key][input.dataset.param] = input.tagName === 'SELECT' && input.dataset.param === 'method' ? input.value : Number(input.value);
+        if (input.value !== '' && input.validity.valid) config[key][input.dataset.param] = input.tagName === 'SELECT' && input.dataset.param === 'method' ? input.value : Number(input.value);
       });
     });
     return copy(config);
@@ -80,14 +80,37 @@
           if (key === 'threshold' && ['k', 'r'].includes(param)) input.disabled = config.threshold.method !== 'sauvola';
           wrap.append(input); params.append(wrap);
         });
-        details.append(params); row.append(details);
+        details.append(params);
+        if (key === 'threshold') details.append(el('p', 'حذف ذرات فقط اجزای سیاهِ جدا و بسیار کوچک را پاک می‌کند؛ از ۱ یا ۲ شروع کنید. مقدار زیاد ممکن است نقطهٔ حروف و علائم را حذف کند. مساحت در اندازهٔ خروجی سنجیده می‌شود؛ هیچ بهبود دقتی تضمین نیست.', 'hint'));
+        row.append(details);
       }
       list.append(row);
     });
     controls.append(note);
     host.append(button('بازگرداندن همه به پیش‌فرض (خاموش)', () => { config = defaults(); render(); changed(collect()); }));
+    if (previewApi?.save) {
+      const saveStatus = el('span', '', 'hint'); saveStatus.dataset.enhancementSaveStatus = ''; saveStatus.setAttribute('role', 'status');
+      const save = button('ذخیرهٔ تنظیمات', async () => {
+        if (!root.DocumentEnhancement.validate()) return;
+        collect(); save.disabled = true; saveStatus.textContent = 'در حال ذخیره…';
+        try { await previewApi.save(); saveStatus.textContent = 'تنظیمات ذخیره شد'; }
+        catch (error) { saveStatus.textContent = `ذخیره نشد: ${error.message}`; }
+        finally { save.disabled = false; }
+      });
+      save.dataset.saveEnhancement = ''; host.append(save, saveStatus);
+    }
     appendPreview();
     master.addEventListener('change', () => { collect(); render(); changed(collect()); });
+    host.querySelectorAll('input[data-param]').forEach(input => input.addEventListener('input', () => {
+      if (input.value === '' || !input.validity.valid) return;
+      collect(); previewRevision += 1;
+      const savedStatus = host.querySelector('[data-enhancement-save-status]');
+      if (savedStatus) savedStatus.textContent = 'تغییرات جدید؛ ذخیرهٔ خودکار فعال است.';
+      host.querySelector('[data-preview-output]')?.replaceChildren();
+      const update = host.querySelector('[data-preview-update]');
+      if (update) { update.disabled = !previewApi.pages().length; host.querySelector('.enhancement-preview [role=status]').textContent = 'تنظیمات تغییر کرده؛ پیش‌نمایش را به‌روز کنید.'; }
+      changed(collect());
+    }));
     host.querySelectorAll('[data-on], [data-param]').forEach(input => input.addEventListener('change', () => {
       collect();
       previewRevision += 1;

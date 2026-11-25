@@ -301,6 +301,19 @@ function check(name, condition) {
   const savedEnhancement = enhancement.collect();
   enhancement.load(savedEnhancement);
   check('saved enhancement settings restore', enhancement.collect().order[0] === 'grayscale' && enhancement.collect().grayscale.enabled);
+  enhancementPanel.querySelector('[data-stage="threshold"] [data-on]').click();
+  const speckle = enhancementPanel.querySelector('[data-param="despeckle_area"]');
+  speckle.value = '2'; speckle.dispatchEvent(new window.Event('input', { bubbles: true }));
+  check('numeric changes captured before blur', vm.runInContext('state.project.settings.documentEnhancement.threshold.despeckle_area', context) === 2);
+  speckle.value = ''; speckle.dispatchEvent(new window.Event('input', { bubbles: true }));
+  check('temporary empty input does not overwrite saved value', vm.runInContext('state.project.settings.documentEnhancement.threshold.despeckle_area', context) === 2);
+  speckle.value = '2'; speckle.dispatchEvent(new window.Event('input', { bubbles: true }));
+  enhancementPanel.querySelector('[data-save-enhancement]').click(); await sleep(10);
+  await vm.runInContext('saveTask', context);
+  check('explicit enhancement save reaches server state', stateSaveRequests.at(-1).settings.documentEnhancement.threshold.despeckle_area === 2 && enhancementPanel.textContent.includes('تنظیمات ذخیره شد'));
+  const savedFilterSettings = stateSaveRequests.at(-1).settings.documentEnhancement;
+  enhancement.load(savedFilterSettings);
+  check('reloaded settings retain filter values and order', enhancement.collect().threshold.despeckle_area === 2 && enhancement.collect().threshold.enabled && enhancement.collect().order[0] === 'grayscale');
   enhancementPanel.querySelector(':scope > button').click();
   check('reset disables master and filters', !enhancement.collect().enabled && !enhancement.collect().grayscale.enabled && enhancement.collect().order[0] === 'upscale');
   const previewFetch = window.fetch;
@@ -792,7 +805,7 @@ function check(name, condition) {
   check('translation progress dialog closes after success', !$('translationDialog').open);
   check('finishing translation automatically selects translation display mode', $('overlayMode').value === 'translation' && $('exportOverlayMode').value === 'translation');
   check('finishing translation places translated text on the image', renderedBlocks[0].tr === 'ترجمهٔ تازه' && !renderedBlocks[0]._plainText);
-  check('v4.75 completed translation report counts the persisted tr field, not a nonexistent translated field', $('jobReportBody').textContent.includes('درصد ترجمه‌شده: 100٪') && $('jobReportBody').textContent.includes('ترجمه‌شده: 1 از 1 متن') && !$('jobReportBody').textContent.includes('ترجمه‌نشده:'));
+  check('v4.76 completed translation report counts the persisted tr field, not a nonexistent translated field', $('jobReportBody').textContent.includes('درصد ترجمه‌شده: 100٪') && $('jobReportBody').textContent.includes('ترجمه‌شده: 1 از 1 متن') && !$('jobReportBody').textContent.includes('ترجمه‌نشده:'));
   await vm.runInContext('openEditor(state.project.images[0].id)', context);
   const retranslateButton = [...$('blockList').querySelectorAll('button')].find((button) => button.textContent === 'ترجمهٔ دوباره');
   retranslateButton.click(); await sleep(20);
@@ -1929,8 +1942,8 @@ function check(name, condition) {
             downloadSizeGb: 2.4,
             weightsDownloadGb: 1.9,
             runtimeDownloadGb: 2.85,
-            fullDownloadSizeGb: 4.75,
-            totalDownloadGb: 4.75,
+            fullDownloadSizeGb: 4.76,
+            totalDownloadGb: 4.76,
           },
           {
             id: 'tesseract',
@@ -2267,7 +2280,7 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.75 processes 32 OCR pages in order without mid-batch engine recycling, places each page before the next, reuses grid images, and clears preview bitmaps',
+      'v4.76 processes 32 OCR pages in order without mid-batch engine recycling, places each page before the next, reuses grid images, and clears preview bitmaps',
       v399PerPageCheck.img1Reused === true
         && v399PerPageCheck.sequence === Array.from({length: 32}, (_, i) => `ocr:pg-${i + 1}:keep=${i < 31} -> placed:pg-${i + 1}`).join(' -> ')
         && v399PerPageCheck.hadPreviewSrc === true
@@ -2276,7 +2289,7 @@ function check(name, condition) {
     );
   }
 
-  // v4.75: persisted content, not source/AI flags/empty HTML, defines completion.
+  // v4.76: persisted content, not source/AI flags/empty HTML, defines completion.
   {
     const parserContext = vm.createContext({document: window.document, module: {exports: {}}});
     vm.runInContext(fs.readFileSync(path.join(root, 'typeset.js'), 'utf8'), parserContext);
@@ -2306,10 +2319,10 @@ function check(name, condition) {
       })()
     `, context);
     window.Typeset.richHtmlWords = originalRichParser;
-    check('v4.75 translation stats count saved plain/rich text and exclude empty markup, stale flags, disabled and source-free blocks', stats.total === 5 && stats.translated === 2 && stats.untranslated === 3 && stats.percentage === 40 && stats.zero && stats.partial);
+    check('v4.76 translation stats count saved plain/rich text and exclude empty markup, stale flags, disabled and source-free blocks', stats.total === 5 && stats.translated === 2 && stats.untranslated === 3 && stats.percentage === 40 && stats.zero && stats.partial);
   }
 
-  // v4.75: localize presentation without destroying copyable diagnostics.
+  // v4.76: localize presentation without destroying copyable diagnostics.
   {
     const noticeCheck = vm.runInContext(`
       (() => {
@@ -2335,10 +2348,10 @@ function check(name, condition) {
           && !output.includes('/api/') && noMarkup && noStaleCopy;
       })()
     `, context);
-    check('v4.75 Persian notices preserve exact technical diagnostics, error semantics and text-only safety', noticeCheck);
+    check('v4.76 Persian notices preserve exact technical diagnostics, error semantics and text-only safety', noticeCheck);
   }
 
-  // v4.75: offscreen image eviction must preserve metadata, click handlers,
+  // v4.76: offscreen image eviction must preserve metadata, click handlers,
   // reloads, and ignore observer callbacks queued by an older grid/project.
   {
     const result = await vm.runInContext(`
@@ -2387,7 +2400,7 @@ function check(name, condition) {
         }
       })()
     `, context);
-    check('v4.75 bounds grid pixel ownership to visible pages, preserves reload/click metadata, and ignores stale/detached callbacks', result);
+    check('v4.76 bounds grid pixel ownership to visible pages, preserves reload/click metadata, and ignores stale/detached callbacks', result);
   }
 
   // v4.00: Version 4.00 + Optional Custom Storage & Downloads Directory Settings UI (#storageBtn, #modelsStorageBtn, #storageDialog)
@@ -2496,7 +2509,7 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.30 displays version 4.75 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      'v4.00/v4.30 displays version 4.76 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
       v400StorageCheck.verHas426 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
@@ -4835,7 +4848,7 @@ function check(name, condition) {
       const detail = document.getElementById('serverAlertDetail').textContent || '';
       window.fetch = async (url, opts = {}) => {
         const parsed = new URL(url, 'http://127.0.0.1:8765');
-        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.75' });
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.76' });
         return origFetch(url, opts);
       };
       document.getElementById('serverAlertRetry').click();

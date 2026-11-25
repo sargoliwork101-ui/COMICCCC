@@ -59,6 +59,7 @@ class Threshold(FilterSettings):
     window: int = Field(default=51, ge=3, le=201)
     k: float = Field(default=0.2, ge=0.01, le=0.5)
     r: float = Field(default=128, ge=32, le=255)
+    despeckle_area: int = Field(default=0, ge=0, le=8)
 
     @model_validator(mode='after')
     def odd_window(self):
@@ -147,7 +148,30 @@ def _threshold(image, settings):
                 region = gray[max(0, y - step // 2):min(h, y + step + step // 2), max(0, x - step // 2):min(w, x + step + step // 2)]
                 thresholds[iy, ix], _ = cv2.threshold(region, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
         threshold = cv2.resize(thresholds, (w, h), interpolation=cv2.INTER_LINEAR)
-    return Image.fromarray(np.where(gray > threshold, 255, 0).astype(np.uint8))
+    binary = np.where(gray > threshold, 255, 0).astype(np.uint8)
+    if settings.despeckle_area:
+        binary = _remove_speckles(binary, settings.despeckle_area)
+    return Image.fromarray(binary)
+
+
+def _remove_speckles(binary, max_area):
+    """Opt-in tiny isolated black components only, never erode letter strokes.
+
+    Punctuation/small diacritics can also be tiny, so this is disabled by default.
+    The area is measured at the current pipeline resolution (after upscaling).
+    """
+    import cv2
+    import numpy as np
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        (binary == 0).astype(np.uint8), connectivity=8,
+    )
+    remove = np.zeros(count, dtype=bool)
+    remove[1:] = ((stats[1:, cv2.CC_STAT_AREA] <= max_area)
+                  & (stats[1:, cv2.CC_STAT_WIDTH] <= 3)
+                  & (stats[1:, cv2.CC_STAT_HEIGHT] <= 3))
+    result = binary.copy()
+    result[remove[labels]] = 255
+    return result
 
 
 FILTERS = dict(zip(STAGES, [_upscale, _grayscale, _clahe, _denoise, _unsharp, _threshold]))
