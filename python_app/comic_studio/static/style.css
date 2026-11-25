@@ -730,3 +730,26 @@ body.auth-locked #mainwrap,body.auth-locked #dock,body.auth-locked #menuBtn,body
 .enhancement-image-viewport img{display:block;width:100%;height:auto;max-width:100%}
 .enhancement-comparison.actual-size img{width:auto;max-width:none}
 @media(max-width:600px){.enhancement-comparison{grid-template-columns:minmax(0,1fr)}.enhancement-image-viewport{height:240px}}
+
+
+/* Keep filter controls and their preview together, inside the OCR settings. */
+.enhancement-workspace{display:grid;grid-template-columns:minmax(240px,.85fr) minmax(0,1.4fr);gap:16px;align-items:start;margin-block:12px}
+.enhancement-controls{min-width:0}
+.enhancement-controls-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.enhancement-controls-head h4{margin:0;font-size:12px}
+.enhancement-controls-head>.bt{font-size:10px;padding:4px 8px;min-height:27px}
+.enhancement-controls-head>.bt[aria-pressed=true]{border-color:var(--a1);color:var(--a1)}
+.enhancement-controls:not(.is-reordering) .enhancement-stage-head>.bt{display:none}
+.enhancement-workspace .enhancement-stage{padding:8px 10px}
+.enhancement-workspace .enhancement-stages{gap:6px;margin-block:10px}
+.enhancement-workspace .enhancement-caption{flex-wrap:wrap;gap:0 7px}
+.enhancement-workspace .enhancement-params{grid-template-columns:repeat(2,minmax(0,1fr))}
+.enhancement-workspace .enhancement-preview{position:sticky;top:12px;margin:0;padding:12px;border:1px solid var(--line);border-radius:9px;background:var(--surface)}
+.enhancement-workspace .enhancement-comparison{gap:8px}
+.enhancement-workspace .enhancement-image-viewport{height:340px}
+.enhancement-preview-empty{display:flex;align-items:center;justify-content:center;text-align:center;min-height:240px;margin:10px 0 0;padding:20px;color:var(--muted);font-size:11px;border:1px dashed var(--line-2);border-radius:8px;background:var(--surface-2)}
+@media(max-width:800px){.enhancement-workspace{grid-template-columns:minmax(0,1fr)}.enhancement-workspace .enhancement-preview{position:static;grid-row:1}.enhancement-workspace .enhancement-image-viewport{height:240px}.enhancement-preview-empty{min-height:100px}}
+
+.ocr-legacy-preprocessing{border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:var(--surface)}
+.ocr-legacy-preprocessing>summary{cursor:pointer;font-size:11px;color:var(--muted)}
+.ocr-legacy-preprocessing>.checks{margin:10px 0 0}

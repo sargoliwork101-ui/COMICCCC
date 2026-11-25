@@ -17,7 +17,7 @@
     unsharp: [['amount', 'Amount', 0, 3, 0.1], ['radius', 'Radius', 0.3, 4, 0.1]],
     threshold: [['method', 'روش', ['sauvola', 'adaptive_otsu']], ['window', 'Window / Otsu Tile — عدد فرد', 3, 201, 2], ['k', 'Sauvola k', 0.01, 0.5, 0.01], ['r', 'Sauvola R', 32, 255, 1]],
   };
-  let config = defaults(); let host; let changed = () => {}; let documentMode = false; let previewApi; let previewRevision = 0; let previewPage = '';
+  let config = defaults(); let host; let changed = () => {}; let documentMode = false; let previewApi; let previewRevision = 0; let previewPage = ''; let workspace; let reorder = false;
   const copy = value => JSON.parse(JSON.stringify(value));
   function collect() {
     if (!host) return copy(config);
@@ -45,8 +45,17 @@
     const note = el('details', null, 'enhancement-note');
     note.append(el('summary', 'نکتهٔ پیش‌پردازش'));
     note.append(el('p', 'با فعال‌بودن حداقل یک فیلتر، این مراحل جایگزین کنتراست، بزرگ‌نمایی، شارپ و پیش‌پردازش فارسی قبلی می‌شوند. با خاموش‌کردن، همان روش قبلی اجرا می‌شود. تصویر اصلی تغییر نمی‌کند.', 'hint'));
-    host.append(note);
-    const list = el('div', null, 'enhancement-stages'); host.append(list);
+    workspace = el('div', null, 'enhancement-workspace');
+    const controls = el('div', null, 'enhancement-controls');
+    workspace.append(controls); host.append(workspace);
+    const tools = el('div', null, 'enhancement-controls-head');
+    tools.append(el('h4', 'فیلترهای تصویر'));
+    const orderButton = button('تغییر ترتیب', () => {
+      reorder = !reorder; controls.classList.toggle('is-reordering', reorder); orderButton.setAttribute('aria-pressed', String(reorder));
+    });
+    orderButton.setAttribute('aria-pressed', String(reorder)); controls.classList.toggle('is-reordering', reorder);
+    tools.append(orderButton); controls.append(tools);
+    const list = el('div', null, 'enhancement-stages'); controls.append(list);
     config.order.forEach((key, index) => {
       const row = el('section', null, 'enhancement-stage'); row.dataset.stage = key;
       const head = el('div', null, 'enhancement-stage-head'); const onLabel = el('label', null, 'enhancement-switch');
@@ -59,7 +68,7 @@
       const up = button('↑', () => move(-1)); up.disabled = index === 0; up.setAttribute('aria-label', `بالا بردن ${key}`); up.title = 'اجرای زودتر';
       const down = button('↓', () => move(1)); down.disabled = index === config.order.length - 1; down.setAttribute('aria-label', `پایین بردن ${key}`); down.title = 'اجرای دیرتر'; head.append(up, down); row.append(head);
       if (fields[key].length) {
-        const details = el('details'); details.open = config[key].enabled; details.append(el('summary', 'تنظیمات فیلتر'));
+        const details = el('details'); details.append(el('summary', 'تنظیمات فیلتر'));
         const params = el('fieldset', null, 'enhancement-params'); params.disabled = !config[key].enabled || !config.enabled;
         fields[key].forEach(([param, title, min, max, step]) => {
           const wrap = el('label'); const fieldTitle = el('bdi', title); fieldTitle.dir = 'auto'; wrap.append(fieldTitle); let input;
@@ -75,6 +84,7 @@
       }
       list.append(row);
     });
+    controls.append(note);
     host.append(button('بازگرداندن همه به پیش‌فرض (خاموش)', () => { config = defaults(); render(); changed(collect()); }));
     appendPreview();
     master.addEventListener('change', () => { collect(); render(); changed(collect()); });
@@ -91,7 +101,7 @@
   function appendPreview() {
     if (!previewApi) return;
     const section = el('section', null, 'enhancement-preview');
-    section.append(el('h4', 'پیش‌نمایش روی صفحهٔ انتخابی'));
+    section.append(el('h4', 'پیش‌نمایش در همین صفحه'));
     const toolbar = el('div', null, 'enhancement-preview-toolbar');
     const label = el('label', 'صفحه'); const select = el('select'); select.dataset.previewPage = '';
     select.setAttribute('aria-label', 'صفحهٔ پیش‌نمایش'); label.append(select);
@@ -137,7 +147,8 @@
     update.dataset.previewUpdate = '';
     select.addEventListener('change', () => { previewPage = select.value; previewRevision += 1; output.replaceChildren(); update.disabled = false; status.textContent = 'برای صفحهٔ جدید، پیش‌نمایش را به‌روز کنید.'; });
     select.addEventListener('focus', refreshPages);
-    toolbar.append(label, update); section.append(toolbar, status, output); host.append(section); refreshPages();
+    toolbar.append(label, update); section.append(toolbar, status, output); workspace.append(section); refreshPages();
+    output.append(el('p', 'یک صفحه انتخاب کنید و «به‌روزرسانی پیش‌نمایش» را بزنید تا اصل و نتیجه همین‌جا نمایش داده شوند.', 'enhancement-preview-empty'));
   }
   function load(saved) {
     config = defaults();

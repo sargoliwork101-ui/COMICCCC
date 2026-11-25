@@ -308,15 +308,21 @@ main()
             aligned: rows.every(row => {
               const checkbox = row.querySelector('input').getBoundingClientRect();
               const button = row.querySelector('button').getBoundingClientRect();
-              return Math.abs((checkbox.top + checkbox.height / 2) - (button.top + button.height / 2)) < 2;
+              return button.width === 0 || Math.abs((checkbox.top + checkbox.height / 2) - (button.top + button.height / 2)) < 2;
             }),
             themed: getComputedStyle(panel).backgroundColor === getComputedStyle(dialog).backgroundColor,
             isolatedTerms: panel.querySelectorAll('bdi[dir="ltr"]').length === 6,
+            integrated: panel.querySelector('.enhancement-workspace').contains(panel.querySelector('.enhancement-preview')),
+            sideBySide: window.innerWidth < 801 || (() => {
+              const controls = panel.querySelector('.enhancement-controls').getBoundingClientRect();
+              const preview = panel.querySelector('.enhancement-preview').getBoundingClientRect();
+              return Math.abs(controls.top - preview.top) < 2 && (controls.left >= preview.right || preview.left >= controls.right);
+            })(),
           };
           dialog.close();
           return result;
         }, light);
-        assert.ok(layout.horizontal && layout.contained && layout.aligned && layout.isolatedTerms,
+        assert.ok(layout.horizontal && layout.contained && layout.aligned && layout.isolatedTerms && layout.integrated && layout.sideBySide,
           `document enhancement layout at ${width}px light=${light}: ${JSON.stringify(layout)}`);
       }
     }

@@ -286,6 +286,12 @@ function check(name, condition) {
   check('enhancement hidden in comic mode with every switch off', enhancementPanel.classList.contains('hidden') && !enhancement.collect().enabled && Object.values(enhancement.collect()).filter(x => x && typeof x === 'object' && !Array.isArray(x)).every(x => !x.enabled));
   enhancement.setDocumentMode(true);
   check('document enhancement exposes six separately controlled stages', !enhancementPanel.classList.contains('hidden') && enhancementPanel.querySelectorAll('[data-stage]').length === 6);
+  check('preview lives in same workspace as filter controls', enhancementPanel.querySelector('.enhancement-workspace').contains(enhancementPanel.querySelector('.enhancement-preview')) && enhancementPanel.querySelector('.enhancement-controls'));
+  check('filter details collapsed by default', [...enhancementPanel.querySelectorAll('[data-stage] details')].every(node => !node.open));
+  const orderToggle = enhancementPanel.querySelector('.enhancement-controls-head button');
+  orderToggle.click();
+  check('reordering controls are explicitly toggled', orderToggle.getAttribute('aria-pressed') === 'true' && enhancementPanel.querySelector('.enhancement-controls').classList.contains('is-reordering'));
+  orderToggle.click();
   enhancementPanel.querySelector('[data-master]').click();
   enhancementPanel.querySelector('[data-stage="grayscale"] [data-on]').click();
   vm.runInContext('collectOcrSettings()', context);
@@ -786,7 +792,7 @@ function check(name, condition) {
   check('translation progress dialog closes after success', !$('translationDialog').open);
   check('finishing translation automatically selects translation display mode', $('overlayMode').value === 'translation' && $('exportOverlayMode').value === 'translation');
   check('finishing translation places translated text on the image', renderedBlocks[0].tr === 'ترجمهٔ تازه' && !renderedBlocks[0]._plainText);
-  check('v4.72 completed translation report counts the persisted tr field, not a nonexistent translated field', $('jobReportBody').textContent.includes('درصد ترجمه‌شده: 100٪') && $('jobReportBody').textContent.includes('ترجمه‌شده: 1 از 1 متن') && !$('jobReportBody').textContent.includes('ترجمه‌نشده:'));
+  check('v4.73 completed translation report counts the persisted tr field, not a nonexistent translated field', $('jobReportBody').textContent.includes('درصد ترجمه‌شده: 100٪') && $('jobReportBody').textContent.includes('ترجمه‌شده: 1 از 1 متن') && !$('jobReportBody').textContent.includes('ترجمه‌نشده:'));
   await vm.runInContext('openEditor(state.project.images[0].id)', context);
   const retranslateButton = [...$('blockList').querySelectorAll('button')].find((button) => button.textContent === 'ترجمهٔ دوباره');
   retranslateButton.click(); await sleep(20);
@@ -2261,7 +2267,7 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.72 processes 32 OCR pages in order without mid-batch engine recycling, places each page before the next, reuses grid images, and clears preview bitmaps',
+      'v4.73 processes 32 OCR pages in order without mid-batch engine recycling, places each page before the next, reuses grid images, and clears preview bitmaps',
       v399PerPageCheck.img1Reused === true
         && v399PerPageCheck.sequence === Array.from({length: 32}, (_, i) => `ocr:pg-${i + 1}:keep=${i < 31} -> placed:pg-${i + 1}`).join(' -> ')
         && v399PerPageCheck.hadPreviewSrc === true
@@ -2270,7 +2276,7 @@ function check(name, condition) {
     );
   }
 
-  // v4.72: persisted content, not source/AI flags/empty HTML, defines completion.
+  // v4.73: persisted content, not source/AI flags/empty HTML, defines completion.
   {
     const parserContext = vm.createContext({document: window.document, module: {exports: {}}});
     vm.runInContext(fs.readFileSync(path.join(root, 'typeset.js'), 'utf8'), parserContext);
@@ -2300,10 +2306,10 @@ function check(name, condition) {
       })()
     `, context);
     window.Typeset.richHtmlWords = originalRichParser;
-    check('v4.72 translation stats count saved plain/rich text and exclude empty markup, stale flags, disabled and source-free blocks', stats.total === 5 && stats.translated === 2 && stats.untranslated === 3 && stats.percentage === 40 && stats.zero && stats.partial);
+    check('v4.73 translation stats count saved plain/rich text and exclude empty markup, stale flags, disabled and source-free blocks', stats.total === 5 && stats.translated === 2 && stats.untranslated === 3 && stats.percentage === 40 && stats.zero && stats.partial);
   }
 
-  // v4.72: localize presentation without destroying copyable diagnostics.
+  // v4.73: localize presentation without destroying copyable diagnostics.
   {
     const noticeCheck = vm.runInContext(`
       (() => {
@@ -2329,10 +2335,10 @@ function check(name, condition) {
           && !output.includes('/api/') && noMarkup && noStaleCopy;
       })()
     `, context);
-    check('v4.72 Persian notices preserve exact technical diagnostics, error semantics and text-only safety', noticeCheck);
+    check('v4.73 Persian notices preserve exact technical diagnostics, error semantics and text-only safety', noticeCheck);
   }
 
-  // v4.72: offscreen image eviction must preserve metadata, click handlers,
+  // v4.73: offscreen image eviction must preserve metadata, click handlers,
   // reloads, and ignore observer callbacks queued by an older grid/project.
   {
     const result = await vm.runInContext(`
@@ -2381,7 +2387,7 @@ function check(name, condition) {
         }
       })()
     `, context);
-    check('v4.72 bounds grid pixel ownership to visible pages, preserves reload/click metadata, and ignores stale/detached callbacks', result);
+    check('v4.73 bounds grid pixel ownership to visible pages, preserves reload/click metadata, and ignores stale/detached callbacks', result);
   }
 
   // v4.00: Version 4.00 + Optional Custom Storage & Downloads Directory Settings UI (#storageBtn, #modelsStorageBtn, #storageDialog)
@@ -2490,7 +2496,7 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.30 displays version 4.72 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      'v4.00/v4.30 displays version 4.73 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
       v400StorageCheck.verHas426 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
@@ -4829,7 +4835,7 @@ function check(name, condition) {
       const detail = document.getElementById('serverAlertDetail').textContent || '';
       window.fetch = async (url, opts = {}) => {
         const parsed = new URL(url, 'http://127.0.0.1:8765');
-        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.72' });
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.73' });
         return origFetch(url, opts);
       };
       document.getElementById('serverAlertRetry').click();
