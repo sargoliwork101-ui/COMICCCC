@@ -140,7 +140,6 @@ class ProjectStore:
                 "contrast": True,
                 "contrastStrength": 1.0,
                 "photoSharpen": False,
-                "documentBinarize": False,
                 "precise": True,
                 "persianPreprocess": False,
                 "eraseOriginal": True,

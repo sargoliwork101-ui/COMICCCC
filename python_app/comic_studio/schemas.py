@@ -21,7 +21,6 @@ class OcrRequest(BaseModel):
     contrast: bool = True
     contrast_strength: float = Field(default=1.0, ge=0.5, le=3.0, allow_inf_nan=False)
     photo_sharpen: bool = False
-    document_binarize: bool = False
     precise: bool = True
     persian_preprocess: bool | None = None
     group_lines: bool = False

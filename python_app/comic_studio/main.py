@@ -1210,7 +1210,6 @@ def create_app() -> FastAPI:
         persian_preprocess: bool = False,
         photo_sharpen: bool = False,
         contrast_strength: float = 1.0,
-        document_binarize: bool = False,
     ) -> list[dict[str, Any]]:
         kwargs: dict[str, Any] = {}
         if _supports_kwarg(recognize_image, "page_mode"):
@@ -1219,10 +1218,10 @@ def create_app() -> FastAPI:
             kwargs["persian_preprocess"] = True
         prepared = prepare_ocr_photo(
             image, sharpen=photo_sharpen, contrast=contrast,
-            contrast_strength=contrast_strength, page_mode=page_mode, document_binarize=document_binarize,
+            contrast_strength=contrast_strength, page_mode=page_mode,
         )
         try:
-            engine_contrast = contrast and contrast_strength == 1.0 and not document_binarize
+            engine_contrast = contrast and contrast_strength == 1.0
             return recognize_image(
                 engine, prepared, language, engine_contrast, precise, min_confidence, **kwargs,
             )
@@ -1419,7 +1418,7 @@ def create_app() -> FastAPI:
                             blocks = await run_reported(
                                 _invoke_recognize, engine, image, values.language,
                                 values.contrast, values.precise, values.min_confidence, values.page_mode,
-                                use_persian_prep, values.photo_sharpen, values.contrast_strength, values.document_binarize,
+                                use_persian_prep, values.photo_sharpen, values.contrast_strength,
                                 pulse_label=f"در حال خواندن {item['name']}",
                                 progress_span=(start_page_p, round(p_lo + (p_hi - p_lo) * 0.92, 4)),
                                 job_kind="ocr",
@@ -1452,7 +1451,7 @@ def create_app() -> FastAPI:
                                 blocks = _invoke_recognize(
                                     engine, image, values.language,
                                     values.contrast, values.precise, values.min_confidence, values.page_mode,
-                                    use_persian_prep, values.photo_sharpen, values.contrast_strength, values.document_binarize,
+                                    use_persian_prep, values.photo_sharpen, values.contrast_strength,
                                 )
                                 return blocks, page_size
                             finally:

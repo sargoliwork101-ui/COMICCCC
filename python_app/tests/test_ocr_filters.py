@@ -58,39 +58,10 @@ def test_api_rejects_invalid_strength(value):
         OcrRequest(contrast_strength=value)
 
 
-def test_document_binarization_cleans_uneven_paper_without_losing_strokes_and_dots():
-    import numpy as np
-    # Faint print on a gradual paper shadow, including tiny Persian-like dots.
-    gray = np.tile(np.linspace(150, 240, 240, dtype=np.uint8), (120, 1)).copy()
-    ink = np.zeros(gray.shape, dtype=bool)
-    for x in range(20, 220, 25):
-        ink[40:60, x:x + 3] = True
-        ink[70:72, x:x + 2] = True
-    gray[ink] -= 35
-    with Image.fromarray(gray).convert('RGB') as image:
-        original = image.tobytes()
-        with prepare_ocr_photo(image, document_binarize=True, page_mode='document') as result:
-            binary = np.asarray(result)[:, :, 0]
-            assert set(np.unique(binary)) == {0, 255}
-            assert (binary[ink] == 0).mean() > 0.98
-            assert (binary[~ink] == 255).mean() > 0.98
-            assert result.size == image.size
-            assert result.mode == 'RGB'
-        assert image.tobytes() == original
-
-
-@pytest.mark.parametrize('size', [(1, 1), (1, 20), (2, 2), (3, 3), (10, 8), (120, 80)])
-def test_document_binarization_small_and_transparent_inputs(size):
-    with Image.new('RGBA', size, (0, 0, 0, 0)) as image:
-        with prepare_ocr_photo(image, document_binarize=True, sharpen=True) as result:
-            assert result.size == size
-            assert result.getpixel((0, 0)) == (255, 255, 255)
-
-
-def test_document_binarization_is_independent_of_contrast_switch():
-    import numpy as np
+def test_removed_paper_filter_cannot_be_enabled_by_legacy_payload():
+    import inspect
+    assert 'document_binarize' not in inspect.signature(prepare_ocr_photo).parameters
+    request = OcrRequest(document_binarize=True)
+    assert 'document_binarize' not in request.model_dump()
     with photo() as image:
-        with prepare_ocr_photo(image, contrast=False, contrast_strength=3, document_binarize=True) as result:
-            assert set(np.unique(np.asarray(result))) <= {0, 255}
-            assert result is not image
-        assert prepare_ocr_photo(image, contrast=False, document_binarize=False) is image
+        assert prepare_ocr_photo(image, contrast=False) is image
