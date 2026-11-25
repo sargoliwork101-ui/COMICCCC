@@ -747,6 +747,7 @@ function abortRunningModelJob() {
 }
 function showDialog(id) {
   setMenuOpen(false);
+  if (id === 'ocrDialog') window.DocumentEnhancement.setDocumentMode($('ocrPageMode')?.value === 'document');
   const dlg = $(id);
   if (!dlg) return;
   const idx = openDialogStack.indexOf(id);
@@ -9483,7 +9484,15 @@ function bindEvents() {
     scheduleSave();
     if ($('modelsDialog')?.open) renderModels({ resort: true });
   });
-  window.DocumentEnhancement.mount($('documentEnhancement'), () => { collectOcrSettings(); scheduleSave(); });
+  window.DocumentEnhancement.mount($('documentEnhancement'), () => { collectOcrSettings(); scheduleSave(); }, {
+    pages: () => selectedImages().map(item => ({ id: item.id, name: item.name, original: imageUrl(item) })),
+    render: async (imageId, enhancement) => {
+      const projectId = state.project?.id;
+      const result = await api(`/api/projects/${projectId}/enhancement-preview`, jsonOptions('POST', { image_id: imageId, page_mode: 'document', enhancement }));
+      if (state.project?.id !== projectId || !selectedImages().some(item => item.id === imageId)) throw new Error('پروژه یا انتخاب صفحه تغییر کرده؛ دوباره پیش‌نمایش بگیرید.');
+      return result;
+    },
+  });
   $('ocrPageMode')?.addEventListener('change', () => {
     window.DocumentEnhancement.setDocumentMode($('ocrPageMode').value === 'document');
     const lang = $('ocrLanguage')?.value || state.project?.settings?.ocrLanguage || 'eng';

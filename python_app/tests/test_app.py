@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.71"
+    assert health.json()["version"] == "4.72"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -3344,7 +3344,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.71"
+    assert APP_VERSION == "4.72"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "HaSaYaStudio"
@@ -5850,3 +5850,36 @@ def test_document_enhancement_scoped_api(client, monkeypatch, parallel, mode, en
     assert len(received) == len(ids)
     assert all(row == ((640, 400), 'L', False, False) if active else row == ((320, 200), 'RGB', True, True) for row in received)
     assert all(entry['blocks'][0]['x0'] == 12 for entry in response.json()['images'])
+
+@pytest.mark.parametrize('enabled', [True, False])
+def test_enhancement_preview_pixels_without_ocr_or_state_change(client, monkeypatch, enabled):
+    import base64
+    project, item = make_project(client)
+    route = f"/api/projects/{project['id']}"
+    before = client.get(route).json()
+    monkeypatch.setattr('comic_studio.main.recognize_image', lambda *a, **k: pytest.fail('preview must not run OCR'))
+    response = client.post(route + '/enhancement-preview', json={
+        'image_id': item['id'], 'enhancement': {'enabled': enabled,
+        'upscale': {'enabled': True}, 'grayscale': {'enabled': True}},
+    })
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result['active'] == enabled
+    with Image.open(io.BytesIO(base64.b64decode(result['image'].split(',', 1)[1]))) as image:
+        assert image.size == ((640, 400) if enabled else (320, 200))
+        assert image.mode == ('L' if enabled else 'RGB')
+    assert client.get(route).json() == before
+    original = client.get(route + f"/images/{item['id']}/content")
+    assert original.content == png_bytes()
+
+
+def test_enhancement_preview_rejects_errors_without_fallback(client, monkeypatch):
+    project, item = make_project(client)
+    route = f"/api/projects/{project['id']}/enhancement-preview"
+    payload = {'image_id': item['id'], 'enhancement': {'enabled': True, 'grayscale': {'enabled': True}}}
+    monkeypatch.setattr('comic_studio.main.prepare_document', lambda *a: (_ for _ in ()).throw(ValueError('stage failed')))
+    response = client.post(route, json=payload)
+    assert response.status_code == 400 and 'image' not in response.json()
+    assert client.post(route, json={**payload, 'image_id': 'missing'}).status_code == 404
+    assert client.post(route, json={**payload, 'page_mode': 'comic'}).status_code == 422
+    assert client.post(route, json={**payload, 'enhancement': {'threshold': {'window': 4}}}).status_code == 422

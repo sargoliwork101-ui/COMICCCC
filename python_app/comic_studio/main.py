@@ -35,7 +35,7 @@ from .exporter import build_docx, build_images_zip, build_pdf, build_pptx, build
 from .watermark_render import has_active_watermark
 from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, _INSTALL_LOCK, recognize_image
 from .ocr_filters import prepare_ocr_photo
-from .document_enhancement import EnhancementSettings, run_document_ocr
+from .document_enhancement import EnhancementSettings, prepare_document, run_document_ocr
 from .ocr_grouping import organize_ocr_blocks
 from .ocr_managed import (
     _stop_lingering_surya_server,
@@ -64,7 +64,7 @@ from .license_guard import (
 )
 from .local_nmt import DEFAULT_LOCAL_NMT_MODEL, LOCAL_NMT_MODELS, LocalNmtError
 from .schemas import (
-    AiConnectionTest, AiSettings, BackupRequest, ContextPreviewRequest, ContextStartRequest, ContextStepRequest, ContextTextRequest, EngineDownloadRequest, EngineTestRequest, EngineUpdateCheckRequest, EngineUpdateRequest, ExportRequest,
+    EnhancementPreviewRequest, AiConnectionTest, AiSettings, BackupRequest, ContextPreviewRequest, ContextStartRequest, ContextStepRequest, ContextTextRequest, EngineDownloadRequest, EngineTestRequest, EngineUpdateCheckRequest, EngineUpdateRequest, ExportRequest,
     LicenseActivateRequest, LocalLoginRequest, LocalNmtModelActionRequest, LocalNmtTestRequest, LocalPasswordUpdateRequest, OcrRequest, ProjectCreate,
     ResourceBudget, SessionRequest, StateUpdate, StorageFolderPickRequest, StorageSettingsUpdate, TextTranslateRequest, TranslateRequest,
 )
@@ -1297,6 +1297,38 @@ def create_app() -> FastAPI:
             await run_in_threadpool(registry.unload_all)
         activity.add(f"آزمایش تمام شد؛ {len(blocks)} تکه متن تشخیص داده شد", "success", 1.0)
         return {"engine": engine_id, "imageId": values.image_id, "blocks": blocks, "memory": registry.memory_status()}
+
+    @app.post("/api/projects/{project_id}/enhancement-preview")
+    async def enhancement_preview(project_id: str, values: EnhancementPreviewRequest) -> dict[str, Any]:
+        require_module_license("ocr")
+        project(project_id)
+        try:
+            path = store.image_path(project_id, values.image_id)
+        except (KeyError, FileNotFoundError) as exc:
+            raise HTTPException(404, "صفحهٔ پیش‌نمایش پیدا نشد.") from exc
+
+        def render_preview():
+            import io
+            from PIL import Image
+            # Preview is explicitly this filter chain, never the legacy fallback.
+            # No OCR, state writes, model loads or source replacements occur here.
+            try:
+                with Image.open(path) as source:
+                    if source.width * source.height > 16_000_000:
+                        raise ValueError("Preview exceeds 16 megapixels")
+                    active = values.enhancement.active("document")
+                    result = prepare_document(source, values.enhancement) if active else source.copy()
+                    try:
+                        with io.BytesIO() as buffer:
+                            result.save(buffer, format="PNG")
+                            encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+                        return {"image": "data:image/png;base64," + encoded,
+                                "width": result.width, "height": result.height, "active": active}
+                    finally:
+                        result.close()
+            except (ValueError, OSError, RuntimeError) as exc:
+                raise HTTPException(400, "ساخت پیش‌نمایش ناموفق بود؛ تنظیمات یا اندازهٔ تصویر را بررسی کنید.") from exc
+        return await run_in_threadpool(render_preview)
 
     @app.post("/api/projects/{project_id}/ocr")
     async def run_ocr(project_id: str, values: OcrRequest, http_request: Request) -> dict[str, Any]:

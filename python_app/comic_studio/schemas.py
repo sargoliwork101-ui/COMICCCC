@@ -34,6 +34,12 @@ class OcrRequest(BaseModel):
     batch_total: int | None = Field(default=None, ge=1)
 
 
+class EnhancementPreviewRequest(BaseModel):
+    image_id: str
+    page_mode: Literal["document"] = "document"
+    enhancement: EnhancementSettings = Field(default_factory=EnhancementSettings)
+
+
 class TranslateRequest(BaseModel):
     skill: str | None = Field(default=None, max_length=4000)
     call_id: str | None = None
