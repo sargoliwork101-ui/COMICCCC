@@ -52,14 +52,16 @@ async function verifyEnhancementLocation(browser) {
       const canvas = document.createElement('canvas'); canvas.width = 600; canvas.height = 1800;
       const context = canvas.getContext('2d'); context.fillStyle = 'white'; context.fillRect(0, 0, 600, 1800);
       context.fillStyle = 'black'; for (let y = 0; y < 1800; y += 30) context.fillText(`Line ${y}`, 20, y + 15);
-      window.testPreviewImage = canvas.toDataURL(); window.previewCalls = 0; window.previewDone = 0;
+      window.testPreviewImage = canvas.toDataURL();
+      const scaled = document.createElement('canvas'); scaled.width = 1200; scaled.height = 3600; scaled.getContext('2d').drawImage(canvas, 0, 0, 1200, 3600); window.testResultImage = scaled.toDataURL();
+      window.previewCalls = 0; window.previewDone = 0;
       DocumentEnhancement.mount(document.getElementById('panel'), () => {}, {
         pages: () => [{ id: 'one', name: 'test page', original: window.testPreviewImage }],
         render: async () => {
           window.previewCalls += 1;
           await new Promise(resolve => setTimeout(resolve, 150));
           window.previewDone += 1;
-          return { image: window.testPreviewImage, width: 600, height: 1800, active: true };
+          return { image: window.testResultImage, width: 1200, height: 3600, active: true };
         },
       });
       DocumentEnhancement.setDocumentMode(true);
@@ -79,8 +81,29 @@ async function verifyEnhancementLocation(browser) {
     await tab.waitForFunction(() => window.previewDone === 2 && document.querySelector('.enhancement-preview [role=status]').textContent.includes('آماده است'));
     await tab.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const finalView = await tab.$$eval('.enhancement-image-viewport', nodes => nodes.map(node => [node.scrollLeft, node.scrollTop, node.querySelector('img').getBoundingClientRect().width]));
-    assert.deepEqual(finalView, [[100, 700, 900], [100, 830, 900]], 'decoded refresh preserves latest pan including interaction during processing');
+    assert.deepEqual(finalView, [[100, 830, 900], [100, 830, 900]], 'decoded refresh preserves latest pan including interaction during processing');
     console.log('PASS: real Chromium preserves original/result pan through control rebuild and decoded live refresh');
+    await tab.evaluate(() => {
+      const result = document.querySelectorAll('.enhancement-image-viewport')[1]; const bounds = result.getBoundingClientRect();
+      result.dispatchEvent(new WheelEvent('wheel', { ctrlKey: true, deltaY: -100, clientX: bounds.left + 60, clientY: bounds.top + 60, cancelable: true }));
+    });
+    const linked = await tab.$$eval('.enhancement-image-viewport', nodes => nodes.map(node => [node.scrollLeft, node.scrollTop, node.querySelector('img').getBoundingClientRect().width]));
+    assert.deepEqual(linked[0], linked[1], 'zoom from enhanced image must match original scale and region despite 2x intrinsic resolution');
+    await tab.evaluate(() => {
+      const original = document.querySelector('.enhancement-image-viewport');
+      original.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 9, button: 0, clientX: 100, clientY: 100 }));
+      original.dispatchEvent(new PointerEvent('pointermove', { pointerId: 9, clientX: 70, clientY: 60 }));
+      original.dispatchEvent(new PointerEvent('pointerup', { pointerId: 9 }));
+    });
+    const panned = await tab.$$eval('.enhancement-image-viewport', nodes => nodes.map(node => [node.scrollLeft, node.scrollTop]));
+    assert.deepEqual(panned[0], panned[1], 'pan from original must move enhanced image too');
+    await tab.evaluate(() => { document.querySelectorAll('.enhancement-image-viewport')[1].scrollTop = 1000; });
+    await sleep(40);
+    assert.deepEqual(await tab.$$eval('.enhancement-image-viewport', nodes => nodes.map(node => node.scrollTop)), [1000, 1000], 'native scroll must synchronize without feedback drift');
+    await tab.evaluate(() => { document.querySelectorAll('.enhancement-image-viewport')[1].dispatchEvent(new MouseEvent('dblclick')); });
+    assert.deepEqual(await tab.$$eval('.enhancement-image-viewport', nodes => nodes.map(node => [node.scrollLeft, node.scrollTop, node.querySelector('img').style.width])), [[0, 0, '100%'], [0, 0, '100%']], 'fit must reset both views together');
+    console.log('PASS: comparison zoom, pan, native scroll and fit synchronize across different intrinsic image sizes');
+
   } finally { await tab.close(); }
 }
 

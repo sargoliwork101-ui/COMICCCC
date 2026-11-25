@@ -204,6 +204,7 @@
           image.onload = () => {
             image.style.height = oldHeight;
             viewport.scrollLeft = left; viewport.scrollTop = top; image.onload = null;
+            syncNavigation(viewport);
           };
           image.src = result.image;
           viewport.scrollLeft = left; viewport.scrollTop = top;
@@ -215,13 +216,13 @@
         for (const [title, url] of [['تصویر اصلی', page.original], ['نتیجهٔ تنظیمات', result.image]]) {
           const figure = el('figure'); figure.append(el('figcaption', title));
           const viewport = el('div', null, 'enhancement-image-viewport'); const image = el('img'); image.alt = title; image.src = url;
-          viewport.append(image); enableNavigation(viewport, image); figure.append(viewport); comparison.append(figure);
+          viewport.append(image); figure.append(viewport); comparison.append(figure); enableNavigation(viewport, image);
         }
         zoom.addEventListener('change', () => {
           comparison.classList.toggle('actual-size', zoom.checked);
-          comparison.querySelectorAll('.enhancement-image-viewport').forEach(viewport => viewport.dispatchEvent(new CustomEvent('preview-scale', { detail: zoom.checked ? 'actual' : 'fit' })));
+          comparison.querySelector('.enhancement-image-viewport').dispatchEvent(new CustomEvent('preview-scale', { detail: zoom.checked ? 'actual' : 'fit' }));
         });
-        output.append(el('p', 'Ctrl + اسکرول: زوم حول نشانگر · کشیدن تصویر: جابه‌جایی · دوبار کلیک: نمایش کامل', 'hint'));
+        output.append(el('p', 'زوم و جابه‌جایی دو تصویر همگام است · Ctrl + اسکرول: زوم · کشیدن: جابه‌جایی · دوبار کلیک: نمایش کامل', 'hint'));
         output.append(zoomLabel, comparison);
         }
         status.textContent = result.active
@@ -243,6 +244,26 @@
     toolbar.append(label, update); section.append(toolbar, status, output); workspace.append(section); refreshPages();
     output.append(el('p', 'پیش‌نمایش صفحهٔ انتخابی به‌صورت خودکار همین‌جا نمایش داده می‌شود.', 'enhancement-preview-empty'));
   }
+  function syncNavigation(source) {
+    const comparison = source.closest('.enhancement-comparison');
+    if (!comparison || comparison._syncing) return;
+    comparison._syncing = true;
+    try {
+      const image = source.querySelector('img');
+      source._syncedScroll = [source.scrollLeft, source.scrollTop];
+      for (const peer of comparison.querySelectorAll('.enhancement-image-viewport')) {
+        if (peer === source) continue;
+        const peerImage = peer.querySelector('img');
+        // Match display/document scale, not natural pixel size: the result may
+        // contain 2x/3x more pixels but represents exactly the same page region.
+        peerImage.style.width = image.style.width;
+        peerImage.style.maxWidth = image.style.maxWidth;
+        if (Math.abs(peer.scrollLeft - source.scrollLeft) > 0.5) peer.scrollLeft = source.scrollLeft;
+        if (Math.abs(peer.scrollTop - source.scrollTop) > 0.5) peer.scrollTop = source.scrollTop;
+        peer._syncedScroll = [peer.scrollLeft, peer.scrollTop];
+      }
+    } finally { comparison._syncing = false; }
+  }
   function enableNavigation(viewport, image) {
     let drag = null;
     image.draggable = false; viewport.tabIndex = 0;
@@ -250,10 +271,11 @@
     const fit = () => {
       image.style.width = '100%'; image.style.maxWidth = '100%';
       viewport.scrollLeft = 0; viewport.scrollTop = 0;
+      syncNavigation(viewport);
     };
     viewport.addEventListener('preview-scale', event => {
       if (event.detail === 'fit') fit();
-      else { image.style.width = `${image.naturalWidth || image.width}px`; image.style.maxWidth = 'none'; }
+      else { const original = viewport.closest('.enhancement-comparison').querySelector('img'); image.style.width = `${original.naturalWidth || image.naturalWidth || image.width}px`; image.style.maxWidth = 'none'; syncNavigation(viewport); }
     });
     viewport.addEventListener('dblclick', fit);
     viewport.addEventListener('wheel', event => {
@@ -264,12 +286,13 @@
       const oldWidth = image.getBoundingClientRect().width;
       if (!oldWidth) return;
       const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.clientHeight : 1);
-      const width = Math.max(32, Math.min(image.naturalWidth * 8, oldWidth * Math.exp(-Math.max(-200, Math.min(200, delta)) * 0.003)));
+      const width = Math.max(32, Math.min((viewport.closest('.enhancement-comparison')?.querySelector('img').naturalWidth || image.naturalWidth) * 8, oldWidth * Math.exp(-Math.max(-200, Math.min(200, delta)) * 0.003)));
       const ratio = width / oldWidth;
       const left = (viewport.scrollLeft + x) * ratio - x;
       const top = (viewport.scrollTop + y) * ratio - y;
       image.style.width = `${width}px`; image.style.maxWidth = 'none';
       viewport.scrollLeft = left; viewport.scrollTop = top;
+      syncNavigation(viewport);
     }, { passive: false });
     viewport.addEventListener('pointerdown', event => {
       if (event.button !== 0) return;
@@ -280,6 +303,12 @@
       if (!drag || drag.id !== event.pointerId) return;
       viewport.scrollLeft = drag.left - (event.clientX - drag.x);
       viewport.scrollTop = drag.top - (event.clientY - drag.y);
+      syncNavigation(viewport);
+    });
+    viewport.addEventListener('scroll', () => {
+      const last = viewport._syncedScroll;
+      if (last && Math.abs(last[0] - viewport.scrollLeft) < 0.5 && Math.abs(last[1] - viewport.scrollTop) < 0.5) return;
+      syncNavigation(viewport);
     });
     const stop = () => { drag = null; viewport.classList.remove('is-panning'); };
     viewport.addEventListener('pointerup', stop); viewport.addEventListener('pointercancel', stop); viewport.addEventListener('lostpointercapture', stop);

@@ -353,6 +353,8 @@ function check(name, condition) {
   const wheel = new window.WheelEvent('wheel', { ctrlKey: true, deltaY: -100, clientX: 50, clientY: 50, cancelable: true });
   navViewport.dispatchEvent(wheel);
   check('Ctrl wheel zooms within preview and prevents page zoom', wheel.defaultPrevented && parseFloat(navImage.style.width) > 200 && navViewport.scrollLeft > 0);
+  const peerViewport = enhancementPanel.querySelectorAll('.enhancement-image-viewport')[1];
+  check('Ctrl wheel synchronizes peer scale and position', peerViewport.querySelector('img').style.width === navImage.style.width && peerViewport.scrollLeft === navViewport.scrollLeft && peerViewport.scrollTop === navViewport.scrollTop);
   const widthAfterZoom = navImage.style.width;
   navViewport.dispatchEvent(new window.WheelEvent('wheel', { deltaY: -100, cancelable: true }));
   check('plain wheel does not change preview scale', navImage.style.width === widthAfterZoom);
@@ -363,6 +365,7 @@ function check(name, condition) {
   navViewport.scrollLeft = 100; navViewport.scrollTop = 100;
   previewPointer('pointerdown', 80, 80); previewPointer('pointermove', 50, 40);
   check('dragging preview pans image', navViewport.scrollLeft === 130 && navViewport.scrollTop === 140 && navViewport.classList.contains('is-panning'));
+  check('panning synchronizes peer position', peerViewport.scrollLeft === 130 && peerViewport.scrollTop === 140);
   previewPointer('pointerup', 50, 40);
   navViewport.dispatchEvent(new window.MouseEvent('dblclick'));
   check('double click fits image and clears pan', navImage.style.width === '100%' && navViewport.scrollLeft === 0 && !navViewport.classList.contains('is-panning'));
@@ -863,7 +866,7 @@ function check(name, condition) {
   check('translation progress dialog closes after success', !$('translationDialog').open);
   check('finishing translation automatically selects translation display mode', $('overlayMode').value === 'translation' && $('exportOverlayMode').value === 'translation');
   check('finishing translation places translated text on the image', renderedBlocks[0].tr === 'ترجمهٔ تازه' && !renderedBlocks[0]._plainText);
-  check('v4.79 completed translation report counts the persisted tr field, not a nonexistent translated field', $('jobReportBody').textContent.includes('درصد ترجمه‌شده: 100٪') && $('jobReportBody').textContent.includes('ترجمه‌شده: 1 از 1 متن') && !$('jobReportBody').textContent.includes('ترجمه‌نشده:'));
+  check('v4.80 completed translation report counts the persisted tr field, not a nonexistent translated field', $('jobReportBody').textContent.includes('درصد ترجمه‌شده: 100٪') && $('jobReportBody').textContent.includes('ترجمه‌شده: 1 از 1 متن') && !$('jobReportBody').textContent.includes('ترجمه‌نشده:'));
   await vm.runInContext('openEditor(state.project.images[0].id)', context);
   const retranslateButton = [...$('blockList').querySelectorAll('button')].find((button) => button.textContent === 'ترجمهٔ دوباره');
   retranslateButton.click(); await sleep(20);
@@ -2000,8 +2003,8 @@ function check(name, condition) {
             downloadSizeGb: 2.4,
             weightsDownloadGb: 1.9,
             runtimeDownloadGb: 2.85,
-            fullDownloadSizeGb: 4.79,
-            totalDownloadGb: 4.79,
+            fullDownloadSizeGb: 4.80,
+            totalDownloadGb: 4.80,
           },
           {
             id: 'tesseract',
@@ -2338,7 +2341,7 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.79 processes 32 OCR pages in order without mid-batch engine recycling, places each page before the next, reuses grid images, and clears preview bitmaps',
+      'v4.80 processes 32 OCR pages in order without mid-batch engine recycling, places each page before the next, reuses grid images, and clears preview bitmaps',
       v399PerPageCheck.img1Reused === true
         && v399PerPageCheck.sequence === Array.from({length: 32}, (_, i) => `ocr:pg-${i + 1}:keep=${i < 31} -> placed:pg-${i + 1}`).join(' -> ')
         && v399PerPageCheck.hadPreviewSrc === true
@@ -2347,7 +2350,7 @@ function check(name, condition) {
     );
   }
 
-  // v4.79: persisted content, not source/AI flags/empty HTML, defines completion.
+  // v4.80: persisted content, not source/AI flags/empty HTML, defines completion.
   {
     const parserContext = vm.createContext({document: window.document, module: {exports: {}}});
     vm.runInContext(fs.readFileSync(path.join(root, 'typeset.js'), 'utf8'), parserContext);
@@ -2377,10 +2380,10 @@ function check(name, condition) {
       })()
     `, context);
     window.Typeset.richHtmlWords = originalRichParser;
-    check('v4.79 translation stats count saved plain/rich text and exclude empty markup, stale flags, disabled and source-free blocks', stats.total === 5 && stats.translated === 2 && stats.untranslated === 3 && stats.percentage === 40 && stats.zero && stats.partial);
+    check('v4.80 translation stats count saved plain/rich text and exclude empty markup, stale flags, disabled and source-free blocks', stats.total === 5 && stats.translated === 2 && stats.untranslated === 3 && stats.percentage === 40 && stats.zero && stats.partial);
   }
 
-  // v4.79: localize presentation without destroying copyable diagnostics.
+  // v4.80: localize presentation without destroying copyable diagnostics.
   {
     const noticeCheck = vm.runInContext(`
       (() => {
@@ -2406,10 +2409,10 @@ function check(name, condition) {
           && !output.includes('/api/') && noMarkup && noStaleCopy;
       })()
     `, context);
-    check('v4.79 Persian notices preserve exact technical diagnostics, error semantics and text-only safety', noticeCheck);
+    check('v4.80 Persian notices preserve exact technical diagnostics, error semantics and text-only safety', noticeCheck);
   }
 
-  // v4.79: offscreen image eviction must preserve metadata, click handlers,
+  // v4.80: offscreen image eviction must preserve metadata, click handlers,
   // reloads, and ignore observer callbacks queued by an older grid/project.
   {
     const result = await vm.runInContext(`
@@ -2458,7 +2461,7 @@ function check(name, condition) {
         }
       })()
     `, context);
-    check('v4.79 bounds grid pixel ownership to visible pages, preserves reload/click metadata, and ignores stale/detached callbacks', result);
+    check('v4.80 bounds grid pixel ownership to visible pages, preserves reload/click metadata, and ignores stale/detached callbacks', result);
   }
 
   // v4.00: Version 4.00 + Optional Custom Storage & Downloads Directory Settings UI (#storageBtn, #modelsStorageBtn, #storageDialog)
@@ -2567,7 +2570,7 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.30 displays version 4.79 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      'v4.00/v4.30 displays version 4.80 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
       v400StorageCheck.verHas426 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
@@ -4906,7 +4909,7 @@ function check(name, condition) {
       const detail = document.getElementById('serverAlertDetail').textContent || '';
       window.fetch = async (url, opts = {}) => {
         const parsed = new URL(url, 'http://127.0.0.1:8765');
-        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.79' });
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'HaSaYa Studio', version: '4.80' });
         return origFetch(url, opts);
       };
       document.getElementById('serverAlertRetry').click();
