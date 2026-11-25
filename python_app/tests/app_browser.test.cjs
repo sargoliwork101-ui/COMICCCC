@@ -401,6 +401,37 @@ main()
       DocumentEnhancement.setDocumentMode(document.getElementById('ocrPageMode').value === 'document');
     });
     console.log('PASS: enhancement checkbox rows, RTL labels and advanced fields fit desktop/mobile in both themes');
+    await page.evaluate(() => { showDialog('ocrDialog'); document.getElementById('ocrProfilesPanel').open = true; });
+    await page.waitForFunction(() => !document.getElementById('ocrProfileCreate').disabled);
+    await page.$eval('#ocrProfileName', node => { node.value = 'Browser OCR preset'; });
+    await page.$eval('#ocrConfidence', node => { node.value = '0.55'; });
+    const callsBeforeProfiles = ocrCalls.length;
+    await page.click('#ocrProfileCreate');
+    await page.waitForFunction(() => document.getElementById('ocrProfileStatus').textContent.includes('پروفایل ذخیره شد'));
+    const exportedProfileDownload = nextDownload(cdp, downloads);
+    await page.click('#ocrProfileExport'); const profileFile = await exportedProfileDownload;
+    const exportedProfile = JSON.parse(fs.readFileSync(profileFile, 'utf8'));
+    assert.equal(exportedProfile.settings.min_confidence, 0.55);
+    assert.equal(exportedProfile.format, 'hasaya-ocr-profile');
+    assert.deepEqual(Object.keys(exportedProfile).sort(), ['format', 'name', 'settings', 'version']);
+    await page.$eval('#ocrConfidence', node => { node.value = '0.35'; });
+    await page.click('#ocrProfileApply'); await page.waitForSelector('#appModalDialog[open]'); await page.click('#appModalConfirm');
+    await page.waitForFunction(() => document.getElementById('ocrProfileStatus').textContent.includes('پروفایل اعمال'));
+    assert.equal(await page.$eval('#ocrConfidence', node => node.value), '0.55');
+    assert.equal(ocrCalls.length, callsBeforeProfiles, 'applying OCR settings must never start OCR');
+    exportedProfile.name = 'Imported OCR preset';
+    const importProfileFile = path.join(downloads, 'ocr-profile-import.json'); fs.writeFileSync(importProfileFile, JSON.stringify(exportedProfile));
+    const profileInput = await page.$('#ocrProfileImport'); await profileInput.uploadFile(importProfileFile);
+    await page.waitForFunction(() => document.getElementById('ocrProfileStatus').textContent.includes('فایل اعتبارسنجی'));
+    assert.equal((await api(base, '/api/ocr-profiles')).length, 2);
+    for (let count = 0; count < 2; count += 1) {
+      if (count) await page.$eval('#ocrProfileSelect', node => { node.selectedIndex = 1; node.dispatchEvent(new Event('change')); });
+      await page.click('#ocrProfileDelete'); await page.waitForSelector('#appModalDialog[open]'); await page.click('#appModalConfirm');
+      await page.waitForFunction(() => document.getElementById('ocrProfileStatus').textContent.includes('پروفایل حذف شد'));
+    }
+    await page.evaluate(async () => { document.getElementById('ocrConfidence').value = '0.35'; collectOcrSettings(); await saveProject(); document.getElementById('ocrProfilesPanel').open = false; closeDialog('ocrDialog'); });
+    assert.equal(ocrCalls.length, callsBeforeProfiles);
+    console.log('PASS: browser saves, exports, imports, applies and deletes OCR profiles without running OCR');
     const progressVisual = await page.evaluate(() => {
       setProgress('jobProgress', null, true);
       const bar = document.getElementById('jobProgress').closest('.bar');

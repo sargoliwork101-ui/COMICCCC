@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>HaSaYa Studio</title>
-  <link rel="stylesheet" href="/style.css?v=4.80">
-  <link rel="stylesheet" href="/rich-editor.css?v=4.80">
+  <link rel="stylesheet" href="/style.css?v=4.81">
+  <link rel="stylesheet" href="/rich-editor.css?v=4.81">
 </head>
 <body>
   <header class="topbar">
@@ -297,6 +297,23 @@
 
   <dialog id="ocrDialog" class="dlg ocr-dialog">
     <form method="dialog" class="dialog-head"><div class="dialog-title-row"><h2>OCR آفلاین</h2><span id="ocrExecBadge" class="exec-badge is-local hidden" title="تمام ۱۴ موتور OCR مستقیماً روی کامپیوتر خود شما اجرا می‌شوند و هنگام خواندن صفحات به اینترنت نیازی ندارند">اجرا روی سیستم شما (آفلاین)</span></div><button class="icon" value="cancel" aria-label="بستن">×</button></form>
+    <details id="ocrProfilesPanel" class="ocr-profiles-panel">
+      <summary>پروفایل‌ها و ذخیره / بازیابی تنظیمات OCR</summary>
+      <div class="ocr-profile-fields">
+        <label>پروفایل ذخیره‌شده<select id="ocrProfileSelect"><option value="">انتخاب پروفایل…</option></select></label>
+        <label>نام پروفایل<input id="ocrProfileName" maxlength="80" placeholder="مثلاً کتاب انگلیسی کم‌کنتراست"></label>
+      </div>
+      <div class="ocr-profile-actions">
+        <button id="ocrProfileApply" class="bt" type="button">اعمال پروفایل</button>
+        <button id="ocrProfileCreate" class="bt" type="button">ذخیره با نام جدید</button>
+        <button id="ocrProfileUpdate" class="bt" type="button">به‌روزرسانی پروفایل</button>
+        <button id="ocrProfileDelete" class="bt danger" type="button">حذف پروفایل</button>
+        <button id="ocrProfileExport" class="bt" type="button">خروجی تنظیمات فعلی</button>
+        <label class="bt file-button">ورود فایل پروفایل<input id="ocrProfileImport" type="file" accept="application/json,.json"></label>
+      </div>
+      <p class="hint">پروفایل‌ها روی همین سیستم و مستقل از پروژه ذخیره می‌شوند. فایل JSON فقط تنظیمات OCR دارد، نه متن، تصویر یا کلید API. اعمال پروفایل OCR را شروع نمی‌کند؛ سپس می‌توانید پیش‌نمایش را بررسی کنید.</p>
+      <p id="ocrProfileStatus" class="hint" role="status" aria-live="polite"></p>
+    </details>
     <div class="form-grid">
       <label>نوع صفحه و چیدمان<select id="ocrPageMode"><option value="comic">کمیک و مانگا (حباب گفتگو)</option><option value="document">کتاب، مقاله و جزوه (پاراگراف و ستون)</option></select></label>
       <label>موتور OCR<select id="ocrEngine" title="علامت کنار هر موتور: ✓ آماده به کار · ◐ نصب‌شده (نیازمند فایل زبان انتخابی) · ⬇ نصب‌نشده"></select></label>
@@ -1042,13 +1059,14 @@
     </div>
   </div>
   <div id="toast" role="status" popover="manual"></div>
-<script src="/typeset.js?v=4.80"></script>
-<script src="/groups.js?v=4.80"></script>
-<script src="/rich-sanitize.js?v=4.80"></script>
-<script src="/rich-editor.js?v=4.80"></script>
-<script src="/inline-edit-session.js?v=4.80"></script>
-<script src="/help-guide.js?v=4.80"></script>
-<script src="/document-enhancement.js?v=4.80"></script>
-<script src="/app.js?v=4.80"></script>
+<script src="/typeset.js?v=4.81"></script>
+<script src="/groups.js?v=4.81"></script>
+<script src="/rich-sanitize.js?v=4.81"></script>
+<script src="/rich-editor.js?v=4.81"></script>
+<script src="/inline-edit-session.js?v=4.81"></script>
+<script src="/help-guide.js?v=4.81"></script>
+<script src="/document-enhancement.js?v=4.81"></script>
+<script src="/ocr-profiles.js?v=4.81"></script>
+<script src="/app.js?v=4.81"></script>
 </body>
 </html>

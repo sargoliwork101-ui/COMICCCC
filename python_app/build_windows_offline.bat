@@ -1,22 +1,22 @@
 @echo off
-rem HaSaYa Studio 4.80 - Windows offline EXE / Setup builder launcher.
+rem HaSaYa Studio 4.81 - Windows offline EXE / Setup builder launcher.
 rem The questions (which package, which output folder) are asked by the builder itself
 rem (Python), not by this file: the old `set /p` menu died silently on the seller's
 rem machine right after the output-folder question.
 rem Every run is recorded in python_app\build_offline.log
 setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul 2>nul
-title Build Offline EXE ^& Setup - HaSaYa Studio 4.80
+title Build Offline EXE ^& Setup - HaSaYa Studio 4.81
 
 cd /d "%~dp0"
 set "APP_DIR=%CD%"
 set "VENV_PY=%APP_DIR%\.venv\Scripts\python.exe"
 set "WHEELHOUSE_DIR=%APP_DIR%\wheelhouse"
 set "DEFAULT_OUT_DIR=%APP_DIR%\dist"
-set "APP_VERSION=4.80"
+set "APP_VERSION=4.81"
 
 echo ====================================================================
-echo   HaSaYa Studio 4.80 - Offline Windows EXE ^& Setup Builder
+echo   HaSaYa Studio 4.81 - Offline Windows EXE ^& Setup Builder
 echo ====================================================================
 echo.
 

@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.80"
+    assert health.json()["version"] == "4.81"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -3344,7 +3344,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.80"
+    assert APP_VERSION == "4.81"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "HaSaYaStudio"
@@ -5925,3 +5925,55 @@ def test_enhancement_settings_saved_and_preview_does_not_reset(client):
     preview = client.post(route + '/enhancement-preview', json={'image_id': item['id'], 'enhancement': config})
     assert preview.status_code == 200, preview.text
     assert client.get(route).json()['settings']['documentEnhancement'] == config
+
+
+def test_named_ocr_profiles_crud_roundtrip_and_project_isolation(client):
+    project, _ = make_project(client)
+    before = client.get(f"/api/projects/{project['id']}").json()
+    assert client.get('/api/ocr-profiles').json() == []
+    payload = {'format': 'hasaya-ocr-profile', 'version': 1, 'name': 'کتاب انگلیسی', 'settings': {
+        'engine': 'rapidocr-v6', 'page_mode': 'document', 'min_confidence': .6,
+        'enhancement': {'enabled': True, 'contrast': {'enabled': True, 'strength': 1.8},
+                        'order': ['contrast', 'grayscale', 'upscale', 'clahe', 'denoise', 'unsharp', 'threshold']},
+    }}
+    response = client.post('/api/ocr-profiles', json=payload)
+    assert response.status_code == 200, response.text
+    saved = response.json()
+    assert saved['settings']['enhancement']['order'][0] == 'contrast'
+    assert client.get('/api/ocr-profiles').json() == [saved]
+    assert client.post('/api/ocr-profiles', json=payload).status_code == 400
+    saved['name'] = 'پروفایل ویرایش شده'
+    exported = {key: value for key, value in saved.items() if key != 'id'}
+    updated = client.put('/api/ocr-profiles/' + saved['id'], json=exported)
+    assert updated.status_code == 200, updated.text
+    # A fresh read of the disk-backed store retains every setting.
+    from comic_studio.ocr_profiles import list_profiles
+    assert list_profiles() == [updated.json()]
+    exported['name'] = 'واردشده'
+    imported = client.post('/api/ocr-profiles', json=exported)
+    assert imported.status_code == 200
+    assert imported.json()['settings'] == updated.json()['settings']
+    assert client.delete('/api/ocr-profiles/' + saved['id']).status_code == 200
+    assert client.delete('/api/ocr-profiles/' + saved['id']).status_code == 404
+    assert len(client.get('/api/ocr-profiles').json()) == 1
+    assert client.get(f"/api/projects/{project['id']}").json() == before
+
+
+@pytest.mark.parametrize('bad', [
+    {'name': '   ', 'settings': {}}, {'name': 'x', 'version': 2, 'settings': {}},
+    {'name': 'x', 'settings': {'min_confidence': 9}},
+    {'name': 'x', 'settings': {'api_key': 'must-not-be-stored'}},
+    {'name': 'x', 'settings': {'enhancement': {'order': ['contrast']}}},
+])
+def test_ocr_profile_invalid_import_has_no_partial_save(client, bad):
+    assert client.post('/api/ocr-profiles', json=bad).status_code == 422
+    assert client.get('/api/ocr-profiles').json() == []
+
+
+def test_corrupt_ocr_profiles_are_not_silently_overwritten(client):
+    from comic_studio.paths import data_dir
+    path = data_dir() / 'ocr-profiles.json'
+    path.write_text('broken file', encoding='utf-8')
+    assert client.get('/api/ocr-profiles').status_code == 400
+    assert client.post('/api/ocr-profiles', json={'name': 'new', 'settings': {}}).status_code == 400
+    assert path.read_text(encoding='utf-8') == 'broken file'

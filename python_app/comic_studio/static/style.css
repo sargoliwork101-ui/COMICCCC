@@ -758,3 +758,12 @@ body.auth-locked #mainwrap,body.auth-locked #dock,body.auth-locked #menuBtn,body
 .enhancement-image-viewport.is-panning{cursor:grabbing}
 .enhancement-image-viewport img{user-select:none;-webkit-user-drag:none}
 .enhancement-controls.is-reordering .enhancement-stage-head{cursor:grab}
+
+.ocr-profiles-panel{padding:10px 12px;margin-block:12px;border:1px solid var(--line);border-radius:9px;background:var(--surface)}
+.ocr-profiles-panel>summary{cursor:pointer;font-size:12px;font-weight:600;color:var(--text)}
+.ocr-profile-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-block:12px}
+.ocr-profile-fields>label{min-width:0}
+.ocr-profile-actions{display:flex;flex-wrap:wrap;gap:6px}
+.ocr-profile-actions>.bt{font-size:11px;padding:6px 10px}
+#ocrProfileStatus{overflow-wrap:anywhere}
+@media(max-width:600px){.ocr-profile-fields{grid-template-columns:minmax(0,1fr)}}

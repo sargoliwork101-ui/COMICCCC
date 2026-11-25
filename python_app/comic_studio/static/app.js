@@ -1105,6 +1105,8 @@ function adoptProject(project, options = {}) {
   } else {
     $('ocrEngine').value = settings.ocrEngine || 'rapidocr-v6';
   }
+  $('ocrConfidence').value = String(settings.ocrMinConfidence ?? 0.35);
+  $('ocrOnlySelected').checked = settings.ocrOnlySelected !== false;
   $('ocrContrast').checked = settings.contrast !== false;
   if ($('ocrContrastStrength')) { $('ocrContrastStrength').value = String(settings.contrastStrength ?? 1); $('ocrContrastStrength').disabled = !$('ocrContrast').checked; }
   if ($('ocrPhotoSharpen')) $('ocrPhotoSharpen').checked = settings.photoSharpen === true;
@@ -1751,6 +1753,37 @@ function ocrContrastStrength() {
   const value = Number($('ocrContrastStrength')?.value || 1);
   return Number.isFinite(value) ? Math.max(0.5, Math.min(3, value)) : 1;
 }
+function collectOcrProfileSettings() {
+  if (ocrRunning || jobBusy || state.modelBusy) throw new Error('ابتدا منتظر پایان عملیات جاری بمانید.');
+  const confidence = $('ocrConfidence').value.trim();
+  if (!$('ocrConfidence').checkValidity() || !$('ocrContrastStrength').checkValidity() || !window.DocumentEnhancement.validate()) throw new Error('مقادیر تنظیمات OCR را بررسی کنید.');
+  return {
+    engine: $('ocrEngine').value, language: $('ocrLanguage').value,
+    page_mode: normalizePageMode($('ocrPageMode').value), min_confidence: confidence === '' ? 0.35 : Number(confidence),
+    contrast: $('ocrContrast').checked, contrast_strength: ocrContrastStrength(), photo_sharpen: $('ocrPhotoSharpen').checked,
+    precise: $('ocrPrecise').checked, persian_preprocess: $('ocrPersianPreprocess').checked,
+    group_lines: $('ocrGroupLines').checked, erase_original: $('ocrErase').checked, only_selected: $('ocrOnlySelected').checked,
+    enhancement: window.DocumentEnhancement.collect(),
+  };
+}
+async function applyOcrProfileSettings(settings) {
+  if (!state.project || ocrRunning || jobBusy || state.modelBusy) throw new Error('ابتدا منتظر پایان عملیات جاری بمانید.');
+  const engine = state.engines.find(entry => entry.id === settings.engine && entry.selectable !== false);
+  if (!engine || !(engine.languages || []).includes(settings.language)) throw new Error('موتور یا زبان این پروفایل در این نسخه پشتیبانی نمی‌شود؛ تنظیمات فعلی تغییر نکرد.');
+  $('ocrPageMode').value = settings.page_mode; $('ocrLanguage').value = settings.language;
+  if ($('modelsPageMode')) $('modelsPageMode').value = settings.page_mode;
+  if ($('modelsLanguage')) $('modelsLanguage').value = settings.language;
+  if ($('testLanguage')) $('testLanguage').value = settings.language;
+  updateEngineOptions(settings.engine, { resort: true });
+  $('ocrEngine').value = settings.engine;
+  $('ocrConfidence').value = String(settings.min_confidence);
+  $('ocrContrastStrength').value = String(settings.contrast_strength); $('ocrContrastStrength').disabled = !settings.contrast;
+  for (const [id, key] of [['ocrContrast', 'contrast'], ['ocrPhotoSharpen', 'photo_sharpen'], ['ocrPrecise', 'precise'], ['ocrPersianPreprocess', 'persian_preprocess'], ['ocrGroupLines', 'group_lines'], ['ocrErase', 'erase_original'], ['ocrOnlySelected', 'only_selected']]) $(id).checked = settings[key];
+  state.project.settings.persianPreprocessCustomized = true;
+  window.DocumentEnhancement.load(settings.enhancement);
+  window.DocumentEnhancement.setDocumentMode(settings.page_mode === 'document');
+  collectOcrSettings(); updateOcrEngineStatus(); await saveProject();
+}
 function collectOcrSettings() {
   if (!state.project) return;
   state.project.settings = state.project.settings || {};
@@ -1758,6 +1791,8 @@ function collectOcrSettings() {
     ocrEngine: $('ocrEngine').value,
     ocrLanguage: $('ocrLanguage').value,
     ocrPageMode: normalizePageMode($('ocrPageMode')?.value),
+    ocrMinConfidence: $('ocrConfidence').value.trim() === '' ? 0.35 : Number($('ocrConfidence').value),
+    ocrOnlySelected: $('ocrOnlySelected').checked,
     contrast: $('ocrContrast').checked,
     contrastStrength: ocrContrastStrength(),
     photoSharpen: Boolean($('ocrPhotoSharpen')?.checked),
@@ -9484,6 +9519,8 @@ function bindEvents() {
     scheduleSave();
     if ($('modelsDialog')?.open) renderModels({ resort: true });
   });
+  window.OcrProfiles.mount({ api, json: jsonOptions, confirm: appConfirm, collect: collectOcrProfileSettings, apply: applyOcrProfileSettings });
+  ['ocrConfidence', 'ocrOnlySelected'].forEach(id => $(id).addEventListener('change', () => { collectOcrSettings(); scheduleSave(); }));
   window.DocumentEnhancement.mount($('documentEnhancement'), () => { collectOcrSettings(); scheduleSave(); }, {
     save: async () => { collectOcrSettings(); await saveProject(); },
     reset: () => {

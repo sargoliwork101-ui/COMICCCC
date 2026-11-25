@@ -52,7 +52,8 @@ from .paths import (
     pick_folder_dialog,
     project_root,
 )
-from . import context_run, pending_results
+from . import context_run, pending_results, ocr_profiles
+from .ocr_profiles import OcrProfile
 from . import resources
 from .license_guard import (
     LicenseError,
@@ -1297,6 +1298,43 @@ def create_app() -> FastAPI:
             await run_in_threadpool(registry.unload_all)
         activity.add(f"آزمایش تمام شد؛ {len(blocks)} تکه متن تشخیص داده شد", "success", 1.0)
         return {"engine": engine_id, "imageId": values.image_id, "blocks": blocks, "memory": registry.memory_status()}
+
+    def _ocr_profile_call(operation, *args):
+        try:
+            return operation(*args)
+        except KeyError as exc:
+            raise HTTPException(404, "پروفایل OCR پیدا نشد.") from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(500, "خواندن یا ذخیرهٔ پروفایل ناموفق بود؛ دسترسی پوشهٔ داده را بررسی کنید.") from exc
+
+    @app.get("/api/ocr-profiles")
+    def get_ocr_profiles():
+        require_module_license("ocr")
+        return _ocr_profile_call(ocr_profiles.list_profiles)
+
+    @app.post("/api/ocr-profiles")
+    def create_ocr_profile(values: OcrProfile):
+        require_module_license("ocr")
+        return _ocr_profile_call(ocr_profiles.save_profile, values)
+
+    @app.put("/api/ocr-profiles/{profile_id}")
+    def update_ocr_profile(profile_id: str, values: OcrProfile):
+        require_module_license("ocr")
+        try:
+            return _ocr_profile_call(ocr_profiles.save_profile, values, profile_id)
+        except KeyError as exc:
+            raise HTTPException(404, "پروفایل OCR پیدا نشد.") from exc
+
+    @app.delete("/api/ocr-profiles/{profile_id}")
+    def remove_ocr_profile(profile_id: str):
+        require_module_license("ocr")
+        try:
+            _ocr_profile_call(ocr_profiles.delete_profile, profile_id)
+        except KeyError as exc:
+            raise HTTPException(404, "پروفایل OCR پیدا نشد.") from exc
+        return {"ok": True}
 
     @app.post("/api/projects/{project_id}/enhancement-preview")
     async def enhancement_preview(project_id: str, values: EnhancementPreviewRequest) -> dict[str, Any]:
