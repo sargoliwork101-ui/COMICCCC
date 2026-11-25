@@ -689,10 +689,31 @@ body.auth-locked #mainwrap,body.auth-locked #dock,body.auth-locked #menuBtn,body
 /* Keep every page action together below the live-height app header. */
 .main-toolbar-panel{position:sticky;top:var(--studio-topbar-height,64px);z-index:40;background:var(--panel);box-shadow:0 5px 14px #0002}
 
-/* Books & Articles only: isolated preprocessing controls. */
-#documentEnhancement { margin-block: 12px; padding: 12px; border: 1px solid var(--border, #8886); border-radius: 8px; }
-.enhancement-stage { padding: 8px; border-block-end: 1px solid #8884; }
-.enhancement-stage-head, .enhancement-switch { display: flex; align-items: center; gap: 8px; }
-.enhancement-stage-head > label { flex: 1; }
-.enhancement-switch input { width: auto; }
-.enhancement-params { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; border: 0; padding: 8px 0; }
+/* Books & Articles only: use the shared dialog palette and control scale. */
+#documentEnhancement{margin-block:16px;padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--panel);min-width:0}
+#documentEnhancement h3{margin:0;color:var(--text);font-size:13px;font-weight:700}
+#documentEnhancement .enhancement-subtitle{margin:2px 0 12px;color:var(--muted);font-size:11px}
+#documentEnhancement .enhancement-switch{display:flex;flex-direction:row;align-items:center;gap:9px;color:var(--text);min-width:0;cursor:pointer;margin:0}
+#documentEnhancement .enhancement-switch input{flex:0 0 auto;width:15px;height:15px;margin:0;padding:0}
+#documentEnhancement .hint{margin:8px 0}
+.enhancement-note{margin-block:8px 12px;color:var(--muted);font-size:11px}
+#documentEnhancement summary{cursor:pointer;color:var(--muted);font-size:11px;line-height:1.8}
+#documentEnhancement summary:hover{color:var(--a1)}
+#documentEnhancement summary:focus-visible{outline:2px solid var(--a1);outline-offset:3px;border-radius:4px}
+.enhancement-stages{display:grid;gap:8px;margin-block:12px}
+.enhancement-stage{min-width:0;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:var(--surface)}
+.enhancement-stage:has([data-on]:checked){border-color:var(--a1)}
+.enhancement-stage-head{display:flex;align-items:center;gap:6px;min-width:0}
+.enhancement-stage-head>label{flex:1;min-width:0}
+.enhancement-caption{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 8px;min-width:0}
+.enhancement-name{font-size:12px;font-weight:600}
+.enhancement-term{color:var(--muted);font-size:10px;overflow-wrap:anywhere}
+.enhancement-stage-head>.bt{flex:0 0 28px;width:28px;min-height:28px;padding:3px;font-size:14px;border-radius:7px}
+.enhancement-stage>details{margin-block-start:6px;padding-inline-start:24px}
+.enhancement-params{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;border:0;padding:10px 0 0;margin:0;min-width:0}
+.enhancement-params label{min-width:0;font-size:11px;gap:5px}
+.enhancement-params input,.enhancement-params select{min-width:0;height:34px;font-size:12px}
+.enhancement-params:disabled{opacity:.5}
+#documentEnhancement>.bt{font-size:11px;padding:6px 10px;max-width:100%;white-space:normal}
+@media(max-width:600px){#documentEnhancement{padding:12px}.enhancement-params{grid-template-columns:repeat(2,minmax(0,1fr))}.enhancement-stage{padding:9px}.enhancement-stage>details{padding-inline-start:0}.enhancement-caption{flex-direction:column;gap:0}}
+@media(max-width:360px){.enhancement-params{grid-template-columns:minmax(0,1fr)}}

@@ -288,6 +288,45 @@ main()
     await cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads, eventsEnabled: true });
 
     await page.goto(base, { waitUntil: 'networkidle0' }); await page.waitForSelector('#grid .item img');
+    // Verify computed layout, not just markup: checkbox labels used to inherit
+    // the global column direction and mixed-language text had no isolation.
+    for (const width of [1440, 390]) {
+      await page.setViewport({ width, height: 1000 });
+      for (const light of [false, true]) {
+        const layout = await page.evaluate((light) => {
+          document.body.classList.toggle('light', light);
+          DocumentEnhancement.setDocumentMode(true);
+          const panel = document.getElementById('documentEnhancement');
+          const dialog = document.getElementById('ocrDialog');
+          if (!dialog.open) dialog.showModal();
+          panel.querySelectorAll('details').forEach(node => { node.open = true; });
+          const switches = [...panel.querySelectorAll('.enhancement-switch')];
+          const rows = [...panel.querySelectorAll('.enhancement-stage-head')];
+          const result = {
+            horizontal: switches.every(node => getComputedStyle(node).flexDirection === 'row'),
+            contained: panel.scrollWidth <= panel.clientWidth + 1,
+            aligned: rows.every(row => {
+              const checkbox = row.querySelector('input').getBoundingClientRect();
+              const button = row.querySelector('button').getBoundingClientRect();
+              return Math.abs((checkbox.top + checkbox.height / 2) - (button.top + button.height / 2)) < 2;
+            }),
+            themed: getComputedStyle(panel).backgroundColor === getComputedStyle(dialog).backgroundColor,
+            isolatedTerms: panel.querySelectorAll('bdi[dir="ltr"]').length === 6,
+          };
+          dialog.close();
+          return result;
+        }, light);
+        assert.ok(layout.horizontal && layout.contained && layout.aligned && layout.isolatedTerms,
+          `document enhancement layout at ${width}px light=${light}: ${JSON.stringify(layout)}`);
+      }
+    }
+    await page.setViewport({ width: 1440, height: 1000 });
+    await page.evaluate(() => {
+      document.body.classList.remove('light');
+      DocumentEnhancement.load(state.project.settings.documentEnhancement);
+      DocumentEnhancement.setDocumentMode(document.getElementById('ocrPageMode').value === 'document');
+    });
+    console.log('PASS: enhancement checkbox rows, RTL labels and advanced fields fit desktop/mobile in both themes');
     const progressVisual = await page.evaluate(() => {
       setProgress('jobProgress', null, true);
       const bar = document.getElementById('jobProgress').closest('.bar');

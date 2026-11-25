@@ -1,7 +1,8 @@
 /* Independent UI for the explicitly selected Books & Articles OCR path. */
 (function (root) {
   'use strict';
-  const names = { upscale: 'Upscaling — بزرگ‌نمایی Lanczos', grayscale: 'Grayscale — خاکستری', clahe: 'CLAHE — کنتراست موضعی', denoise: 'Denoising — کاهش نویز Bilateral', unsharp: 'Unsharp Mask — وضوح لبه', threshold: 'Adaptive Thresholding — سیاه‌وسفید اختیاری' };
+  const names = { upscale: 'بزرگ‌نمایی', grayscale: 'خاکستری', clahe: 'کنتراست موضعی', denoise: 'کاهش نویز', unsharp: 'وضوح لبه', threshold: 'سیاه‌وسفید تطبیقی' };
+  const technical = { upscale: 'Lanczos', grayscale: 'Grayscale', clahe: 'CLAHE', denoise: 'Bilateral', unsharp: 'Unsharp Mask', threshold: 'Adaptive Threshold' };
   const defaults = () => ({ enabled: false, order: Object.keys(names),
     upscale: { enabled: false, factor: 2 }, grayscale: { enabled: false },
     clahe: { enabled: false, clip_limit: 2, tile_grid: 8 },
@@ -35,25 +36,33 @@
   function render() {
     if (!host) return;
     host.replaceChildren(); host.classList.toggle('hidden', !documentMode);
-    const heading = el('h3', 'Image Enhancement / OCR Preprocessing'); host.append(heading);
+    const heading = el('h3', 'بهبود تصویر برای OCR'); host.append(heading);
+    const subtitle = el('p', 'ویژهٔ کتاب و مقاله · پردازش نسخهٔ موقت', 'enhancement-subtitle'); host.append(subtitle);
     const label = el('label', null, 'enhancement-switch'); const master = el('input'); master.type = 'checkbox'; master.dataset.master = ''; master.checked = config.enabled;
-    label.append(master, document.createTextNode('Enable OCR Image Enhancement — فعال‌سازی برای کتاب و مقاله')); host.append(label);
-    host.append(el('p', 'پیش‌فرض: همه خاموش. فقط نسخهٔ موقت پردازش می‌شود. ترتیب از بالا به پایین است؛ آستانه‌گذاری معمولاً آخر باشد. در حالت فعال و دارای فیلتر، این مراحل جایگزین کنتراست/بزرگ‌نمایی/شارپ/پیش‌پردازش فارسی قبلی می‌شوند؛ با خاموش‌کردن، همان مسیر قبلی برمی‌گردد.', 'hint'));
+    label.append(master, document.createTextNode('فعال‌سازی بهبود تصویر')); host.append(label);
+    host.append(el('p', 'همهٔ فیلترها پیش‌فرض خاموش‌اند. ترتیب اجرا از بالا به پایین است؛ سیاه‌وسفیدکردن معمولاً آخر باشد.', 'hint'));
+    const note = el('details', null, 'enhancement-note');
+    note.append(el('summary', 'نکتهٔ پیش‌پردازش'));
+    note.append(el('p', 'با فعال‌بودن حداقل یک فیلتر، این مراحل جایگزین کنتراست، بزرگ‌نمایی، شارپ و پیش‌پردازش فارسی قبلی می‌شوند. با خاموش‌کردن، همان روش قبلی اجرا می‌شود. تصویر اصلی تغییر نمی‌کند.', 'hint'));
+    host.append(note);
     const list = el('div', null, 'enhancement-stages'); host.append(list);
     config.order.forEach((key, index) => {
       const row = el('section', null, 'enhancement-stage'); row.dataset.stage = key;
       const head = el('div', null, 'enhancement-stage-head'); const onLabel = el('label', null, 'enhancement-switch');
       const on = el('input'); on.type = 'checkbox'; on.dataset.on = ''; on.checked = config[key].enabled;
-      onLabel.append(on, document.createTextNode(`${index + 1}. ${names[key]}`)); head.append(onLabel);
+      const caption = el('span', null, 'enhancement-caption');
+      caption.append(el('span', `${index + 1}. ${names[key]}`, 'enhancement-name'));
+      const term = el('bdi', technical[key], 'enhancement-term'); term.dir = 'ltr'; caption.append(term);
+      onLabel.append(on, caption); head.append(onLabel);
       const move = delta => { collect(); const next = index + delta; [config.order[index], config.order[next]] = [config.order[next], config.order[index]]; render(); changed(collect()); };
-      const up = button('↑', () => move(-1)); up.disabled = index === 0; up.setAttribute('aria-label', `بالا بردن ${key}`);
-      const down = button('↓', () => move(1)); down.disabled = index === config.order.length - 1; down.setAttribute('aria-label', `پایین بردن ${key}`); head.append(up, down); row.append(head);
+      const up = button('↑', () => move(-1)); up.disabled = index === 0; up.setAttribute('aria-label', `بالا بردن ${key}`); up.title = 'اجرای زودتر';
+      const down = button('↓', () => move(1)); down.disabled = index === config.order.length - 1; down.setAttribute('aria-label', `پایین بردن ${key}`); down.title = 'اجرای دیرتر'; head.append(up, down); row.append(head);
       if (fields[key].length) {
-        const details = el('details'); details.open = config[key].enabled; details.append(el('summary', 'تنظیمات پیشرفته'));
+        const details = el('details'); details.open = config[key].enabled; details.append(el('summary', 'تنظیمات فیلتر'));
         const params = el('fieldset', null, 'enhancement-params'); params.disabled = !config[key].enabled || !config.enabled;
         fields[key].forEach(([param, title, min, max, step]) => {
-          const wrap = el('label', title); let input;
-          if (Array.isArray(min)) { input = el('select'); min.forEach(value => { const opt = el('option', String(value)); opt.value = value; input.append(opt); }); }
+          const wrap = el('label'); const fieldTitle = el('bdi', title); fieldTitle.dir = 'auto'; wrap.append(fieldTitle); let input;
+          if (Array.isArray(min)) { input = el('select'); min.forEach(value => { const opt = el('option', value === 'sauvola' ? 'Sauvola' : value === 'adaptive_otsu' ? 'Otsu محلی' : `${value}×`); opt.value = value; input.append(opt); }); }
           else { input = el('input'); input.type = 'number'; input.min = min; input.max = max; input.step = step; input.required = true; }
           input.dataset.param = param; input.value = config[key][param]; input.dir = 'ltr';
           input.setAttribute('aria-label', `${names[key]} ${title}`);
