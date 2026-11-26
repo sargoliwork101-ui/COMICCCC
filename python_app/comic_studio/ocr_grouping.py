@@ -12,10 +12,14 @@ _LIST_ITEM_RE = re.compile(
     r"^\s*(?:[•●▪▫◦‣⁃\-–—*]|\(?[0-9۰-۹]{1,3}[.)]|\([a-zA-Zآ-ی]\)|\[[0-9]{1,3}\])\s+\S"
 )
 _MULTI_LEVEL_NUM_HEADING_RE = re.compile(
-    r"^\s*\d+(?:\.\d+){1,8}\b[\s.:)\-–—]*\S"
+    # Latin "1.2.3" and Persian/Arabic-Indic "۲-۴" or "۱٫۲" numbering.
+    r"^\s*(?:\d+(?:\.\d+){1,8}\b[\s.:)\-–—]*\S"
+    r"|[\u06f0-\u06f9\u0660-\u0669]{1,3}(?:[.\-–—٫][\u06f0-\u06f9\u0660-\u0669]{1,3})+[\s.:)\-–—]*\S)"
 )
 _SINGLE_NUM_TITLE_RE = re.compile(
     r"^\s*(?:\d{1,3}|[IVXLCDM]{1,6})[.)\-:]\s+\S"
+    # Persian section numbers such as «۲- روش…» / «۴. نتیجه‌گیری»
+    r"|^\s*[\u06f0-\u06f9\u0660-\u0669]{1,3}[.)\-–—:\s]\s*\S"
 )
 _HEADING_PREFIX_RE = re.compile(
     r"^\s*(?:"
@@ -327,6 +331,34 @@ def _is_all_caps_title(txt: str) -> bool:
     return True
 
 
+def _body_line_height(blocks: list[dict[str, Any]], med_lh: float) -> float:
+    """Dominant line height of *text* lines, ignoring caption/badge-size fragments.
+
+    A screenshot can carry tiny interface labels (``EN``, ``3``, ``中``) whose
+    height is a third of a real line.  A plain median then reports a body line as
+    "much taller than average", which used to turn ordinary prose into headings.
+    Weighting by real text length keeps the answer on the body text.
+    """
+    weighted: list[tuple[float, int]] = []
+    for blk in blocks:
+        txt = str(blk.get("text") or "").strip()
+        if len(txt) < 3:
+            continue
+        weighted.append((_line_h(blk), len(txt)))
+    if not weighted:
+        return med_lh
+    weighted.sort(key=lambda item: item[0])
+    total_chars = sum(chars for _, chars in weighted)
+    if not total_chars:
+        return med_lh
+    running = 0
+    for height, chars in weighted:
+        running += chars
+        if running >= total_chars * 0.5:
+            return max(8.0, height)
+    return max(8.0, weighted[-1][0])
+
+
 def _classify_document_line_role(
     block: dict[str, Any],
     med_lh: float,
@@ -343,6 +375,17 @@ def _classify_document_line_role(
     words = txt.split()
     word_count = len(words)
     is_bold = bool(block.get("_detectedBold") or block.get("_explicitBold") or block.get("bold"))
+    # A line whose words are glued into one long run looks like a "short" title
+    # to the word based tests below.  Its real length is in characters, so it
+    # must be measured like a full sentence.
+    glued_prose = bool(
+        word_count <= 2
+        and re.search(r"[A-Za-z]{25,}", txt)
+        and len(txt) >= 40
+        and not _is_all_caps_title(txt)
+    )
+    if glued_prose:
+        word_count = max(word_count, 14)
 
     if lh >= med_lh * 1.24 and len(txt) <= 140 and not txt.endswith((".", "،", ",", ";", "؛")):
         return "heading"
@@ -414,6 +457,131 @@ def _classify_document_line_role(
     ):
         return "heading"
     return "paragraph"
+
+
+_BARE_SECTION_NUMBER_RE = re.compile(
+    r"^\s*(?:\d{1,3}(?:\.\d{1,3}){0,5}|[IVXLCDM]{1,6})[.):\-–—]?\s*$"
+)
+
+
+def _join_section_number_rows(blocks: list[dict[str, Any]], med_lh: float) -> list[dict[str, Any]]:
+    """Put a standalone section number back in front of its title.
+
+    Book pages often print "1.2" and "WHAT YOU WILL FIND ..." as two boxes on
+    the same baseline.  Left apart, the number became its own little block and
+    the title lost its numbering.  Only a bare number sitting on the same row
+    as a title-like neighbour is joined; nothing else changes.
+    """
+    if len(blocks) < 2:
+        return blocks
+    items = [copy.deepcopy(b) for b in blocks]
+    used: set[int] = set()
+    result: list[dict[str, Any]] = []
+    # Section numbers first: a title may sit a pixel or two higher than its
+    # number, so plain top-to-bottom order would consume the title first.
+    order = sorted(
+        range(len(items)),
+        key=lambda i: (
+            0 if _BARE_SECTION_NUMBER_RE.match(str(items[i].get("text") or "").strip()) else 1,
+            float(items[i].get("y0", 0)),
+        ),
+    )
+    for idx in order:
+        if idx in used:
+            continue
+        first = items[idx]
+        first_txt = str(first.get("text") or "").strip()
+        if not _BARE_SECTION_NUMBER_RE.match(first_txt) or len(first_txt) > 8:
+            result.append(first)
+            used.add(idx)
+            continue
+        # Find a neighbour on the same row whose text continues the title.
+        best = None
+        best_gap = None
+        for other_idx, other in enumerate(items):
+            if other_idx == idx or other_idx in used:
+                continue
+            other_txt = str(other.get("text") or "").strip()
+            if len(other_txt) < 4 or _BARE_SECTION_NUMBER_RE.match(other_txt):
+                continue
+            h1, h2 = _height(first), _height(other)
+            if max(h1, h2) > min(h1, h2) * 1.9:
+                continue
+            cy1 = (float(first.get("y0", 0)) + float(first.get("y1", 0))) * 0.5
+            cy2 = (float(other.get("y0", 0)) + float(other.get("y1", 0))) * 0.5
+            if abs(cy1 - cy2) > max(h1, h2) * 0.55:
+                continue
+            # Reading order: the title follows the number (LTR) or precedes it (RTL).
+            rtl_title = bool(_RTL_TEXT_RE.search(other_txt)) and not bool(re.search(r"[A-Za-z]{3,}", other_txt))
+            if rtl_title:
+                gap = float(first.get("x1", 0)) - float(other.get("x0", 0))
+            else:
+                gap = float(other.get("x0", 0)) - float(first.get("x1", 0))
+            if gap < -max(h1, h2) * 0.6:
+                continue
+            if gap > max(med_lh * 3.2, 90.0):
+                continue
+            if best_gap is None or abs(gap) < abs(best_gap):
+                best, best_gap = other_idx, gap
+        if best is None:
+            result.append(first)
+            used.add(idx)
+            continue
+        other = items[best]
+        other_txt = str(other.get("text") or "").strip()
+        rtl_title = bool(_RTL_TEXT_RE.search(other_txt)) and not bool(re.search(r"[A-Za-z]{3,}", other_txt))
+        merged_text = f"{other_txt} {first_txt}".strip() if rtl_title else f"{first_txt} {other_txt}".strip()
+        merged = copy.deepcopy(other)
+        x0 = min(float(first.get("x0", 0)), float(other.get("x0", 0)))
+        y0 = min(float(first.get("y0", 0)), float(other.get("y0", 0)))
+        x1 = max(float(first.get("x1", 0)), float(other.get("x1", 0)))
+        y1 = max(float(first.get("y1", 0)), float(other.get("y1", 0)))
+        merged.update({
+            "text": merged_text,
+            "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+            "polygon": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+            "lineH": round(median([_height(first), _height(other)]), 2),
+            "sourceLines": copy.deepcopy([
+                *(other.get("sourceLines") or [other]),
+                *(first.get("sourceLines") or [first]),
+            ] if rtl_title else [
+                *(first.get("sourceLines") or [first]),
+                *(other.get("sourceLines") or [other]),
+            ]),
+        })
+        used.add(idx)
+        used.add(best)
+        result.append(merged)
+    return result
+
+
+def _repair_dropped_spaces(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Restore word spaces an engine dropped, without touching anything else.
+
+    Only blocks whose Latin text has lost most of its spaces are rewritten; the
+    coordinates, ids and every other field stay byte-identical.
+    """
+    repaired: list[dict[str, Any]] = []
+    for original in blocks:
+        block = original
+        text = str(block.get("text") or "")
+        fixed = restore_missing_word_spaces(text) if text else text
+        if fixed != text:
+            block = copy.deepcopy(block)
+            block["text"] = fixed
+            source_lines = block.get("sourceLines")
+            if isinstance(source_lines, list):
+                fixed_lines = []
+                for line in source_lines:
+                    if isinstance(line, dict) and line.get("text"):
+                        copy_line = dict(line)
+                        copy_line["text"] = restore_missing_word_spaces(str(line["text"]))
+                        fixed_lines.append(copy_line)
+                    else:
+                        fixed_lines.append(line)
+                block["sourceLines"] = fixed_lines
+        repaired.append(block)
+    return repaired
 
 
 def _dominant_margin(values: list[float], tol: float, *, pick_high: bool = False) -> float:
@@ -587,6 +755,8 @@ def group_document_lines(
     """Group OCR lines into structured book/article headings, lists, and paragraphs."""
     if not blocks:
         return []
+    blocks = _repair_dropped_spaces(blocks)
+    blocks = _join_section_number_rows(blocks, median(_line_h(b) for b in blocks))
     effective_rtl = rtl_columns or _is_mostly_rtl_blocks(blocks)
     if effective_rtl and len(blocks) >= 2:
         prelim_lh = median(_line_h(b) for b in blocks)
@@ -602,6 +772,7 @@ def group_document_lines(
         return [_apply_document_block_defaults(single, role)]
 
     med_lh = median(_line_h(b) for b in ordered)
+    body_lh = _body_line_height(ordered, med_lh)
     columns = _detect_column_ranges(ordered, med_lh)
 
     def _column_bounds(blk: dict[str, Any]) -> tuple[int, float, float]:
@@ -694,7 +865,7 @@ def group_document_lines(
         col_idx, col_left, col_right = _column_bounds(line)
         col_w = max(1.0, col_right - col_left)
         col_base_left = col_base_left_map.get(col_idx, col_left)
-        role = _classify_document_line_role(line, med_lh, col_w)
+        role = _classify_document_line_role(line, body_lh, col_w)
 
         if not cur_lines:
             cur_lines.append(line)
@@ -1132,3 +1303,180 @@ def organize_ocr_blocks(
         )
         blk["sourceIndent"] = min(32, max(0, round(rel_ext / space_px))) if rel_ext >= med_lh * 0.75 else 0
     return copied, "comic"
+
+
+# ---------------------------------------------------------------------------
+# Word-space repair
+#
+# Some engines (chiefly the PP-OCR recognisers used by RapidOCR) return a whole
+# line with the inter-word spaces missing: "WHATYOULLFINDINTHEFOLLOWINGPAGES".
+# The characters are right, only the boundaries are lost.  Splitting such a run
+# back into words is inherently ambiguous, so this is deliberately a *light*
+# repair: only letter runs of eight or more characters are split, a small
+# dictionary of very common words is preferred, impossible pairs (q followed by
+# a consonant, a hard run of four consonants) are avoided, and a run is left
+# untouched unless every piece of the split is a known word.  Nothing here can
+# invent or delete a character.
+# ---------------------------------------------------------------------------
+_COMMON_EN_WORDS = frozenset(
+    """
+    a an the and or but if of to in on at by for from with without into onto over under
+    is are was were be been being am do does did done has have had will would can could
+    shall should may might must not no nor so as than then that this these those there their
+    they them we us our you your he she it its his her who whom which what when where why how
+    all any both each few many most other some such only own same very just also more less
+    up down out off about after again against before below between during through during
+    chapter chapters section sections part parts figure figures table tables page pages book
+    books power supply supplies design designs converter converters voltage current circuit
+    circuits switch switches switching mode modes technique techniques result results example
+    examples simulation simulations model models analysis method methods system systems
+    introduction conclusion summary overview appendix references contents index preface
+    you will find following pages what why how where when
+    """.split()
+)
+_COMMON_EN_STEMS = frozenset(
+    """
+    explain describe introduce discuss present show illustrate provide contain cover summarize
+    examine demonstrate facilitate understand question balance strive design derive develop
+    improve simulate test let want need use make take give find get know think see look work
+    call come go keep put run move live believe hold bring happen write provide sit stand lose
+    pay meet include continue set learn lead understand watch follow stop create speak read
+    allow add spend grow open walk win offer remember love consider appear buy wait serve die
+    send expect build stay fall cut reach kill remain suggest raise pass sell require report
+    decide pull requirement general soldering heel fillet height dimensional criteria target
+    class minimum maximum typical range value values order part parts step steps note notes
+    figure table chapter section appendix index contents preface glossary bibliography
+    switch switching mode modes supply supplies power converter converters voltage current
+    circuit circuits design designs analysis method methods control loop loops signal signals
+    model models simulation example examples technique techniques application applications
+    component components resistor capacitor inductor diode transistor transformer magnetic
+    thermal efficiency loss losses frequency response output input load line lines source
+    """.split()
+)
+_MAX_GLUED_RUN = 120
+
+
+def _english_word_ok(word: str) -> bool:
+    low = word.lower()
+    if low in _COMMON_EN_WORDS or low.rstrip("s") in _COMMON_EN_WORDS:
+        return True
+    if low in _COMMON_EN_STEMS:
+        return True
+    # Very common inflections of the stems above.
+    for suffix in ("s", "es", "ed", "ing", "d", "ly"):
+        if low.endswith(suffix) and low[: -len(suffix)] in _COMMON_EN_STEMS:
+            return True
+    return False
+
+
+def _looks_glued(run: str) -> bool:
+    """A Latin run with no spaces that is long enough to hide several words."""
+    if not (4 <= len(run) <= _MAX_GLUED_RUN):
+        return False
+    if not run.isalpha():
+        return False
+    # CamelCase (lower, upper, lower - "MechanicalEngineering") is a name or a
+    # technical token, not a glued sentence; an acronym tail ("...theSPICE") is fine.
+    if re.search(r"[a-z][A-Z][a-z]", run):
+        return False
+    return True
+
+
+def _segment_glued_run(run: str) -> list[str] | None:
+    """Best-effort split of one glued run; returns None when it should be left alone."""
+    n = len(run)
+    if n < 8:
+        return None
+    low = run.lower()
+    # Dynamic programming over the cheapest split; word cost favours the common
+    # vocabulary, unknown chunks are allowed but expensive so real names survive.
+    best: list[tuple[float, int, str]] = [(0.0, 0, "")] * (n + 1)
+    for end in range(1, n + 1):
+        best_score: float | None = None
+        best_start = 0
+        best_word = ""
+        for start in range(max(0, end - 22), end):
+            chunk = low[start:end]
+            if not chunk.isalpha():
+                continue
+            score = best[start][0]
+            if score >= 1e9:
+                continue
+            length = end - start
+            if length == 1:
+                # Single-letter pieces are legal only as "a" / "I".
+                if chunk not in {"a", "i"}:
+                    continue
+                score += 3.4
+            elif _english_word_ok(chunk):
+                score += 0.35 if chunk in _COMMON_EN_WORDS else 0.75
+            else:
+                if length < 3:
+                    continue
+                # Unknown chunk: penalise in proportion to length so that a
+                # long unrelated word is not shredded for no reason.
+                score += 1.9 + 0.16 * length
+            # Cheap sanity checks that remove the worst impossible splits.
+            if re.search(r"q(?!u)", chunk):
+                score += 2.0
+            if re.search(r"[bcdfghjklmnpqrstvwxz]{4}", chunk):
+                score += 1.2
+            score += 0.12  # mild preference for fewer, longer chunks
+            if best_score is None or score < best_score:
+                best_score, best_start, best_word = score, start, run[start:end]
+        if best_score is None:
+            best[end] = (1e9, end, "")
+        else:
+            best[end] = (best_score, best_start, best_word)
+    if best[n][0] >= 1e9:
+        return None
+    parts: list[str] = []
+    idx = n
+    while idx > 0:
+        _, start, word = best[idx]
+        parts.append(word)
+        idx = start
+    parts.reverse()
+    if len(parts) < 2:
+        return None
+    # Accept only when EVERY piece is a known word.  Anything less risks
+    # cutting a genuine word in half ("REQUIREMENTS" -> "REQUIRE MENTS"),
+    # which is far worse for the reader than leaving the line glued.
+    if not all(_english_word_ok(part.lower()) for part in parts):
+        return None
+    return parts
+
+
+def restore_missing_word_spaces(text: str, *, minimum_ratio: float = 0.45) -> str:
+    """Re-insert word spaces that an OCR engine dropped inside Latin text.
+
+    Only long letter runs are considered; in a line that keeps most of its
+    spaces the function does nothing, so normal engine output is untouched.
+    """
+    raw = str(text or "")
+    # Count how much of the text already has spaces; a healthy line keeps them.
+    latin_runs = re.findall(r"[A-Za-z]{4,}", raw)
+    if not latin_runs:
+        return raw
+    words = raw.split()
+    if not words:
+        return raw
+    long_runs = [run for run in latin_runs if len(run) >= 8]
+    if not long_runs:
+        return raw
+    glued_chars = sum(len(run) for run in long_runs)
+    latin_chars = sum(len(run) for run in latin_runs)
+    if latin_chars and (glued_chars / latin_chars) < minimum_ratio:
+        return raw
+    changed = False
+    out_words: list[str] = []
+    for word in words:
+        pieces = _segment_glued_run(word) if _looks_glued(word) else None
+        if pieces:
+            out_words.extend(pieces)
+            changed = True
+        else:
+            out_words.append(word)
+    if not changed:
+        return raw
+    return " ".join(out_words)

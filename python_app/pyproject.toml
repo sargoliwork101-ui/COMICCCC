@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comic-ocr-studio"
-version = "4.8.3"
+version = "4.8.4"
 description = "Standalone local OCR, translation and visual document editing studio"
 requires-python = ">=3.11"
 dependencies = [

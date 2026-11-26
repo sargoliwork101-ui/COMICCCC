@@ -387,3 +387,87 @@ def test_numbered_list_entries_remain_list_items():
     body = {'x0': 30, 'x1': 400, 'y0': 10, 'y1': 32, 'lineH': 22}
     for text in ('1. First numbered list entry', '2. Second numbered entry with words'):
         assert _classify_document_line_role({**body, 'text': text}, 22.0, 1000.0) == 'list', text
+
+
+def test_dropped_word_spaces_are_restored_in_an_all_caps_title():
+    """Real engine output from the reported page: the title arrived as one glued run."""
+    from comic_studio.ocr_grouping import restore_missing_word_spaces
+    assert restore_missing_word_spaces('WHATYOUWILLFINDINTHEFOLLOWINGPAGES') == \
+        'WHAT YOU WILL FIND IN THE FOLLOWING PAGES'
+    assert restore_missing_word_spaces('POWERSUPPLYTECHNIQUES') == 'POWER SUPPLY TECHNIQUES'
+    # Text that already has its spaces, real words, acronyms and camel-case names stay untouched.
+    for text in ('This book thoroughly details the advantages of SPICE',
+                 'GENERAL SOLDERING REQUIREMENTS', 'SNUBBER', 'MAXIM', 'CDE',
+                 'MechanicalEngineering', 'ElectromagneticInterferenceFilterDesign'):
+        assert restore_missing_word_spaces(text) == text, text
+
+
+def test_section_number_box_joins_its_title_on_the_same_row():
+    raw = [line(1, '1.2', 55, 69, width=37, height=22),
+           line(2, 'WHAT YOU WILL FIND IN THE FOLLOWING PAGES', 111, 67, width=622, height=23),
+           line(3, 'This book thoroughly details the advantages of SPICE to let you understand and simulate',
+                147, 150, width=1000, height=18),
+           line(4, 'power supply (SMPS) you want to design. By providing you with specific recipes',
+                147, 176, width=1000, height=18)]
+    blocks = group_ocr_lines(raw, page_mode='document', page_size=(1216, 278))
+    assert [b['pageRole'] for b in blocks] == ['heading', 'paragraph']
+    assert blocks[0]['text'] == '1.2 WHAT YOU WILL FIND IN THE FOLLOWING PAGES'
+
+
+def test_reported_page_reads_as_numbered_title_and_body():
+    """The exact base64-quality engine output of the reported page merges correctly."""
+    raw = [line(1, '1.2', 55, 69, width=37, height=22),
+           line(2, 'WHATYOUWILLFINDINTHEFOLLOWINGPAGES', 111, 67, width=622, height=23),
+           line(3, 'ThisbookthoroughlydetailstheadvantagesofSPlCEtoletyouunderstand,simulate', 147, 150,
+                width=1000, height=18),
+           line(4, 'powersupply(SMPS)youwanttodesign.Byprovidingyouwithspecificrecipes', 147, 176,
+                width=1000, height=18)]
+    blocks = group_ocr_lines(raw, page_mode='document', page_size=(1216, 278))
+    assert blocks[0]['pageRole'] == 'heading'
+    assert blocks[0]['text'] == '1.2 WHAT YOU WILL FIND IN THE FOLLOWING PAGES'
+    assert len(blocks) == 2
+
+
+def test_rtl_section_number_joins_its_title_in_persian_order():
+    raw = [line(1, '۲-۴', 1000, 69, width=60, height=22),
+           line(2, 'روش‌های طراحی مدار کنترل', 111, 67, width=869, height=23),
+           line(3, 'این کتاب روش‌های طراحی مبدل را با جزئیات کامل توضیح می‌دهد و مثال عملی دارد',
+                147, 150, width=1000, height=18)]
+    blocks = group_ocr_lines(raw, page_mode='document', page_size=(1216, 278))
+    # In Persian books the section number is written first: «۲-۴ عنوان».
+    assert blocks[0]['text'] == '۲-۴ روش‌های طراحی مدار کنترل'
+    assert blocks[0]['pageRole'] == 'heading'
+
+
+def test_tiny_ui_badges_do_not_turn_body_lines_into_headings():
+    """A screenshot with small interface labels must still read as title + paragraph."""
+    raw = [line(1, '1.2 WHAT YOU WILL FIND IN THE FOLLOWING PAGES', 111, 67, width=622, height=23),
+           line(2, 'EN', 178, 114, width=19, height=14),
+           line(3, 'ThisbookthoroughlydetailstheadvantagesofSPlCEtoletyouunderstand,simulatetest', 147, 150,
+                width=960, height=18),
+           line(4, 'ThisbookthoroughlydetailstheadvantagesofSPlCEtoletyouunderstand,simulatetest', 147, 176,
+                width=960, height=19),
+           line(5, 'EN', 179, 247, width=17, height=11),
+           line(6, '3', 1108, 252, width=7, height=6)]
+    blocks = group_ocr_lines(raw, page_mode='document', page_size=(1216, 278))
+    roles = [b['pageRole'] for b in blocks if len(b['text']) > 20]
+    assert roles[0] == 'heading', roles
+    assert set(roles[1:]) == {'paragraph'}, roles
+
+
+def test_glued_long_line_is_not_a_short_title():
+    from comic_studio.ocr_grouping import _classify_document_line_role
+    body = {'x0': 147, 'x1': 1144, 'y0': 150, 'y1': 169, 'lineH': 19}
+    for text in (
+        'ThisbookthoroughlydetailstheadvantagesofSPlCEtoletyouunderstand,simulate,test,andfinallyimprovethes',
+        'powersupply(SMPS)youwanttodesign.Byprovidingyouwithspecificsimulationrecipes,thisworkintends',
+        'possibleyourSMPSdesign.Unlikeotherbooks,theauthorstrivestobalancethetheoreticalcontent,necessary',
+    ):
+        assert _classify_document_line_role({**body, 'text': text}, 19.0, 1000.0) == 'paragraph', text
+
+
+def test_persian_numbered_headings_are_recognised():
+    from comic_studio.ocr_grouping import _classify_document_line_role
+    box = {'x0': 111, 'x1': 980, 'y0': 67, 'y1': 90, 'lineH': 23}
+    for text in ('۲-۴ روش‌های طراحی مدار کنترل', '۴. نتیجه‌گیری', '۱- مقدمه', '1.2 عنوان بخش'):
+        assert _classify_document_line_role({**box, 'text': text}, 20.0, 1000.0) == 'heading', text

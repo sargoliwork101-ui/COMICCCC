@@ -291,7 +291,6 @@ dialog.help-dialog[open]{width:min(1160px,calc(100vw - 20px));height:min(88vh,86
 .ocr-profiles-panel>.hint{padding-bottom:14px;margin:8px 0 0}
 .ocr-dialog-footer{flex:0 0 auto;display:flex;flex-direction:column;gap:9px;padding:13px 18px 16px;background:var(--surface);border-top:1px solid var(--line)}
 .ocr-dialog-footer>.hint{margin:0}
-.ocr-dialog-footer .ocr-handling-hint{font-size:10.5px;color:var(--faint)}
 .ocr-dialog-footer .dialog-actions{margin:2px 0 0;padding-top:11px;border-top:1px solid var(--line);align-items:center}
 .ocr-dialog-footer .dialog-actions .bt{padding:8px 18px;font-size:12.5px}
 .ocr-dialog-footer #ocrActivityLog:empty{display:none}
