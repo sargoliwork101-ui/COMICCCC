@@ -1208,6 +1208,347 @@ def test_v432_a_damaged_seller_vault_file_is_restored_from_the_backup(tmp_path: 
     assert recovered["private_seed_hex"] == rec["private_seed_hex"]
 
 
+def test_seller_panel_page_reports_tab_lifecycle_and_probe():
+    """v4.82: closing the seller-panel browser tab must stop its local python server.
+
+    The page sends a heartbeat while open, a beacon on unload and a short probe
+    every few seconds; the server drops the panel process when nothing is left.
+    """
+    import sys
+
+    py_root = Path(__file__).resolve().parents[1]
+    if str(py_root) not in sys.path:
+        sys.path.insert(0, str(py_root))
+    from license_tool import manager as lm
+
+    html = lm._PANEL_HTML
+    assert "sessionStorage.getItem('hasaya-seller-tab')" in html
+    assert "/api/session/heartbeat" in html
+    assert "/api/session/close" in html
+    assert "navigator.sendBeacon" in html
+    assert "window.addEventListener('pagehide'" in html
+    assert "window.addEventListener('beforeunload'" in html
+    assert "window.addEventListener('pageshow'" in html
+    assert "/api/presence" in html
+    # The heartbeat must be much shorter than the client-side stale window.
+    assert "setInterval(() => panelLifebeat(false), 20000)" in html
+    assert "X-Panel-Tab" in html
+
+
+def test_seller_panel_presence_stops_after_last_tab_closes(monkeypatch):
+    """v4.82: the presence tracker shuts the server down and never kills it while a tab is alive."""
+    import sys
+
+    py_root = Path(__file__).resolve().parents[1]
+    if str(py_root) not in sys.path:
+        sys.path.insert(0, str(py_root))
+    import license_tool.manager as lm
+
+    class FakeTimer:
+        def __init__(self, delay, fn):
+            self.delay = delay
+            self.fn = fn
+            self.done = False
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            self.done = True
+
+    now = [0.0]
+    called = []
+    monkeypatch.setattr(lm.threading, "Timer", FakeTimer)
+    presence = lm.PanelPresence(lambda: called.append(True), close_grace=2.0, stale_after=30.0, clock=lambda: now[0])
+
+    def run_timers_once():
+        timer = presence._timer
+        if timer is None or timer.done:
+            return
+        timer.done = True
+        timer.fn()
+
+    presence.touch("tab-a")
+    presence.touch("tab-b")
+    assert presence.active_count == 2
+    # Closing one of two tabs must keep the server alive.
+    remaining, accepted = presence.close("tab-a")
+    assert (remaining, accepted) == (1, True)
+    assert called == []
+    # An unknown tab must never stop a running server.
+    assert presence.close("nope") == (1, False)
+    assert called == []
+    # Closing the last tab waits a short grace period before stopping.
+    remaining, accepted = presence.close("tab-b")
+    assert (remaining, accepted) == (0, True)
+    assert called == []
+    assert presence._timer is not None and presence._timer.delay == 2.0
+    run_timers_once()
+    assert called == [True]
+    # A heartbeat that arrives before the grace period must cancel the shutdown.
+    called.clear()
+    presence.touch("tab-a")
+    presence.close("tab-a")
+    presence.touch("tab-c")
+    run_timers_once()
+    assert called == []
+
+
+def test_seller_panel_presence_keeps_quiet_tab_alive_until_really_gone(monkeypatch):
+    """A throttled/frozen tab (no heartbeat) must not instantly stop the panel."""
+    import sys
+
+    py_root = Path(__file__).resolve().parents[1]
+    if str(py_root) not in sys.path:
+        sys.path.insert(0, str(py_root))
+    import license_tool.manager as lm
+
+    class FakeTimer:
+        def __init__(self, delay, fn):
+            self.delay = delay
+            self.fn = fn
+            self.done = False
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            self.done = True
+
+    now = [100.0]
+    called = []
+    monkeypatch.setattr(lm.threading, "Timer", FakeTimer)
+    presence = lm.PanelPresence(lambda: called.append(True), close_grace=2.0, stale_after=30.0, clock=lambda: now[0])
+
+    def fire():
+        timer = presence._timer
+        assert timer is not None and not timer.done
+        timer.done = True
+        timer.fn()
+
+    presence.touch("tab-a")
+    # The tab goes silent (browser throttled it).  The first expiry only marks
+    # it silent and keeps waiting for the browser to come back.
+    now[0] += 31.0
+    fire()
+    assert presence.active_count == 0
+    assert presence.known_count == 1
+    assert called == []
+    # Still waiting during the silent window.
+    now[0] += 31.0
+    fire()
+    assert presence.known_count == 0
+    assert called == []
+    assert presence._timer.delay == 2.0
+    # After the grace period it really stops.
+    fire()
+    assert called == [True]
+    # A new panel tab afterwards is tracked normally.
+    presence.touch("tab-b")
+    assert presence.active_count == 1
+
+
+def test_seller_panel_presence_api_accepts_query_secret_for_beacons(tmp_path: Path) -> None:
+    """Beacons/images cannot set headers, so the query secret must authorize presence only."""
+    import sys
+    import json as _json
+    import time
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    import threading
+
+    py_root = Path(__file__).resolve().parents[1]
+    if str(py_root) not in sys.path:
+        sys.path.insert(0, str(py_root))
+    from license_tool.manager import PanelPresence, SellerVault, build_seller_panel_handler
+
+    pub_py = tmp_path / "_public_key.py"
+    pub_py.write_text('PUBLIC_VERIFY_KEY_HEX: str = (\n    "' + ("0" * 64) + '"\n)\n', encoding="utf-8")
+    vault = SellerVault(seller_dir=tmp_path / "seller_v482_presence", public_key_py=pub_py)
+    vault.ensure_master_key(sync_source=False)
+
+    closed = []
+    presence = PanelPresence(lambda: closed.append(True), close_grace=0.05)
+    secret = "test-secret-482"
+    server = ThreadingHTTPServer(("127.0.0.1", 0), build_seller_panel_handler(vault, secret, presence))
+    port = int(server.server_address[1])
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    def call(path, data=None):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}{path}",
+            data=(b"" if data is None else _json.dumps(data).encode("utf-8")),
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            return _json.loads(resp.read().decode("utf-8"))
+
+    try:
+        # Heartbeat with only the query secret (no header) - as the beacon sends it.
+        assert call(f"/api/session/heartbeat?secret={secret}&tab=tab-a") == {"ok": True, "active": 1}
+        # A wrong query secret is still rejected.
+        rejected = False
+        try:
+            call("/api/session/heartbeat?secret=wrong&tab=tab-a")
+        except urllib.error.HTTPError as exc:
+            rejected = exc.code == 403
+        assert rejected
+        # The <img> probe (GET) is accepted with the query secret.
+        probe = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/presence?secret={secret}&tab=tab-a", timeout=3)
+        assert probe.status == 200
+        probe.close()
+        # Closing the tab with the query secret is reported back to the page.
+        assert call(f"/api/session/close?secret={secret}&tab=tab-a&closed=1")["accepted"] is True
+        for _ in range(100):
+            if closed:
+                break
+            time.sleep(0.02)
+        assert closed == [True], "closing the last panel tab must ask the server to stop"
+        # The data APIs still require the header secret: a query-only call is refused.
+        blocked = False
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/info?secret={secret}", timeout=3)
+        except urllib.error.HTTPError as exc:
+            blocked = exc.code == 403
+        assert blocked
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+
+def test_v482_closing_the_seller_panel_tab_stops_the_local_server(tmp_path: Path, monkeypatch) -> None:
+    """The exact user report: close the manager's browser tab -> the python server must exit.
+
+    Runs the real panel server in a subprocess with a real Chromium page.  Closing
+    the tab must send the close beacon, and the python process must end on its own.
+    """
+    import sys
+    import json as _json
+    import os
+    import shutil
+    import subprocess
+    import textwrap
+    import time
+
+    repo_root = Path(__file__).resolve().parents[2]
+    puppeteer = repo_root / "node_modules" / "puppeteer-core"
+    chromium_pkg = repo_root / "node_modules" / "@sparticuz" / "chromium"
+    if not puppeteer.is_dir() or not chromium_pkg.is_dir():
+        import pytest
+
+        pytest.skip("puppeteer-core / @sparticuz/chromium are not installed")
+
+    py_root = Path(__file__).resolve().parents[1]
+    pub_py = tmp_path / "_public_key.py"
+    pub_py.write_text('PUBLIC_VERIFY_KEY_HEX: str = (\n    "' + ("0" * 64) + '"\n)\n', encoding="utf-8")
+
+    runner = tmp_path / "panel_runner.py"
+    runner.write_text(
+        textwrap.dedent(
+            f"""
+            import json, sys, threading
+            from http.server import ThreadingHTTPServer
+            from pathlib import Path
+            sys.path.insert(0, {str(py_root)!r})
+            from license_tool.manager import PanelPresence, SellerVault, build_seller_panel_handler
+
+            vault = SellerVault(seller_dir=Path({str(tmp_path / "seller_v482_browser")!r}), public_key_py=Path({str(pub_py)!r}))
+            vault.ensure_master_key(sync_source=False)
+            state = {{"stopped": False, "empty": False}}
+
+            def on_empty():
+                state["stopped"] = True
+                state["empty"] = True
+
+            presence = PanelPresence(on_empty, close_grace=0.2)
+            secret = "browser-secret-482"
+            server = ThreadingHTTPServer(("127.0.0.1", 0), build_seller_panel_handler(vault, secret, presence))
+            port = int(server.server_address[1])
+            print(json.dumps({{"port": port, "secret": secret}}), flush=True)
+
+            def watch():
+                while not state["stopped"]:
+                    time.sleep(0.05)
+                server.shutdown()
+
+            import time
+            threading.Thread(target=watch, daemon=True).start()
+            server.serve_forever()
+            server.server_close()
+            print(json.dumps({{"exited": True, "empty": state["empty"]}}), flush=True)
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    node_script = textwrap.dedent(
+        """
+        const puppeteer = require('puppeteer-core');
+        (async () => {
+          const module = await import('@sparticuz/chromium');
+          const chromium = module.default;
+          const path = require('node:path');
+          const location = path.resolve(path.dirname(require.resolve('@sparticuz/chromium')), '..');
+          await module.inflate(require('node:path').join(location, 'bin/al2023.tar.br'));
+          module.setupLambdaEnvironment('/tmp/al2023/lib');
+          const args = chromium.args.filter(a => a !== '--single-process' && !a.startsWith('--headless') && !a.startsWith('--use-gl') && !a.startsWith('--use-angle') && a !== '--enable-unsafe-swiftshader' && a !== '--in-process-gpu');
+          const browser = await puppeteer.launch({ args: [...args, '--disable-gpu'], executablePath: await chromium.executablePath(), headless: 'new' });
+          const page = await browser.newPage();
+          await page.goto(`http://127.0.0.1:${process.env.PANEL_PORT}/?secret=${process.env.PANEL_SECRET}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await page.waitForFunction(() => typeof panelLifebeat === 'function');
+          await new Promise(r => setTimeout(r, 300));
+          await page.close();
+          await browser.close();
+          console.log('browser-closed');
+        })().catch((error) => { console.error(String(error)); process.exit(1); });
+        """
+    )
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(py_root)
+    proc = subprocess.Popen(
+        [sys.executable, str(runner)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        first = proc.stdout.readline()
+        info = _json.loads(first)
+        node = shutil.which("node")
+        assert node, "node is required for the browser part of this test"
+        node_file = repo_root / f".seller-panel-tab-test-{os.getpid()}.cjs"
+        node_file.write_text(node_script, encoding="utf-8")
+        browser_env = dict(os.environ)
+        browser_env["PANEL_PORT"] = str(info["port"])
+        browser_env["PANEL_SECRET"] = str(info["secret"])
+        try:
+            browser_result = subprocess.run(
+                [node, str(node_file)],
+                capture_output=True,
+                text=True,
+                timeout=150,
+                env=browser_env,
+            )
+        finally:
+            node_file.unlink(missing_ok=True)
+        assert browser_result.returncode == 0, browser_result.stderr
+        assert "browser-closed" in browser_result.stdout
+        # The server must exit by itself; the process must not need a kill.
+        proc.wait(timeout=15)
+        remaining = proc.stdout.read()
+        assert '"exited": true' in remaining, remaining
+        assert '"empty": true' in remaining, remaining
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
 def test_seller_parent_watcher_stops_server_when_direct_launcher_exits(monkeypatch):
     """The seller server watches its direct launcher; it must not walk up to PID 1 and return."""
     import ctypes

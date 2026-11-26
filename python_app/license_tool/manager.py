@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import ctypes
+from collections.abc import Callable
 import ctypes.wintypes
 import csv
 import datetime as dt
@@ -1730,7 +1731,7 @@ _PANEL_HTML = """<!doctype html>
     async function callApi(path, method = 'GET', body = null) {
       const res = await fetch(path, {
         method,
-        headers: { 'Content-Type': 'application/json', 'X-Seller-Secret': SECRET },
+        headers: { 'Content-Type': 'application/json', 'X-Seller-Secret': SECRET, 'X-Panel-Tab': PANEL_TAB_ID },
         body: body ? JSON.stringify(body) : null,
       });
       const data = await res.json();
@@ -1981,7 +1982,7 @@ _PANEL_HTML = """<!doctype html>
 
     $('exportCsvBtn').onclick = async () => {
       try {
-        const res = await fetch('/api/customers.csv', { headers: { 'X-Seller-Secret': SECRET } });
+        const res = await fetch('/api/customers.csv', { headers: { 'X-Seller-Secret': SECRET, 'X-Panel-Tab': PANEL_TAB_ID } });
         if (!res.ok) throw new Error('خطا در دریافت خروجی اکسل');
         const blob = await res.blob();
         const blobUrl = URL.createObjectURL(blob);
@@ -2269,6 +2270,49 @@ _PANEL_HTML = """<!doctype html>
       ev.target.value = '';
     };
 
+    // --- Tab lifecycle: stop the local python server when the panel tab closes ---
+    // The server owns a small presence tracker; these signals keep it in sync
+    // with the real browser tab (heartbeat while open, beacon on unload, and a
+    // short "probe" that fails silently once the browser process has quit).
+    const PANEL_TAB_ID = (() => {
+      try {
+        const existing = sessionStorage.getItem('hasaya-seller-tab');
+        if (existing) return existing;
+        const created = 'tab-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+        sessionStorage.setItem('hasaya-seller-tab', created);
+        return created;
+      } catch {
+        return 'tab-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+      }
+    })();
+    const PANEL_TAB_PARAM = 'tab=' + encodeURIComponent(PANEL_TAB_ID);
+
+    function panelLifebeat(closed) {
+      const qs = '?secret=' + encodeURIComponent(SECRET) + '&' + PANEL_TAB_PARAM + (closed ? '&closed=1' : '');
+      if (closed) {
+        if (!navigator.sendBeacon || !navigator.sendBeacon('/api/session/close' + qs, '')) {
+          try { fetch('/api/session/close' + qs, { method: 'POST', keepalive: true }); } catch {}
+        }
+        return;
+      }
+      fetch('/api/session/heartbeat' + qs, { method: 'POST', keepalive: true }).catch(() => {});
+    }
+
+    function panelBrowserProbe() {
+      // A closed browser makes this fail within a second; a live tab keeps it green.
+      const img = new Image();
+      img.onload = img.onerror = () => { img.onload = img.onerror = null; };
+      img.src = '/api/presence?secret=' + encodeURIComponent(SECRET) + '&' + PANEL_TAB_PARAM + '&probe=' + Date.now();
+    }
+
+    panelLifebeat(false);
+    setInterval(() => panelLifebeat(false), 20000);
+    setInterval(panelBrowserProbe, 5000);
+    window.addEventListener('pagehide', () => panelLifebeat(true));
+    window.addEventListener('beforeunload', () => panelLifebeat(true));
+    // A reopened (or restored) tab is alive again and must cancel any pending shutdown.
+    window.addEventListener('pageshow', () => panelLifebeat(false));
+
     refreshInfo().catch((e) => notify(e.message, true));
   </script>
 </body>
@@ -2276,7 +2320,144 @@ _PANEL_HTML = """<!doctype html>
 """
 
 
-def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[BaseHTTPRequestHandler]:
+class PanelPresence:
+    """Track buyer-panel browser tabs so closing them can stop the local server.
+
+    The seller panel is only a local web page; closing its tab used to leave the
+    Python server (and its console) alive until Ctrl+C.  This tracker makes the
+    page report itself: it sends a heartbeat while open, an explicit close when
+    it unloads, and a periodic "browser-probe" request (with a 1-second timeout)
+    that keeps failing silently when the browser process is gone.
+
+    Rules, matching the studio SessionManager:
+    * any request from the page marks it alive and cancels a pending shutdown;
+    * an explicit close ("closed": true) removes the tab for good;
+    * a tab that merely went quiet stays as a silent tab for ``stale_after``
+      seconds, so a frozen/throttled tab never stops a running panel;
+    * once there are no alive tabs and all silent tabs are gone, ``on_empty`` is
+      called after a short grace period.
+    """
+
+    def __init__(
+        self,
+        on_empty: Callable[[], None] | None = None,
+        *,
+        close_grace: float = 2.0,
+        stale_after: float = 45.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.on_empty = on_empty
+        self.close_grace = close_grace
+        self.stale_after = stale_after
+        self._clock = clock
+        self._alive: dict[str, float] = {}
+        self._silent: dict[str, float] = {}
+        self._timer: threading.Timer | None = None
+        self._lock = threading.RLock()
+
+    @property
+    def active_count(self) -> int:
+        with self._lock:
+            return len(self._alive)
+
+    @property
+    def known_count(self) -> int:
+        with self._lock:
+            return len(self._alive) + len(self._silent)
+
+    def _cancel_locked(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+
+    def _sweep_locked(self, now: float | None = None) -> bool:
+        """Move expired tabs to silent, drop silent tabs past their window.
+
+        Returns True while something still keeps the server alive.
+        """
+        cur = self._clock() if now is None else now
+        for cid, deadline in list(self._alive.items()):
+            if deadline <= cur:
+                self._alive.pop(cid, None)
+                self._silent[cid] = cur + self.stale_after
+        for cid, deadline in list(self._silent.items()):
+            if deadline <= cur:
+                self._silent.pop(cid, None)
+        return bool(self._alive or self._silent)
+
+    def _next_delay_locked(self) -> float:
+        deadlines = list(self._alive.values()) or list(self._silent.values())
+        return max(0.05, min(deadlines) - self._clock()) if deadlines else 0.05
+
+    def _ensure_timer_locked(self) -> None:
+        """(Re)arm the single housekeeping timer; it is a no-op while one is pending."""
+        if self._timer is not None or not (self._alive or self._silent):
+            return
+        timer = threading.Timer(self._next_delay_locked(), self._expire)
+        timer.daemon = True
+        self._timer = timer
+        timer.start()
+
+    def touch(self, client_id: str) -> int:
+        """Mark a panel tab alive (heartbeat, API call or page request)."""
+        cid = str(client_id or "").strip()[:120]
+        if not cid:
+            return self.active_count
+        with self._lock:
+            self._alive[cid] = self._clock() + self.stale_after
+            self._silent.pop(cid, None)
+            # A live tab cancels any pending shutdown and re-arms housekeeping.
+            self._cancel_locked()
+            self._ensure_timer_locked()
+            return len(self._alive)
+
+    def close(self, client_id: str) -> tuple[int, bool]:
+        """Remove one tab explicitly; returns (alive tabs, whether it was known)."""
+        cid = str(client_id or "").strip()[:120]
+        with self._lock:
+            known = cid in self._alive or cid in self._silent
+            if not known:
+                return len(self._alive), False
+            self._alive.pop(cid, None)
+            self._silent.pop(cid, None)
+            now = self._clock()
+            if not self._sweep_locked(now):
+                self._schedule_shutdown_locked()
+            else:
+                self._ensure_timer_locked()
+            return len(self._alive), True
+
+    def _schedule_shutdown_locked(self) -> None:
+        self._cancel_locked()
+        if not self.on_empty:
+            return
+        timer = threading.Timer(self.close_grace, self._fire_if_empty)
+        timer.daemon = True
+        self._timer = timer
+        timer.start()
+
+    def _expire(self) -> None:
+        with self._lock:
+            self._timer = None
+            if self._sweep_locked():
+                self._ensure_timer_locked()
+            else:
+                self._schedule_shutdown_locked()
+
+    def _fire_if_empty(self) -> None:
+        with self._lock:
+            self._timer = None
+            if self._sweep_locked() or not self.on_empty:
+                return
+            callback = self.on_empty
+        callback()
+
+
+def build_seller_panel_handler(
+    vault: SellerVault,
+    panel_secret: str,
+    presence: PanelPresence | None = None,
+) -> type[BaseHTTPRequestHandler]:
     """Create the HTTP handler class for the Seller Panel (reusable in unit tests)."""
     allowed_static: dict[str, tuple[Path, str]] = {
         "/assets/Vazirmatn.woff2": (_STATIC_ASSETS_DIR / "Vazirmatn.woff2", "font/woff2"),
@@ -2286,9 +2467,18 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
     max_post_bytes = 16 * 1024 * 1024
     loopback_hosts = {"127.0.0.1", "localhost", "[::1]", "::1"}
 
+    token_param = "?secret=" + panel_secret
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt: str, *args: Any) -> None:
             return
+
+        def _presence_client_id(self, parsed) -> str:
+            """Return the tab id sent by the page (query for beacons, header for fetches)."""
+            given = (parse_qs(parsed.query).get("tab") or [""])[0]
+            if not given:
+                given = self.headers.get("X-Panel-Tab", "")
+            return str(given or "").strip()[:120]
 
         def _send_security_headers(self) -> None:
             self.send_header("Referrer-Policy", "no-referrer")
@@ -2320,7 +2510,17 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
 
         def _authorized(self) -> bool:
             given = self.headers.get("X-Seller-Secret", "")
-            return bool(given) and hmac.compare_digest(given, panel_secret)
+            if given and hmac.compare_digest(given, panel_secret):
+                return True
+            parsed = urlsplit(self.path)
+            # Page-lifecycle signals (heartbeat / tab closed / browser gone) use
+            # navigator.sendBeacon or a plain <img> probe, neither of which can
+            # set custom headers; for those three routes only, the per-run secret
+            # may travel in the query string.  Data APIs still need the header.
+            if parsed.path not in ("/api/presence", "/api/session/heartbeat", "/api/session/close"):
+                return False
+            given_q = (parse_qs(parsed.query).get("secret") or [""])[0]
+            return bool(given_q) and hmac.compare_digest(given_q, panel_secret)
 
         def do_GET(self) -> None:  # noqa: N802
             if not self._is_loopback_request():
@@ -2351,6 +2551,8 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
                 # v4.46: render the version badge from APP_VERSION instead of a
                 # hardcoded Persian string that silently went stale (e.g. it
                 # still said ۴.۳۰/۴.۴۳ long after the studio moved on).
+                if presence is not None:
+                    presence.touch((qs.get("tab") or [""])[0])
                 body = _PANEL_HTML.replace("__APP_VERSION_FA__", APP_VERSION.translate(_FA_DIGITS)).encode("utf-8")
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -2363,6 +2565,19 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
 
             if not self._authorized():
                 self._send_json({"detail": "توکن امنیتی پنل فروشنده نامعتبر است."}, HTTPStatus.FORBIDDEN)
+                return
+
+            if parsed.path in ("/api/presence", "/api/session/heartbeat", "/api/session/close"):
+                if presence is None:
+                    self._send_json({"ok": True, "active": 0})
+                    return
+                cid = self._presence_client_id(parsed)
+                if parsed.path == "/api/session/close" or (parse_qs(parsed.query).get("closed") or [""])[0] == "1":
+                    active, accepted = presence.close(cid)
+                    self._send_json({"ok": True, "active": active, "accepted": accepted})
+                    return
+                active = presence.touch(cid)
+                self._send_json({"ok": True, "active": active})
                 return
 
             if parsed.path == "/api/info":
@@ -2486,6 +2701,18 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
                 self._send_json({"detail": "فرمت JSON نامعتبر است."}, HTTPStatus.BAD_REQUEST)
                 return
             parsed = urlsplit(self.path)
+            if parsed.path in ("/api/presence", "/api/session/heartbeat", "/api/session/close"):
+                if presence is None:
+                    self._send_json({"ok": True, "active": 0})
+                    return
+                cid = self._presence_client_id(parsed)
+                if parsed.path == "/api/session/close" or (parse_qs(parsed.query).get("closed") or [""])[0] == "1":
+                    active, accepted = presence.close(cid)
+                    self._send_json({"ok": True, "active": active, "accepted": accepted})
+                    return
+                active = presence.touch(cid)
+                self._send_json({"ok": True, "active": active})
+                return
             try:
                 if parsed.path == "/api/issue":
                     raw_mods = data.get("modules")
@@ -2674,7 +2901,17 @@ def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
             print("=" * 72)
             key_info = {"fingerprint": "—"}
     panel_secret = secrets.token_urlsafe(24)
-    handler_cls = build_seller_panel_handler(vault, panel_secret)
+    shutdown_holder: dict[str, bool] = {"requested": False, "empty": False}
+
+    def _stop_when_last_tab_closes() -> None:
+        """The panel page closed its last tab (or the browser quit): stop this server."""
+        shutdown_holder["empty"] = True
+        shutdown_holder["requested"] = True
+        with contextlib.suppress(Exception):
+            server.shutdown()
+
+    presence = PanelPresence(_stop_when_last_tab_closes)
+    handler_cls = build_seller_panel_handler(vault, panel_secret, presence)
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
     port = int(server.server_address[1])
     url = f"http://127.0.0.1:{port}/?secret={panel_secret}"
@@ -2684,13 +2921,12 @@ def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
     print(f"  مسیر خصوصی گاوصندوق فروشنده: {vault.seller_dir}")
     print(f"  نسخهٔ پشتیبان کلید مادر: {vault.master_key_backup_path}")
     print(f"  آدرس پنل محلی: {url}")
-    print("  برای بستن پنل، کلیدهای Ctrl+C را بزنید یا این پنجره را ببندید.")
+    print("  برای بستن پنل، تب مرورگر را ببندید یا کلیدهای Ctrl+C را بزنید یا این پنجره را ببندید.")
     print("=" * 72)
     if open_browser:
         with contextlib.suppress(Exception):
             webbrowser.open(url)
 
-    shutdown_holder: dict[str, bool] = {"requested": False}
     try:
         _start_parent_watcher(server, shutdown_holder)
     except Exception:
@@ -2705,7 +2941,9 @@ def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
         print("\nپنل فروشنده بسته شد.")
     finally:
         server.server_close()
-        if shutdown_holder.get("requested"):
+        if shutdown_holder.get("empty"):
+            print("\n[notice] تب مرورگر پنل بسته شد؛ سرور محلی و برنامهٔ پایتون هم پایان یافتند.")
+        elif shutdown_holder.get("requested"):
             print("\n[notice] پنجرهٔ پنل توسط کاربر بسته شد؛ برنامهٔ زمینهٔ لایسنس هم پایان یافت.")
 
 

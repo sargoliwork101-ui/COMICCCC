@@ -3,7 +3,7 @@ setlocal EnableExtensions
 chcp 65001 >nul
 cd /d "%~dp0"
 
-rem HaSaYa Studio 4.81 - optional administrator launcher.
+rem HaSaYa Studio 4.82 - optional administrator launcher.
 rem Use this when Windows denies permission during OCR package installation.
 rem Optional OCR models are still downloaded only after an explicit click in the app.
 

@@ -110,7 +110,29 @@ async function verifyEnhancementLocation(browser) {
 async function previewDifference(page) {
   return page.evaluate(async () => {
     const item = state.project.images[0];
-    const original = await createImageBitmap(await (await fetch(imageUrl(item, false))).blob());
+    // The original PNG is served as a no-store stream.  The grid can swap the
+    // project's first image while the editor finishes applying a render, so a
+    // short read can answer 404 or a non-image body; retry those, never a real
+    // image decode mismatch.
+    let original = null;
+    let originalError = null;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      try {
+        const response = await fetch(imageUrl(item, false), { cache: 'no-store' });
+        if (!response.ok) throw new Error(`original image HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`);
+        const blob = await response.blob();
+        try {
+          original = await createImageBitmap(blob);
+          break;
+        } catch (error) {
+          originalError = error;
+        }
+      } catch (error) {
+        originalError = error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+    if (!original) throw originalError || new Error('original image fetch failed');
     const expected = Typeset.render(original, overlayBlocks(item));
     original.close();
     let image;
@@ -3206,7 +3228,11 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
           });
         });
         const sellerPage = await browser.newPage();
-        await sellerPage.goto(`http://127.0.0.1:${sellerPort}/?secret=${sellerSecret}`, { waitUntil: 'networkidle0' });
+        // The panel page now sends a heartbeat every 20 s and a presence probe
+        // every 5 s, so "networkidle0" would never settle; wait for the DOM and
+        // for the first API load instead.
+        await sellerPage.goto(`http://127.0.0.1:${sellerPort}/?secret=${sellerSecret}`, { waitUntil: 'domcontentloaded' });
+        await sellerPage.waitForFunction(() => typeof refreshInfo === 'function');
         const sellerVisualCheck = await sellerPage.evaluate(async () => {
           await document.fonts.ready;
           const fontLoaded = document.fonts.check('13px Vazirmatn');
