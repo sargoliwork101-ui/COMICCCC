@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>HaSaYa Studio</title>
-  <link rel="stylesheet" href="/style.css?v=4.85">
-  <link rel="stylesheet" href="/rich-editor.css?v=4.85">
+  <link rel="stylesheet" href="/style.css?v=4.86">
+  <link rel="stylesheet" href="/rich-editor.css?v=4.86">
 </head>
 <body>
   <header class="topbar">
@@ -234,6 +234,32 @@
       <div id="groupEditStatus" class="hint-inline">برای ویرایش اعضا، «ویرایش» یک گروه را بزنید و سپس کارت‌ها را انتخاب یا لغو انتخاب کنید.</div>
     </section>
 
+    <nav id="gridPager" class="grid-pager hidden" aria-label="جابه‌جایی بین صفحات">
+      <div class="grid-pager-group">
+        <button id="gridPagerFirst" class="bt pager-btn" type="button" title="صفحهٔ اول" aria-label="صفحهٔ اول">
+          <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 3.2v9.6M12.4 3.6 6.6 8l5.8 4.4Z"/></svg>
+        </button>
+        <button id="gridPagerPrev" class="bt pager-btn" type="button" title="صفحهٔ قبل" aria-label="صفحهٔ قبل">
+          <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M10.2 3.4 5.6 8l4.6 4.6"/></svg>
+        </button>
+        <label class="grid-pager-input" for="gridPageInput">
+          <span>برو به صفحه</span>
+          <input id="gridPageInput" type="number" inputmode="numeric" min="1" step="1" dir="ltr" aria-label="شمارهٔ صفحه برای رفتن">
+        </label>
+        <span id="gridPageTotal" class="grid-pager-total" dir="ltr">/ 0</span>
+        <button id="gridPageGoBtn" class="bt primary pager-btn pager-go" type="button" title="رفتن به صفحه">برو</button>
+        <button id="gridPagerNext" class="bt pager-btn" type="button" title="صفحهٔ بعد" aria-label="صفحهٔ بعد">
+          <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M5.8 3.4 10.4 8l-4.6 4.6"/></svg>
+        </button>
+        <button id="gridPagerLast" class="bt pager-btn" type="button" title="صفحهٔ آخر" aria-label="صفحهٔ آخر">
+          <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M12 3.2v9.6M3.6 3.6 9.4 8l-5.8 4.4Z"/></svg>
+        </button>
+      </div>
+      <div class="grid-pager-group grid-pager-count">
+        <span class="grid-pager-label">در نمای فعلی</span>
+        <span id="gridPagerRange" class="grid-pager-range">۰ از ۰</span>
+      </div>
+    </nav>
     <section id="grid" class="grid" aria-live="polite"></section>
     <div id="groupOutlines" aria-hidden="true"></div>
     <section id="emptyState" class="empty-state">
@@ -1069,14 +1095,14 @@
     </div>
   </div>
   <div id="toast" role="status" popover="manual"></div>
-<script src="/typeset.js?v=4.85"></script>
-<script src="/groups.js?v=4.85"></script>
-<script src="/rich-sanitize.js?v=4.85"></script>
-<script src="/rich-editor.js?v=4.85"></script>
-<script src="/inline-edit-session.js?v=4.85"></script>
-<script src="/help-guide.js?v=4.85"></script>
-<script src="/document-enhancement.js?v=4.85"></script>
-<script src="/ocr-profiles.js?v=4.85"></script>
-<script src="/app.js?v=4.85"></script>
+<script src="/typeset.js?v=4.86"></script>
+<script src="/groups.js?v=4.86"></script>
+<script src="/rich-sanitize.js?v=4.86"></script>
+<script src="/rich-editor.js?v=4.86"></script>
+<script src="/inline-edit-session.js?v=4.86"></script>
+<script src="/help-guide.js?v=4.86"></script>
+<script src="/document-enhancement.js?v=4.86"></script>
+<script src="/ocr-profiles.js?v=4.86"></script>
+<script src="/app.js?v=4.86"></script>
 </body>
 </html>

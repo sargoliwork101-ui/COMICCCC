@@ -5111,6 +5111,49 @@ function check(name, condition) {
       && v452OcrReview.tr === 'ترجمهٔ قبلی' && v452OcrReview.saves === 1, JSON.stringify(v452OcrReview));
 
   // v4.85: a page whose visible lines were not all read must not be counted as a
+  // 4.86 — page navigator: a jump must land on the requested page and stay
+  // there, out-of-range input must clamp to the real count, and scrolling must
+  // move the counter.
+  const v486Pager = await vm.runInContext(`
+    (() => {
+      const pager = document.getElementById('gridPager');
+      const ids = ['gridPagerFirst', 'gridPagerPrev', 'gridPageInput', 'gridPageGoBtn', 'gridPagerNext', 'gridPagerLast'];
+      const missingIds = ids.filter((id) => !document.getElementById(id));
+      state.project = {id:'v486', images: Array.from({length: 600}, (_, i) => ({id:'p' + (i + 1), name:'صفحهٔ ' + (i + 1)}))};
+      gridPagerRender(1);
+      const total = gridPagerTotal();
+      const clampLow = gridPagerClamp(-5);
+      const clampHigh = gridPagerClamp(9999);
+      const exact = gridPagerClamp(600);
+      gridPagerSetLabel(600);
+      const label600 = document.getElementById('gridPagerRange').textContent;
+      const cur600 = gridPagerCurrent;
+      gridPagerSetLabel(1);
+      const label1 = document.getElementById('gridPagerRange').textContent;
+      // The counter must survive a re-render that does not change the page list.
+      gridPagerSetLabel(300);
+      gridPagerRefresh();
+      const keptAfterRefresh = gridPagerCurrent;
+      return {
+        visible: !pager.classList.contains('hidden'), missingIds, total, clampLow, clampHigh, exact,
+        label600, cur600, label1, keptAfterRefresh,
+        label300: document.getElementById('gridPagerRange').textContent,
+      };
+    })()
+  `, context);
+  check('v4.86 page navigator renders its controls for a 600-page project',
+    v486Pager.visible && v486Pager.missingIds.length === 0 && v486Pager.total === 600,
+    JSON.stringify(v486Pager));
+  check('v4.86 out-of-range page numbers clamp to the real page count',
+    v486Pager.clampLow === 1 && v486Pager.clampHigh === 600 && v486Pager.exact === 600,
+    JSON.stringify(v486Pager));
+  check('v4.86 jumping to page 600 reports «۶۰۰ از ۶۰۰» with Persian digits',
+    v486Pager.cur600 === 600 && v486Pager.label600 === '۶۰۰ از ۶۰۰' && v486Pager.label1 === '۱ از ۶۰۰',
+    JSON.stringify(v486Pager));
+  check('v4.86 the page counter survives a grid re-render instead of resetting to 1',
+    v486Pager.keptAfterRefresh === 300 && v486Pager.label300 === '۳۰۰ از ۶۰۰',
+    JSON.stringify(v486Pager));
+
   // clean success in the "گزارش OCR" percentages.
   const v485Incomplete = await vm.runInContext(`
     (() => {

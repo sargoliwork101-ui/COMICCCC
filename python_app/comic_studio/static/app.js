@@ -1427,6 +1427,266 @@ function observeGridImages(images) {
   gridImageObserver = observer;
   images.forEach((image) => observer.observe(image));
 }
+// ---------------------------------------------------------------------------
+// Page navigator: jump straight to page N of the project (e.g. type 600 and the
+// grid scrolls to that card and stops there) and step through pages one at a
+// time without hunting for the card in a long list.
+// ---------------------------------------------------------------------------
+let gridPagerVisible = 0;        // last known page count shown in the navigator
+let gridPagerCurrent = 0;        // 1-based page the user is looking at
+let gridPagerObserver = null;
+let gridPagerHighlight = null;
+let gridPagerFrame = 0;
+// While an explicit jump is running (or its scroll is still settling) the scroll
+// listener must not rewrite the page number: on a 600 page book the smooth
+// scroll fires for a long time and used to leave "۵۹۶ از ۶۰۰" after asking for
+// page 600.
+let gridPagerLockUntil = 0;
+let gridPagerSettleTimer = 0;
+let gridPagerJumpToken = 0;
+let gridPagerLastShown = '';
+
+function gridPagerTotal() {
+  return sortedImages().length;
+}
+
+function gridPagerCard(index) {
+  const grid = $('grid');
+  if (!grid) return null;
+  return grid.querySelectorAll('.item')[index] || null;
+}
+
+function gridPagerClamp(value) {
+  const total = gridPagerTotal();
+  const number = Math.round(Number(value));
+  if (!Number.isFinite(number)) return 0;
+  return Math.min(Math.max(number, 1), Math.max(1, total));
+}
+
+function gridPagerRender(current = gridPagerCurrent, opts = {}) {
+  const nav = $('gridPager');
+  const input = $('gridPageInput');
+  const totalEl = $('gridPageTotal');
+  const rangeEl = $('gridPagerRange');
+  const total = gridPagerTotal();
+  gridPagerVisible = total;
+  if (!nav) return;
+  nav.classList.toggle('hidden', total === 0);
+  if (totalEl) totalEl.textContent = `/ ${total.toLocaleString('fa-IR')}`;
+  if (input) {
+    input.max = String(Math.max(1, total));
+    input.placeholder = total ? `۱ تا ${total.toLocaleString('fa-IR')}` : '—';
+    input.disabled = total === 0;
+  }
+  const shown = total ? gridPagerClamp(current || 1) : 0;
+  gridPagerCurrent = shown;
+  if (rangeEl) {
+    rangeEl.textContent = total
+      ? `${shown.toLocaleString('fa-IR')} از ${total.toLocaleString('fa-IR')}`
+      : '۰ از ۰';
+  }
+  const atStart = !total || shown <= 1;
+  const atEnd = !total || shown >= total;
+  ['gridPagerFirst', 'gridPagerPrev'].forEach((id) => { const el = $(id); if (el) el.disabled = atStart; });
+  ['gridPagerNext', 'gridPagerLast'].forEach((id) => { const el = $(id); if (el) el.disabled = atEnd; });
+  const goBtn = $('gridPageGoBtn'); if (goBtn) goBtn.disabled = !total;
+  if (!opts.keepInput && document.activeElement !== input && input) {
+    input.value = total ? String(shown) : '';
+  }
+}
+
+function gridPagerHighlightCard(card) {
+  if (!card) return;
+  if (gridPagerHighlight && gridPagerHighlight !== card) gridPagerHighlight.classList.remove('pager-target');
+  gridPagerHighlight = card;
+  card.classList.add('pager-target');
+  clearTimeout(gridPagerHighlightCard.timer);
+  gridPagerHighlightCard.timer = setTimeout(() => {
+    card.classList.remove('pager-target');
+    if (gridPagerHighlight === card) gridPagerHighlight = null;
+  }, 2200);
+}
+
+function gridPagerGoTo(value, opts = {}) {
+  const total = gridPagerTotal();
+  const index = gridPagerClamp(value);
+  if (!total || !index) { gridPagerRender(gridPagerCurrent); return null; }
+  const card = gridPagerCard(index - 1);
+  const previous = gridPagerCurrent;
+  gridPagerCurrent = index;
+  gridPagerRender(index);
+  if (!card) return null;
+  // A long smooth scroll through hundreds of pages takes seconds and keeps
+  // fighting the label, so only short hops are animated; a big jump lands at
+  // once, exactly on the requested page.
+  const distance = previous ? Math.abs(index - previous) : 0;
+  const behavior = (opts.smooth === false || distance > 3) ? 'auto' : 'smooth';
+  // Cancel any settle callback from the previous jump first: it belongs to the
+  // old page and would write that old number back over this one.
+  clearTimeout(gridPagerSettleTimer);
+  gridPagerSettleTimer = 0;
+  const jumpToken = (gridPagerJumpToken += 1);
+  gridPagerLockUntil = Date.now() + (behavior === 'smooth' ? 700 : 260);
+  try {
+    card.scrollIntoView({ block: 'center', inline: 'nearest', behavior });
+  } catch (error) {
+    try { card.scrollIntoView(true); } catch (inner) { /* nothing else to do */ }
+  }
+  // Re-assert the label after the browser finishes laying the scroll out.
+  gridPagerSettleTimer = setTimeout(() => {
+    gridPagerSettleTimer = 0;
+    gridPagerLockUntil = 0;
+    // Only the newest jump may write the label; an older timer that fired late
+    // must not put its page number back on screen.
+    if (jumpToken === gridPagerJumpToken) gridPagerSetLabel(gridPagerCurrent);
+  }, behavior === 'smooth' ? 720 : 280);
+  gridPagerHighlightCard(card);
+  if (opts.focusCard) {
+    try { card.focus({ preventScroll: true }); } catch (error) { /* not focusable */ }
+  }
+  return card;
+}
+
+function gridPagerStep(delta) {
+  const total = gridPagerTotal();
+  if (!total) return;
+  const next = Math.min(Math.max((gridPagerCurrent || 1) + delta, 1), total);
+  gridPagerGoTo(next);
+}
+
+function gridPagerSetLabel(index) {
+  const rangeEl = $('gridPagerRange');
+  const total = gridPagerTotal();
+  if (!rangeEl) return;
+  const shown = total ? gridPagerClamp(index || 1) : 0;
+  gridPagerCurrent = shown;
+  rangeEl.textContent = total
+    ? `${shown.toLocaleString('fa-IR')} از ${total.toLocaleString('fa-IR')}`
+    : '۰ از ۰';
+  const input = $('gridPageInput');
+  if (input) {
+    // Do not clobber a number the user is still typing, but do keep the box in
+    // step when it merely echoes the previous page (after a committed jump the
+    // field keeps focus, and scrolling away must still update it).
+    const idle = document.activeElement !== input;
+    const echo = input.value === gridPagerLastShown || input.value === '';
+    if (idle || echo) input.value = total ? String(shown) : '';
+    gridPagerLastShown = total ? String(shown) : '';
+  }
+}
+
+function gridPagerTrackVisible() {
+  if (gridPagerFrame) return;
+  const schedule = typeof requestAnimationFrame === 'function'
+    ? requestAnimationFrame
+    : (cb) => setTimeout(cb, 16);
+  gridPagerFrame = schedule(() => {
+    gridPagerFrame = 0;
+    const grid = $('grid');
+    if (!grid) return;
+    const cards = grid.querySelectorAll('.item');
+    if (!cards.length) return;
+    if (Date.now() < gridPagerLockUntil) return;
+    const viewport = window.innerHeight || document.documentElement.clientHeight || 800;
+    // Pages are laid out in rows of several cards, so "the card nearest the
+    // middle" can be a neighbour of the page the user asked for.  Find the row
+    // band nearest the middle, then keep the current page when it lives in that
+    // row (a jump to 600 must stay 600, not drift to 596 on the same row).
+    const targetY = viewport * 0.45;
+    const rects = [];
+    cards.forEach((card, index) => {
+      const rect = card.getBoundingClientRect();
+      if (rect.bottom < 0 || rect.top > viewport) return;
+      rects.push({ index: index + 1, top: rect.top, bottom: rect.bottom });
+    });
+    if (!rects.length) return;
+    const rowOf = (entry) => Math.round(entry.top / 8);
+    let bestRow = null;
+    let bestRowDistance = Infinity;
+    rects.forEach((entry) => {
+      const distance = Math.abs((entry.top + entry.bottom) / 2 - targetY);
+      if (distance < bestRowDistance) { bestRowDistance = distance; bestRow = rowOf(entry); }
+    });
+    const rowEntries = rects.filter((entry) => rowOf(entry) === bestRow);
+    if (!rowEntries.length) return;
+    const firstOfRow = Math.min(...rowEntries.map((entry) => entry.index));
+    const lastOfRow = Math.max(...rowEntries.map((entry) => entry.index));
+    let next = gridPagerCurrent;
+    if (!(gridPagerCurrent >= firstOfRow && gridPagerCurrent <= lastOfRow)) {
+      next = firstOfRow;
+    }
+    if (next && next !== gridPagerCurrent) {
+      gridPagerCurrent = next;
+      gridPagerSetLabel(next);
+    }
+  });
+}
+
+function gridPagerRefresh() {
+  const total = gridPagerTotal();
+  // Keep the page the user was looking at when the list itself did not change.
+  gridPagerRender(Math.min(Math.max(gridPagerCurrent || 1, 1), Math.max(1, total)));
+}
+
+function gridPagerJumpFromInput() {
+  const input = $('gridPageInput');
+  if (!input) return;
+  const total = gridPagerTotal();
+  const raw = String(input.value || '').replace(/[۰-۹]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d) >= 0 ? String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)) : d)
+    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
+  const parsed = Number(raw.trim());
+  if (!total || !Number.isFinite(parsed) || parsed <= 0) {
+    gridPagerRender(gridPagerCurrent);
+    return;
+  }
+  const target = gridPagerClamp(parsed);
+  if (parsed > total) toast(`این پروژه ${total.toLocaleString('fa-IR')} صفحه دارد؛ به صفحهٔ ${target.toLocaleString('fa-IR')} رفتیم.`, true);
+  gridPagerGoTo(target, { focusCard: true });
+}
+
+function gridPagerBind() {
+  const nav = $('gridPager');
+  if (!nav || nav.dataset.bound === '1') return;
+  nav.dataset.bound = '1';
+  $('gridPagerFirst')?.addEventListener('click', () => gridPagerGoTo(1));
+  $('gridPagerPrev')?.addEventListener('click', () => gridPagerStep(-1));
+  $('gridPagerNext')?.addEventListener('click', () => gridPagerStep(1));
+  $('gridPagerLast')?.addEventListener('click', () => gridPagerGoTo(gridPagerTotal()));
+  $('gridPageGoBtn')?.addEventListener('click', gridPagerJumpFromInput);
+  const input = $('gridPageInput');
+  if (input) {
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') { event.preventDefault(); gridPagerJumpFromInput(); }
+      if (event.key === 'ArrowUp') { event.preventDefault(); gridPagerStep(-1); }
+      if (event.key === 'ArrowDown') { event.preventDefault(); gridPagerStep(1); }
+      if (event.key === 'Escape') { input.blur(); gridPagerRender(gridPagerCurrent); }
+    });
+    // "change" fires on blur too, and blur happens when the user clicks any
+    // other pager button; acting on it there would throw the page back to the
+    // stale number in the box. Only Enter and the «برو» button actually jump.
+    input.addEventListener('change', () => {
+      const shown = gridPagerTotal() ? String(gridPagerClamp(gridPagerCurrent)) : '';
+      if (String(input.value || '').trim() !== shown) input.value = shown;
+    });
+  }
+  const mainWrap = $('mainwrap');
+  (mainWrap || window).addEventListener('scroll', gridPagerTrackVisible, { passive: true });
+  window.addEventListener('resize', gridPagerTrackVisible, { passive: true });
+}
+
+function gridPagerAttachObserver() {
+  if (typeof IntersectionObserver !== 'function') return;
+  const grid = $('grid');
+  if (!grid) return;
+  if (!gridPagerObserver) {
+    gridPagerObserver = new IntersectionObserver(() => gridPagerTrackVisible(), {
+      root: null, rootMargin: '-35% 0px -45% 0px', threshold: [0, 0.25, 0.5, 1],
+    });
+  }
+  gridPagerObserver.disconnect();
+  grid.querySelectorAll('.item').forEach((card) => gridPagerObserver.observe(card));
+}
+
 function renderGrid() {
   const grid = $('grid'); if (!state.project) return;
   const savedWinScroll = getWindowScrollPosition();
@@ -1566,6 +1826,10 @@ function renderGrid() {
     frag.appendChild(card);
   });
   grid.replaceChildren(frag);
+  // Keep the navigator in sync with the cards that were just drawn; a fresh
+  // render must not reset the page the user is reading.
+  gridPagerRefresh();
+  gridPagerAttachObserver();
   observeGridImages([...grid.querySelectorAll('.tw > img')]);
   prevImages.forEach((staleImg) => releaseImgElement(staleImg));
   prevImages.clear();
@@ -10919,7 +11183,7 @@ async function bootApp(options = {}) {
   showServerUnreachable(detail);
 }
 async function init() {
-  bindEvents(); startSession();
+  bindEvents(); gridPagerBind(); startSession();
   await bootApp();
 }
 init();
