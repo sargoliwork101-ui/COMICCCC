@@ -33,7 +33,15 @@ from .activity import ActivityLog, JobCancelledError, cancellation_scope, report
 from .backup import BackupError, cleanup_backup_temp, make_backup, restore_backup
 from .exporter import build_docx, build_images_zip, build_pdf, build_pptx, build_txt, clean_name, crop_box, image_payload
 from .watermark_render import has_active_watermark
-from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, _INSTALL_LOCK, recognize_image
+from .ocr import (
+    ENGINE_INFO,
+    LANGUAGES,
+    EngineRegistry,
+    OcrError,
+    _INSTALL_LOCK,
+    missing_text_lines,
+    recognize_image,
+)
 from .ocr_filters import prepare_ocr_photo
 from .document_enhancement import EnhancementError, EnhancementSettings, prepare_document, run_document_ocr
 from .ocr_grouping import organize_ocr_blocks
@@ -1418,6 +1426,11 @@ def create_app() -> FastAPI:
             hi = step / max(1, total_targets)
             return round(lo, 4), round(hi, 4)
 
+        # Pages where the engine visibly left text lines unread.  They are still
+        # stored (a partial read is useful), but the run must not claim success.
+        # A set, because the parallel branch reports pages from worker threads.
+        incomplete_pages: set[str] = set()
+
         def _apply_page_ocr_result(item: dict[str, Any], raw_blocks: list[dict[str, Any]], page_size: tuple[int, int], step: int) -> None:
             preserved_manual = [
                 copy.deepcopy(b)
@@ -1451,6 +1464,24 @@ def create_app() -> FastAPI:
             item["edited"] = False
             item["approved"] = False
             mode_label = "کتاب/مقاله" if resolved_mode == "document" else "کمیک/حباب"
+            try:
+                from PIL import Image as _PILImage
+
+                with _PILImage.open(store.image_path(project_id, item["id"])) as _im:
+                    page_view = _im.convert("RGB")
+                try:
+                    unread = missing_text_lines(page_view, organized)
+                finally:
+                    page_view.close()
+            except Exception:
+                unread = 0
+            if unread:
+                incomplete_pages.add(item["id"])
+                activity.add(
+                    f"در «{item['name']}» {unread} سطر با تمام دقت‌ها خوانده نشد؛ "
+                    "خودتان روی تصویر بررسی کنید",
+                    "warning",
+                )
             _, done_p = _page_progress_bounds(step)
             activity.add(
                 f"در «{item['name']}» {len(organized)} تکه متن ({mode_label}) پیدا شد",
@@ -1595,13 +1626,27 @@ def create_app() -> FastAPI:
             else:
                 await run_in_threadpool(registry.unload_all)
         if not is_ui_paged_batch:
-            activity.add("OCR تمام شد؛ متن هر تصویر در گزارش بالا آمده است", "success", 1.0)
+            if incomplete_pages:
+                activity.add(
+                    "OCR تمام شد، اما در چند تصویر سطرهایی خوانده نشد؛ پیش از ترجمه بررسی کنید",
+                    "warning",
+                    1.0,
+                )
+            else:
+                activity.add("OCR تمام شد؛ متن هر تصویر در گزارش بالا آمده است", "success", 1.0)
         elif ui_batch_index >= ui_batch_total:
-            activity.add(
-                "OCR تمام شد؛ متن هر تصویر در گزارش بالا آمده است",
-                "success",
-                round((ui_batch_index - 0.18) / ui_batch_total, 4),
-            )
+            if incomplete_pages:
+                activity.add(
+                    "OCR تمام شد، اما در چند تصویر سطرهایی خوانده نشد؛ پیش از ترجمه بررسی کنید",
+                    "warning",
+                    round((ui_batch_index - 0.18) / ui_batch_total, 4),
+                )
+            else:
+                activity.add(
+                    "OCR تمام شد؛ متن هر تصویر در گزارش بالا آمده است",
+                    "success",
+                    round((ui_batch_index - 0.18) / ui_batch_total, 4),
+                )
         return state
 
     def translation_settings(provider: str, skill: str | None, target_language: str = "fa") -> dict[str, Any]:

@@ -4516,3 +4516,87 @@ def test_huggingface_download_refuses_unresolved_moving_revision(tmp_path, monke
         adapter._download_hf_repo_resilient("owner/model")
     assert calls == []
     assert not (tmp_path / "hf-repos" / "owner__model").exists()
+
+def _page_with_five_lines(path, *, missing_last: bool = False):
+    """Draw a page with five text lines, optionally leaving one unboxed."""
+    from PIL import Image, ImageDraw
+
+    image = Image.new("RGB", (900, 220), "white")
+    draw = ImageDraw.Draw(image)
+    for index in range(5):
+        top = 20 + index * 38
+        # Draw glyph-like strokes (vertical bars with gaps) rather than one solid
+        # bar: the coverage check deliberately ignores solid blocks and frames.
+        for col in range(40, 780, 12):
+            draw.rectangle([col, top, col + 6, top + 18], fill="black")
+    image.save(path)
+    return path
+
+
+def test_missing_text_lines_counts_rows_the_engine_skipped(tmp_path):
+    from PIL import Image
+
+    from comic_studio.ocr import _ink_line_boxes, _missing_text_lines
+
+    page_path = _page_with_five_lines(tmp_path / "page.png")
+    with Image.open(page_path) as image:
+        page = image.convert("RGB")
+    boxes = _ink_line_boxes(page)
+    assert len(boxes) == 5, boxes
+
+    # Four of the five rows covered: exactly one line is reported missing.
+    covered = [{"y0": y0, "y1": y1, "text": "x"} for _, y0, _, y1 in boxes[:4]]
+    assert _missing_text_lines(page, covered) == 1
+    # Everything covered means nothing is missing.
+    everything = [{"y0": y0, "y1": y1, "text": "x"} for _, y0, _, y1 in boxes]
+    assert _missing_text_lines(page, everything) == 0
+    # Nothing at all definitely means every line is missing.
+    assert _missing_text_lines(page, []) == 5
+
+
+def test_recovered_lines_are_merged_in_page_order_without_duplicates():
+    from comic_studio.ocr import _merge_recovered_lines
+
+    primary = [
+        {"id": 1, "text": "title", "y0": 10, "y1": 30, "x0": 0},
+        {"id": 2, "text": "body a", "y0": 50, "y1": 70, "x0": 0},
+        {"id": 3, "text": "footer", "y0": 200, "y1": 210, "x0": 0},
+    ]
+    retry = [
+        {"text": "title", "y0": 10, "y1": 30, "x0": 0},
+        {"text": "body a", "y0": 50, "y1": 70, "x0": 0},
+        {"text": "body b recovered", "y0": 80, "y1": 100, "x0": 0},
+        {"text": "footer", "y0": 200, "y1": 210, "x0": 0},
+    ]
+    merged = _merge_recovered_lines(primary, retry)
+    assert [b["text"] for b in merged] == ["title", "body a", "body b recovered", "footer"]
+    assert [b["id"] for b in merged] == [1, 2, 3, 4]
+    # The text already read by the primary pass is kept, not the retry wording.
+    assert merged[0]["text"] == "title"
+    # No recovered row means the primary list is returned untouched.
+    assert _merge_recovered_lines(primary, primary[:2]) is primary
+
+
+
+def test_coverage_check_ignores_pictures_and_box_outlines(tmp_path):
+    """A bordered panel or a solid picture must not look like unread text."""
+    from PIL import Image, ImageDraw
+
+    from comic_studio.ocr import _ink_line_boxes, _missing_text_lines
+
+    page = Image.new("RGB", (800, 600), "white")
+    draw = ImageDraw.Draw(page)
+    draw.rectangle([40, 30, 760, 120], outline="black", width=3)
+    for index in range(3):
+        for col in range(60, 300, 12):
+            draw.rectangle([col, 50 + index * 20, col + 6, 62 + index * 20], fill="black")
+    draw.rectangle([40, 200, 760, 560], fill="black")
+    path = tmp_path / "comic.png"
+    page.save(path)
+
+    with Image.open(path) as image:
+        comic = image.convert("RGB")
+    covered = [{"y0": 50, "y1": 62}, {"y0": 70, "y1": 82}, {"y0": 90, "y1": 102}]
+    # The frame and the picture are ignored, and the read bubble text covers the page.
+    assert _missing_text_lines(comic, covered) == 0
+    assert _ink_line_boxes(comic) == [] or _missing_text_lines(comic, covered) == 0

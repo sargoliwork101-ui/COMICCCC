@@ -471,3 +471,22 @@ def test_persian_numbered_headings_are_recognised():
     box = {'x0': 111, 'x1': 980, 'y0': 67, 'y1': 90, 'lineH': 23}
     for text in ('۲-۴ روش‌های طراحی مدار کنترل', '۴. نتیجه‌گیری', '۱- مقدمه', '1.2 عنوان بخش'):
         assert _classify_document_line_role({**box, 'text': text}, 20.0, 1000.0) == 'heading', text
+
+
+def test_glued_section_number_gets_its_space_back():
+    from comic_studio.ocr_grouping import _split_leading_section_number
+    assert _split_leading_section_number('1.2WHATYOUWILLFINDINTHEFOLLOWINGPAGES') == \
+        '1.2 WHATYOUWILLFINDINTHEFOLLOWINGPAGES'
+    assert _split_leading_section_number('2.4.1Installation Requirements') == '2.4.1 Installation Requirements'
+    # Ordinary prose and already correct titles must not be touched.
+    for text in ('1.2 WHAT YOU WILL FIND', '2020 was a long year', '3 apples and 4 oranges',
+                 'III. RESULTS AND DISCUSSION', '4. نتیجه‌گیری'):
+        assert _split_leading_section_number(text) == text, text
+
+
+def test_glued_number_and_title_read_as_one_numbered_heading():
+    source = [line(1, '1.2WHATYOUWILLFINDINTHEFOLLOWINGPAGES', 60, 12, width=640, height=24),
+              line(2, 'This book thoroughly details the advantages of SPICE to let you understand, '
+                      'simulate, test, and finally improve the switch-mode', 60, 60, width=980, height=18)]
+    result = group_ocr_lines(source, page_mode='document')
+    assert result[0]['text'] == '1.2 WHATYOUWILLFINDINTHEFOLLOWINGPAGES'

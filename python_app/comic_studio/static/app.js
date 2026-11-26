@@ -2738,6 +2738,20 @@ async function reviewTranslationReplacements(snapshot) {
     toast(`ترجمهٔ قبلی برای ${restoreIds.length} صفحه حفظ شد.`);
   }
 }
+function ocrIncompletePages(ids) {
+  const log = $('ocrActivityLog');
+  if (!log) return [];
+  const text = log.textContent || '';
+  if (!text.includes('خوانده نشد')) return [];
+  const projectImages = state.project?.images || [];
+  return ids.filter((id) => {
+    const item = projectImages.find((img) => img.id === id);
+    if (!item) return false;
+    const name = String(item.name || '');
+    return Boolean(name) && text.includes(`در «${name}»`) && text.includes('خوانده نشد');
+  });
+}
+
 async function runOcr() {
   if (!window.DocumentEnhancement.validate()) return;
   if (ocrRunning) return;
@@ -2856,12 +2870,22 @@ async function runOcr() {
         const item = state.project?.images?.find((img) => img.id === id);
         return item && item.ocrCompleted;
       }).length;
+      // A page can finish and still have visible lines the engine never read.
+      // Counting it as a plain success was what let the window say 100% while
+      // text was missing, so those pages are reported separately.
+      const unstableIds = ocrIncompletePages(ocrReviewIds);
       const failCount = Math.max(0, ocrReviewIds.length - doneCount);
-      const pct = Math.round((doneCount / ocrReviewIds.length) * 100);
+      const completeCount = Math.max(0, doneCount - unstableIds.length);
+      const pct = Math.round((completeCount / ocrReviewIds.length) * 100);
       showReportDialog('گزارش OCR', [
         `درصد موفقیت: ${pct}٪`,
         `تکمیل‌شده: ${doneCount} از ${ocrReviewIds.length} صفحه`,
         ...(failCount > 0 ? [`ناموفق یا ناتمام: ${failCount} صفحه`] : []),
+        ...(unstableIds.length
+          ? [
+              `بررسی لازم: ${unstableIds.length} صفحه سطرهایی دارد که خوانده نشد؛ روی تصویر ببینید و در صورت نیاز همان صفحه را دوباره OCR کنید.`,
+            ]
+          : []),
       ]);
     }
     clearPendingTranslationOcr(); closeDialog('ocrDialog');

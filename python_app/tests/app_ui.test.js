@@ -5110,6 +5110,24 @@ function check(name, condition) {
       && v452OcrReview.prompt.includes('ترجمهٔ قبلی') && v452OcrReview.text === 'متن OCR قبلی'
       && v452OcrReview.tr === 'ترجمهٔ قبلی' && v452OcrReview.saves === 1, JSON.stringify(v452OcrReview));
 
+  // v4.85: a page whose visible lines were not all read must not be counted as a
+  // clean success in the "گزارش OCR" percentages.
+  const v485Incomplete = await vm.runInContext(`
+    (() => {
+      const log = document.getElementById('ocrActivityLog');
+      log.textContent = 'در «صفحهٔ ناقص» 2 سطر با تمام دقت‌ها خوانده نشد؛ خودتان روی تصویر بررسی کنید';
+      state.project = {id:'v485', images:[
+        {id:'a', name:'صفحهٔ ناقص', ocrCompleted:true},
+        {id:'b', name:'صفحهٔ کامل', ocrCompleted:true},
+      ]};
+      return {incomplete: ocrIncompletePages(['a','b']), none: ocrIncompletePages(['b'])};
+    })()
+  `, context);
+  check('v4.85 pages with unread lines are reported separately instead of counted as 100% success',
+    Array.isArray(v485Incomplete.incomplete) && v485Incomplete.incomplete.length === 1
+      && v485Incomplete.incomplete[0] === 'a' && v485Incomplete.none.length === 0,
+    JSON.stringify(v485Incomplete));
+
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;
   window.dispatchEvent(new window.Event('beforeunload'));
   window.dispatchEvent(new window.Event('pagehide'));

@@ -462,6 +462,31 @@ def _classify_document_line_role(
 _BARE_SECTION_NUMBER_RE = re.compile(
     r"^\s*(?:\d{1,3}(?:\.\d{1,3}){0,5}|[IVXLCDM]{1,6})[.):\-–—]?\s*$"
 )
+# The same number glued to the start of its title ("1.2WHAT YOU WILL FIND…").
+# The detector sometimes returns both boxes as one line, and then the title must
+# still read "1.2 WHAT YOU WILL FIND…" instead of losing its space.
+_LEADING_SECTION_NUMBER_RE = re.compile(
+    r"^\s*(?P<num>\d{1,3}(?:\.\d{1,3}){1,5}|[IVXLCDM]{1,6}[.)])"
+    r"(?P<rest>[A-Za-z\u0600-\u06ff]\S*.*)$"
+)
+
+
+def _split_leading_section_number(text: str) -> str:
+    """Insert the missing space between a section number and its title."""
+    changed = text
+    while True:
+        match = _LEADING_SECTION_NUMBER_RE.match(changed)
+        if not match:
+            return changed
+        rest = match.group("rest")
+        # Only a single short token is a number plated to a word; a long run is
+        # prose that happens to start with digits (a year, a quantity).
+        if rest.split()[0][:1].isdigit():
+            return changed
+        fixed = f"{match.group('num')} {rest}"
+        if fixed == changed:
+            return changed
+        changed = fixed
 
 
 def _join_section_number_rows(blocks: list[dict[str, Any]], med_lh: float) -> list[dict[str, Any]]:
@@ -553,6 +578,28 @@ def _join_section_number_rows(blocks: list[dict[str, Any]], med_lh: float) -> li
         used.add(best)
         result.append(merged)
     return result
+
+
+def _split_glued_section_numbers(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Give "1.2WHAT YOU WILL FIND…" its missing space after the number."""
+    fixed_blocks: list[dict[str, Any]] = []
+    for original in blocks:
+        text = str(original.get("text") or "")
+        fixed = _split_leading_section_number(text) if text else text
+        if fixed == text:
+            fixed_blocks.append(original)
+            continue
+        block = copy.deepcopy(original)
+        block["text"] = fixed
+        source_lines = block.get("sourceLines")
+        if isinstance(source_lines, list):
+            block["sourceLines"] = [
+                {**line, "text": _split_leading_section_number(str(line.get("text") or ""))}
+                if isinstance(line, dict) and line.get("text") else line
+                for line in source_lines
+            ]
+        fixed_blocks.append(block)
+    return fixed_blocks
 
 
 def _repair_dropped_spaces(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -755,7 +802,7 @@ def group_document_lines(
     """Group OCR lines into structured book/article headings, lists, and paragraphs."""
     if not blocks:
         return []
-    blocks = _repair_dropped_spaces(blocks)
+    blocks = _split_glued_section_numbers(_repair_dropped_spaces(blocks))
     blocks = _join_section_number_rows(blocks, median(_line_h(b) for b in blocks))
     effective_rtl = rtl_columns or _is_mostly_rtl_blocks(blocks)
     if effective_rtl and len(blocks) >= 2:

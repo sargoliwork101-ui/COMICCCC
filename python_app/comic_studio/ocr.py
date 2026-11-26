@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import contextvars
 import csv
 import importlib.util
@@ -4660,19 +4661,25 @@ def _recognize_crop_lines(
     crop: Image.Image,
     language: str,
     page_mode: str = "auto",
+    *,
+    det_max_side: int | None = None,
 ) -> list[OcrLine]:
-    if page_mode == "document":
-        doc_rec = getattr(engine, "recognize_document", None)
-        if callable(doc_rec):
-            lines = doc_rec(crop, language)
-        elif isinstance(engine, IsolatedOcrEngine):
-            lines = engine.recognize(crop, language, page_mode=page_mode)
-        else:
-            lines = engine.recognize(crop, language)
-    elif isinstance(engine, IsolatedOcrEngine):
-        lines = engine.recognize(crop, language, page_mode=page_mode)
+    def _read() -> list[OcrLine]:
+        if page_mode == "document":
+            doc_rec = getattr(engine, "recognize_document", None)
+            if callable(doc_rec):
+                return doc_rec(crop, language)
+            if isinstance(engine, IsolatedOcrEngine):
+                return engine.recognize(crop, language, page_mode=page_mode)
+            return engine.recognize(crop, language)
+        if isinstance(engine, IsolatedOcrEngine):
+            return engine.recognize(crop, language, page_mode=page_mode)
+        return engine.recognize(crop, language)
+
+    if det_max_side is not None and getattr(engine, "supports_det_cap", False):
+        lines = engine.recognize(crop, language, det_max_side=det_max_side)
     else:
-        lines = engine.recognize(crop, language)
+        lines = _read()
     if language == "fas" and lines:
         normalized_lines: list[OcrLine] = []
         for ln in lines:
@@ -4718,6 +4725,7 @@ def _recognize_image_primary(
     page_mode: str = "auto",
     *,
     persian_preprocess: bool = False,
+    det_max_side: int | None = None,
 ) -> list[dict[str, Any]]:
     """The established OCR path; input_scale only restores fallback geometry."""
     from .ocr_grouping import detect_page_mode, sort_document_reading_order
@@ -4750,7 +4758,9 @@ def _recognize_image_primary(
             is_full = read_y0 == 0 and read_y1 == height
             crop = prepared if is_full else prepared.crop((0, read_y0, width, read_y1))
             try:
-                for line in _recognize_crop_lines(engine, crop, language, page_mode=page_mode):
+                for line in _recognize_crop_lines(
+                    engine, crop, language, page_mode=page_mode, det_max_side=det_max_side,
+                ):
                     polygon = [[x, y + read_y0] for x, y in line.polygon]
                     adjusted = OcrLine(
                         line.text,
@@ -4988,11 +4998,205 @@ def _result_metrics(blocks: list[dict[str, Any]]) -> tuple[int, float]:
     return total, weighted / total
 
 
+_COVERAGE_MAX_ANALYSIS_SIDE = 1400
+_COVERAGE_DARK_THRESHOLD = 170
+# Text rows carry far more ink than a box outline or a hairline rule, so a low
+# row threshold keeps ragged last lines but still separates them from their
+# surrounding frame; the per band mean then drops pure frames.
+_COVERAGE_MIN_BAND_INK = 0.02
+_COVERAGE_MIN_BAND_MEAN_INK = 0.20
+_COVERAGE_PAD = 3
+# Re-read with the detector's canvas limited on the *long* side instead of being
+# blown up on the short side; this is what recovers lines the default pass drops.
+_COVERAGE_RETRY_DET_CAP = 3840
+
+
+def _ink_line_boxes(image: Image.Image) -> list[tuple[float, float, float, float]]:
+    """Return one box per band of text ink found by a cheap row profile.
+
+    The OCR detector silently drops a line now and then (a clipped line at the
+    bottom of a crop, a faint line next to a picture).  This profile does not try
+    to read anything; it only notices where *ink* is, so the caller can tell that
+    the engine returned fewer lines than the page visibly has.
+    """
+    try:
+        import numpy as np
+
+        gray = image.convert("L")
+        if gray is image:
+            gray = image.copy()
+        try:
+            # A downscaled profile is enough to count text lines and keeps the
+            # cost of the check negligible next to the OCR pass itself.
+            if max(gray.size) > _COVERAGE_MAX_ANALYSIS_SIDE:
+                ratio = _COVERAGE_MAX_ANALYSIS_SIDE / max(gray.size)
+                gray = gray.resize(
+                    (max(1, round(gray.width * ratio)), max(1, round(gray.height * ratio))),
+                    Image.Resampling.BILINEAR,
+                )
+            arr = np.asarray(gray, dtype=np.uint8)
+        finally:
+            gray.close()
+        if arr.size == 0:
+            return []
+        dark = arr < _COVERAGE_DARK_THRESHOLD
+        row_ink = dark.mean(axis=1)
+        bands: list[tuple[int, int]] = []
+        start: int | None = None
+        for idx, value in enumerate(row_ink):
+            if value >= _COVERAGE_MIN_BAND_INK:
+                if start is None:
+                    start = idx
+            elif start is not None:
+                bands.append((start, idx - 1))
+                start = None
+        if start is not None:
+            bands.append((start, len(row_ink) - 1))
+        scale = image.height / max(1, arr.shape[0])
+        boxes: list[tuple[float, float, float, float]] = []
+        for top, bottom in bands:
+            if bottom <= top:
+                continue
+            # A frame or rule is one or two thin rows; a text line is a dense block.
+            if float(row_ink[top:bottom + 1].mean()) < _COVERAGE_MIN_BAND_MEAN_INK:
+                continue
+            band = dark[top:bottom + 1]
+            cols = band.any(axis=0)
+            if not cols.any():
+                continue
+            first = int(cols.argmax())
+            last = int(len(cols) - 1 - cols[::-1].argmax())
+            # Only *text-like* bands count.  A picture is a tall solid block, and
+            # a box outline is a band whose rows run edge to edge across the whole
+            # crop.  Real text has spaces between words, so most of its rows do
+            # not span the full line width.
+            band_h = bottom - top + 1
+            fill = float(band.mean())
+            if fill >= 0.72:
+                continue
+            row_fill = band.mean(axis=1)
+            widest = float(row_fill.max())
+            if band_h >= 4 and widest >= 0.94 and float((row_fill >= widest * 0.9).mean()) > 0.5:
+                # A frame/rule: its widest row keeps that density for most rows.
+                continue
+            # Horizontal rules and table borders are only a couple of rows tall
+            # but run the full width of the crop.
+            span_ratio = (last - first + 1) / max(1, arr.shape[1])
+            if band_h <= 3 and span_ratio >= 0.9:
+                continue
+            boxes.append((
+                max(0.0, (first - _COVERAGE_PAD) * (image.width / max(1, arr.shape[1]))),
+                max(0.0, (top - _COVERAGE_PAD) * scale),
+                min(float(image.width), (last + _COVERAGE_PAD) * (image.width / max(1, arr.shape[1]))),
+                min(float(image.height), (bottom + _COVERAGE_PAD) * scale),
+            ))
+        return boxes
+    except Exception:
+        # The coverage check is an optional safety net; it must never break OCR.
+        return []
+
+
+def _missing_text_lines(
+    image: Image.Image,
+    blocks: list[dict[str, Any]],
+    *,
+    max_missing: int = 12,
+) -> int:
+    """Count visible text lines that no returned block covers.
+
+    A block covers an ink band when the band's centre falls inside the block and
+    at least half of the band is inside it.  Bands that are much taller than a
+    line (a picture, a filled shape) are ignored, because they are not text.
+    """
+    boxes = _ink_line_boxes(image)
+    if not boxes:
+        return 0
+    heights = sorted(max(1.0, y1 - y0) for _, y0, _, y1 in boxes)
+    med_h = heights[len(heights) // 2]
+    bands = [
+        (x0, y0, x1, y1)
+        for x0, y0, x1, y1 in boxes
+        if (y1 - y0) <= med_h * 1.9
+    ]
+    if not bands:
+        return 0
+    spans: list[tuple[float, float]] = []
+    for block in blocks:
+        with contextlib.suppress(TypeError, ValueError):
+            spans.append((float(block.get("y0", 0.0)), float(block.get("y1", 0.0))))
+    if not spans:
+        return len(bands)
+    missing = 0
+    for _, y0, _, y1 in bands:
+        centre = (y0 + y1) * 0.5
+        covered = False
+        for by0, by1 in spans:
+            if by0 - _COVERAGE_PAD <= centre <= by1 + _COVERAGE_PAD:
+                overlap = min(y1, by1) - max(y0, by0)
+                if overlap >= (y1 - y0) * 0.5:
+                    covered = True
+                    break
+        if not covered:
+            missing += 1
+            if missing >= max_missing:
+                break
+    return missing
+
+
+# Public alias used by the server to check a stored page.
+missing_text_lines = _missing_text_lines
+
+
 def _needs_extra_preprocess(blocks: list[dict[str, Any]]) -> bool:
     if not blocks:
         return True
     chars, confidence = _result_metrics(blocks)
     return chars < EXTRA_PREPROCESS_MIN_CHARS or confidence < EXTRA_PREPROCESS_MIN_CONFIDENCE
+
+
+def _same_row(first: dict[str, Any], second: dict[str, Any]) -> bool:
+    """True when two blocks describe the same physical line of the page."""
+    y0a, y1a = float(first.get("y0", 0.0)), float(first.get("y1", 0.0))
+    y0b, y1b = float(second.get("y0", 0.0)), float(second.get("y1", 0.0))
+    height = max(1.0, min(y1a - y0a, y1b - y0b))
+    centre_gap = abs((y0a + y1a) * 0.5 - (y0b + y1b) * 0.5)
+    return centre_gap <= height * 0.6
+
+
+def _merge_recovered_lines(
+    primary: list[dict[str, Any]],
+    retry: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep the primary reading and add only the rows it missed.
+
+    The retry pass often reads the same line with different spacing, so its text
+    for an already-read row is thrown away; only rows with no primary counterpart
+    are appended, in page order.
+    """
+    def _row_key(block: dict[str, Any]) -> tuple[float, float]:
+        return (
+            (float(block.get("y0", 0.0)) + float(block.get("y1", 0.0))) * 0.5,
+            float(block.get("x0", 0.0)),
+        )
+
+    # Merge both passes in true page order: appending the recovered rows at the
+    # end would put a recovered last line below the page footer.
+    tagged = [(0, _row_key(block), block) for block in primary]
+    added = 0
+    for candidate in retry:
+        if not str(candidate.get("text") or "").strip():
+            continue
+        if any(_same_row(candidate, block) for _, _, block in tagged):
+            continue
+        tagged.append((1, _row_key(candidate), candidate))
+        added += 1
+    if not added:
+        return primary
+    tagged.sort(key=lambda item: (item[1], item[0]))
+    merged = [copy.deepcopy(block) for _, _, block in tagged]
+    for index, block in enumerate(merged, start=1):
+        block["id"] = index
+    return merged
 
 
 def _better_fallback(candidate: list[dict[str, Any]], primary: list[dict[str, Any]]) -> bool:
@@ -5594,6 +5798,52 @@ def recognize_image(
             best = _merge_non_overlapping_blocks(
                 best, container_blocks, is_rtl_lang=(language in {"fas", "ara"}),
             )
+    _check_ocr_cancelled()
+    # A detector can skip a text line even when the result looks confident and
+    # complete.  The app used to mark such a page "done" and still show 100%,
+    # so the page kept going into translation with a line missing.  Compare the
+    # returned boxes with the ink actually on the page and re-read at a larger
+    # detection canvas only when lines are visibly missing.
+    if getattr(engine, "supports_det_cap", False):
+        try:
+            missing = _missing_text_lines(image, best)
+        except Exception:
+            missing = 0
+        if missing:
+            emit(
+                f"تشخیص متن {missing} سطر از صفحه را جا انداخت؛ خواندن دوباره با دقت بیشتر…",
+                "warning",
+            )
+            try:
+                retry = _recognize_image_primary(
+                    engine,
+                    image,
+                    language,
+                    contrast,
+                    precise,
+                    min_confidence,
+                    page_mode=page_mode,
+                    persian_preprocess=persian_preprocess,
+                    det_max_side=_COVERAGE_RETRY_DET_CAP,
+                )
+            except JobCancelledError:
+                raise
+            except Exception:
+                emit("خواندن دوباره ممکن نبود؛ نتیجهٔ اولیه حفظ شد", "warning")
+            else:
+                retry_missing = _missing_text_lines(image, retry)
+                if retry_missing < missing:
+                    # Recovered lines are good, but a retry can also invent short
+                    # garbage boxes (box outlines, icons).  Keep the primary text
+                    # for every line both passes read and add only what was lost.
+                    merged = _merge_recovered_lines(best, retry)
+                    if _result_metrics(merged)[0] >= _result_metrics(best)[0]:
+                        emit("خواندن دوباره سطرهای جامانده را پیدا کرد", "success")
+                        best = merged
+                    else:
+                        emit("خواندن دوباره سطر تازه‌ای اضافه نکرد؛ نتیجهٔ اولیه حفظ شد")
+                else:
+                    emit("خواندن دوباره نتیجهٔ بهتری نداد؛ نتیجهٔ اولیه حفظ شد")
     _check_ocr_cancelled()
     if not _needs_extra_preprocess(best):
         return _finalize(best)
