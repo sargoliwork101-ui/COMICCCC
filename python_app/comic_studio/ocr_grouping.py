@@ -42,6 +42,10 @@ _STRUCTURED_LABEL_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 _SENTENCE_END_RE = re.compile(r'[.!?؟…。！？:؛»")\]]\s*$')
+# A genuine end of a sentence: terminal mark (optionally followed by closing
+# quotes/brackets) at the end of a run of words - not '.5' style numbers and not
+# a lone dot glued to a misread word in the middle of a line.
+_TERMINAL_SENTENCE_RE = re.compile(r"""\S\.(?:["'”’)\]]*)\s*$|\S[!?؟…。！？](?:["'”’)\]]*)\s*$""")
 _PROSE_STOP_PUNCT_RE = re.compile(r'[.!?؟…。！？؛,،]\s*$')
 _RTL_TEXT_RE = re.compile(r"[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]")
 
@@ -300,6 +304,15 @@ def sort_document_reading_order(
     return ordered
 
 
+def _latin_alpha_ratio(txt: str) -> float:
+    """Share of alphabetic characters that are Latin (used to tell prose from titles)."""
+    alpha = [ch for ch in txt if ch.isalpha()]
+    if not alpha:
+        return 1.0
+    latin = sum(1 for ch in alpha if "A" <= ch.upper() <= "Z")
+    return latin / len(alpha)
+
+
 def _is_all_caps_title(txt: str) -> bool:
     words = txt.split()
     if not (1 <= len(words) <= 14) or len(txt) > 100 or txt.endswith((".", ",", ";")):
@@ -333,21 +346,52 @@ def _classify_document_line_role(
 
     if lh >= med_lh * 1.24 and len(txt) <= 140 and not txt.endswith((".", "،", ",", ";", "؛")):
         return "heading"
-    if (
-        (_MULTI_LEVEL_NUM_HEADING_RE.match(txt) or (_HEADING_PREFIX_RE.match(txt) and not _PREFIX_PROSE_RE.match(txt)))
-        and len(txt) <= 130
-        and word_count <= 22
-        and not txt.endswith(".")
-    ):
+    prefixed_title = bool(
+        _MULTI_LEVEL_NUM_HEADING_RE.match(txt) or (_HEADING_PREFIX_RE.match(txt) and not _PREFIX_PROSE_RE.match(txt))
+    )
+    if prefixed_title and len(txt) <= 130 and word_count <= 22 and not txt.endswith("."):
+        # OCR may misread the verb that marks a prefixed line as running prose
+        # ("Chapter 1 exp1ains ..."), so the prose filter above cannot always see
+        # it.  A long, wordy line is body text, not a one-line section title.
+        if (
+            _latin_alpha_ratio(txt) >= 0.55
+            and not _TERMINAL_SENTENCE_RE.search(txt)
+            and not _PROSE_STOP_PUNCT_RE.search(txt)
+            and not is_bold
+            and (word_count >= 12 or len(txt) >= 95)
+        ):
+            return "paragraph"
         return "heading"
-    if (
-        _SINGLE_NUM_TITLE_RE.match(txt)
-        and word_count <= 14
-        and len(txt) <= 100
-        and not txt.endswith(".")
-        and (is_bold or lh >= med_lh * 1.15 or _is_all_caps_title(txt))
-    ):
-        return "heading"
+    if _SINGLE_NUM_TITLE_RE.match(txt):
+        # "2. Setup" and "1. Introduction to Modern Physics" are section titles; a
+        # numbered run of ordinary words ("1. First numbered list entry") is a list
+        # item, and a numbered sentence that fills the line is prose.
+        linkers = {"a", "an", "the", "of", "to", "and", "or", "for", "in", "on", "with", "from", "at", "by"}
+        inner_words = [w for w in txt.split()[1:] if w.isalpha()]
+        title_case = bool(inner_words) and all(
+            w[:1].isupper() or w.lower() in linkers for w in inner_words
+        )
+        article_start = bool(inner_words) and inner_words[0].lower() in {
+            "a", "an", "the", "this", "these", "those", "it", "we", "you", "they",
+        }
+        if word_count <= 4 or title_case or article_start:
+            return "heading"
+        if (
+            word_count <= 14
+            and len(txt) <= 100
+            and not txt.endswith(".")
+            and (is_bold or lh >= med_lh * 1.15 or _is_all_caps_title(txt))
+        ):
+            return "heading"
+        if (
+            _LIST_ITEM_RE.match(txt)
+            and _latin_alpha_ratio(txt) >= 0.55
+            and not _TERMINAL_SENTENCE_RE.search(txt)
+            and not _PROSE_STOP_PUNCT_RE.search(txt)
+            and not is_bold
+            and (word_count >= 10 or len(txt) >= 75)
+        ):
+            return "paragraph"
     if _LIST_ITEM_RE.match(txt):
         return "list"
     if (
@@ -725,17 +769,26 @@ def group_document_lines(
                 or abs(float(line.get("x0", 0)) - col_base_left) <= avg_lh * 2.2
             )
 
+        # OCR boxes are not typeset lines, so a short line alone is not proof that
+        # the paragraph ended - a box may stop early or hug its last word while the
+        # text continues on the next line.  A real break therefore needs a wide
+        # trailing gap AND terminal sentence punctuation; without the punctuation
+        # the lines stay together (merging two paragraphs is much less harmful than
+        # cutting one paragraph in half).
+        prev_ends_sentence = _TERMINAL_SENTENCE_RE.search(prev_txt) is not None
         prev_ended_early = bool(
             prev_txt
             and cur_role in {"paragraph", "list"}
             and trail_slack >= max(avg_lh * 2.6, col_w * 0.22)
-            and _SENTENCE_END_RE.search(prev_txt) is not None
+            and len(prev_txt) >= 45
+            and prev_ends_sentence
         )
         prev_hard_break = bool(
             prev_txt
             and cur_role in {"paragraph", "list"}
             and trail_slack >= max(avg_lh * 3.2, col_w * 0.28)
             and _width(prev) < max(_width(line) * 0.80, col_w * 0.56)
+            and prev_ends_sentence
         )
         structured_label = bool(cur_txt and _STRUCTURED_LABEL_LINE_RE.match(cur_txt))
 

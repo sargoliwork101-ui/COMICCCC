@@ -2527,19 +2527,33 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     await page.click('#ocrBtn');
     await page.waitForSelector('#ocrDialog[open]');
     const ocrLayout = await page.evaluate(() => {
-      const labels = [...document.querySelectorAll('#ocrDialog .form-grid > label')];
-      const tops = labels.slice(0, 4).map((el) => Math.round(el.getBoundingClientRect().top));
+      const grid = document.querySelector('#ocrDialog .ocr-section .form-grid');
+      const fields = grid ? [...grid.children] : [];
+      const rects = fields.map((el) => el.getBoundingClientRect());
+      const insideSection = fields.every((el) => Boolean(el.closest('.ocr-section')));
+      const rowTops = [...new Set(rects.map((r) => Math.round(r.top)))].sort((a, b) => a - b);
       return {
-        labelCount: labels.length,
-        sameRow: tops.length === 4 && Math.max(...tops) - Math.min(...tops) <= 4,
+        labelCount: fields.length,
+        sections: document.querySelectorAll('#ocrDialog .ocr-section').length,
+        overflowX: grid ? grid.scrollWidth - grid.clientWidth : 999,
+        topRowFields: rects.filter((r) => rowTops.length && Math.round(r.top) === rowTops[0]).length,
+        insideSection,
         ocrModes: [...document.getElementById('ocrPageMode').options].map((o) => o.value),
         modelsModes: [...document.getElementById('modelsPageMode').options].map((o) => o.value),
       };
     });
-    assert.equal(ocrLayout.labelCount, 5);
-    assert.equal(ocrLayout.sameRow, true, 'all 4 controls in #ocrDialog fit side-by-side on a single row');
+    assert.equal(ocrLayout.labelCount, 4);
+    assert.ok(ocrLayout.sections >= 4, 'OCR dialog is grouped into labelled sections');
+    assert.equal(ocrLayout.insideSection, true, 'main OCR settings live inside the grouped section');
+    assert.ok(ocrLayout.overflowX <= 2, 'main OCR settings do not overflow horizontally');
+    assert.equal(ocrLayout.topRowFields, 3, 'page mode, engine and language sit together on the first settings row');
+    assert.ok(await page.$eval('#ocrConfidence', (el) => Boolean(el.closest('.ocr-field'))), 'confidence keeps its own labelled field');
     assert.deepEqual(ocrLayout.ocrModes, ['comic', 'document']);
     assert.deepEqual(ocrLayout.modelsModes, ['comic', 'document']);
+    assert.equal(await page.$eval('#ocrContrastStrength', (el) => Boolean(el.closest('.ocr-option-details'))), true,
+      'contrast strength lives in the advanced image-processing group');
+    assert.equal(await page.$eval('#ocrOnlySelected', (el) => Boolean(el.closest('.ocr-option'))), true,
+      'quality toggles use the option-row layout');
     await page.select('#ocrPageMode', 'comic');
     const comicHighlights = await page.evaluate(() => {
       const opt = (id) => document.querySelector(`#ocrEngine option[value="${id}"]`);

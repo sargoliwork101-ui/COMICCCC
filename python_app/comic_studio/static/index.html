@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>HaSaYa Studio</title>
-  <link rel="stylesheet" href="/style.css?v=4.82">
-  <link rel="stylesheet" href="/rich-editor.css?v=4.82">
+  <link rel="stylesheet" href="/style.css?v=4.83">
+  <link rel="stylesheet" href="/rich-editor.css?v=4.83">
 </head>
 <body>
   <header class="topbar">
@@ -296,61 +296,72 @@
   </dialog>
 
   <dialog id="ocrDialog" class="dlg ocr-dialog">
-    <form method="dialog" class="dialog-head"><div class="dialog-title-row"><h2>OCR آفلاین</h2><span id="ocrExecBadge" class="exec-badge is-local hidden" title="تمام ۱۴ موتور OCR مستقیماً روی کامپیوتر خود شما اجرا می‌شوند و هنگام خواندن صفحات به اینترنت نیازی ندارند">اجرا روی سیستم شما (آفلاین)</span></div><button class="icon" value="cancel" aria-label="بستن">×</button></form>
-    <details id="ocrProfilesPanel" class="ocr-profiles-panel">
-      <summary>پروفایل‌ها و ذخیره / بازیابی تنظیمات OCR</summary>
+    <form method="dialog" class="dialog-head"><div class="dialog-title-row"><h2>OCR آفلاین</h2><span id="ocrExecBadge" class="exec-badge is-local hidden" title="تمام ۱۴ موتور OCR مستقیماً روی کامپیوتر خود شما اجرا می&#8202;شوند و هنگام خواندن صفحات به اینترنت نیازی ندارند">اجرا روی سیستم شما (آفلاین)</span></div><button class="icon" value="cancel" aria-label="بستن">×</button></form>
+    <div class="ocr-dialog-body">
+    <section class="ocr-section" aria-labelledby="ocrSectionMain">
+      <header class="ocr-section-head"><span class="ocr-section-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4 7h8M16 7h4M4 17h4M12 17h8"/><circle cx="14" cy="7" r="2.3"/><circle cx="10" cy="17" r="2.3"/></svg></span><div><h3 id="ocrSectionMain">تنظیمات اصلی</h3><p> زبان، موتور و سطح اطمینان خواندن صفحه را مشخص می&#8202;کند. </p></div></header>
+      <div class="form-grid">
+        <label class="ocr-field">نوع صفحه و چیدمان<select id="ocrPageMode"><option value="comic">کمیک و مانگا (حباب گفتگو)</option><option value="document">کتاب، مقاله و جزوه (پاراگراف و ستون)</option></select></label>
+        <label class="ocr-field">موتور OCR<select id="ocrEngine" title="علامت کنار هر موتور: ✓ آماده به کار · ◐ نصب&#8202;شده (نیازمند فایل زبان انتخابی) · ⬇ نصب&#8202;نشده"></select></label>
+        <label class="ocr-field">زبان متن<select id="ocrLanguage"><option value="eng">English</option><option value="fas">فارسی</option><option value="kor">한국어</option><option value="jpn">日本語</option><option value="chi_sim">中文</option></select></label>
+        <label class="ocr-field">حداقل اطمینان<input id="ocrConfidence" type="number" min="0" max="0.95" step="0.05" value="0.35" dir="ltr"><small class="ocr-field-hint">متن کم‌اطمینان‌تر از این مقدار نادیده گرفته می‌شود؛ ۰٫۳۵ برای بیشتر کتاب‌ها مناسب است.</small></label>
+      </div>
+      <p id="ocrEngineStatus" class="hint ocr-engine-status"></p>
+      <div id="ocrEngineQuickActions" class="ocr-engine-quick-actions hidden">
+        <button id="ocrQuickPrepareBtn" class="bt primary hidden" type="button">نصب و دانلود خودکار همین مدل</button>
+        <button id="ocrQuickUpdateBtn" class="bt hidden" type="button">به&#8202;روزرسانی به نسخهٔ جدید</button>
+      </div>
+      <div id="ocrQuickProgressWrap" class="model-live-progress hidden" aria-live="polite">
+        <div class="model-live-progress-head"><span id="ocrQuickProgressLabel">در حال آماده&#8202;سازی مدل…</span><span class="model-live-progress-meta"><strong id="ocrQuickProgressPercent" dir="ltr">0%</strong><button id="ocrQuickCancelBtn" class="bt danger dock-cancel-btn" type="button">لغو عملیات</button></span></div>
+        <div class="bar" role="progressbar" aria-label="پیشرفت دانلود و به&#8202;روزرسانی مدل در پنجره OCR" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="ocrQuickProgress" class="fill"></div></div>
+      </div>
+    </section>
+    <section class="ocr-section" aria-labelledby="ocrSectionQuality">
+      <header class="ocr-section-head"><span class="ocr-section-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l1.9 4.9 4.9 1.9-4.9 1.9L12 17.1l-1.9-4.9L5.2 10.3l4.9-1.9z"/><path d="M18 16.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg></span><div><h3 id="ocrSectionQuality">کیفیت خواندن</h3><p> گزینه&#8202;های پیش&#8202;پردازش تصویر و ادغام خط&#8202;ها. </p></div></header>
+      <div class="ocr-option-list">
+        <label class="ocr-option"><input id="ocrOnlySelected" type="checkbox" checked><span><strong>فقط تصاویر انتخاب&#8202;شده</strong><small>صفحاتی که در گالری انتخاب کرده&#8202;اید خوانده می&#8202;شوند.</small></span></label>
+        <label class="ocr-option"><input id="ocrGroupLines" type="checkbox" checked><span><strong>ادغام خودکار خط&#8202;های هم&#8202;خانواده</strong><small>خط&#8202;ها به یک حباب کمیک یا پاراگراف کتاب تبدیل می&#8202;شوند.</small></span></label>
+        <label class="ocr-option"><input id="ocrErase" type="checkbox" checked><span><strong>پاک&#8202;کردن متن قبلی زیر متن نمایش&#8202;داده&#8202;شده</strong><small>متن اصلی زیر ترجمه پاک می&#8202;شود تا خوانایی بیشتر شود.</small></span></label>
+      </div>
+      <details class="ocr-legacy-preprocessing ocr-option-details">
+        <summary>پردازش تصویر پیشرفته (کنتراست، شارپ و فارسی)</summary>
+        <div class="ocr-option-list ocr-option-list-nested">
+          <label class="ocr-option"><input id="ocrPhotoSharpen" type="checkbox"><span><strong>بهبود عکس تار</strong><small>تقویت لبهٔ متن؛ فقط روی نسخهٔ موقت OCR اثر دارد.</small></span></label>
+          <label class="ocr-option"><input id="ocrContrast" type="checkbox" checked><span><strong>افزایش کنتراست نسخهٔ موقت OCR</strong><small>متن روشن یا کمرنگ خواناتر می&#8202;شود.</small></span></label>
+          <label class="ocr-option"><input id="ocrPrecise" type="checkbox" checked><span><strong>بزرگ&#8202;نمایی برای دقت بیشتر</strong><small>خواندن حروف ریز آسان&#8202;تر می&#8202;شود، اما کمی کندتر است.</small></span></label>
+          <label class="ocr-option"><input id="ocrPersianPreprocess" type="checkbox" title="استخراج متن کادرهای رنگی و تیره، صاف&#8202;کردن خودکار کجی اسکن، حذف سایه، حفظ سرکش گ و نقطه&#8202;ها و تصحیح هوشمند واژگانی و نیم&#8202;فاصله فارسی"><span><strong>پیش‌پردازش ویژه فارسی (کادر رنگی، رفع کجی و سایه، تقویت نقطه و تصحیح هوشمند)</strong><small>برای کتاب و جزوه‌های فارسی؛ متن کادرهای رنگی را هم استخراج می‌کند.</small></span></label>
+          <label class="ocr-option ocr-option-inline-field"><span><strong>شدت کنتراست OCR</strong><small>از ۰٫۵ تا ۳ · مقدار ۱ حالت معمول است.</small></span><input id="ocrContrastStrength" type="number" min="0.5" max="3" step="0.1" value="1" dir="ltr"></label>
+        </div>
+      </details>
+    </section>
+    <section id="documentEnhancement" class="ocr-section hidden"></section>
+    <details id="ocrProfilesPanel" class="ocr-section ocr-profiles-panel">
+      <summary><span class="ocr-section-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8.2A2.2 2.2 0 016.2 6h3.4l2.1 2.1h6.1A2.2 2.2 0 0120 10.3v7.5A2.2 2.2 0 0117.8 20H6.2A2.2 2.2 0 014 17.8z"/></svg></span><span class="ocr-section-summary-text"><strong>پروفایل&#8202;های OCR</strong><small>تنظیمات آماده را ذخیره، بازیابی یا بین سیستم&#8202;ها جابه&#8202;جا کنید.</small></span></summary>
       <div class="ocr-profile-fields">
-        <label>پروفایل ذخیره‌شده<select id="ocrProfileSelect"><option value="">انتخاب پروفایل…</option></select></label>
-        <label>نام پروفایل<input id="ocrProfileName" maxlength="80" placeholder="مثلاً کتاب انگلیسی کم‌کنتراست"></label>
+        <label>پروفایل ذخیره&#8202;شده<select id="ocrProfileSelect"><option value="">انتخاب پروفایل…</option></select></label>
+        <label>نام پروفایل<input id="ocrProfileName" maxlength="80" placeholder="مثلاً کتاب انگلیسی کم&#8202;کنتراست"></label>
       </div>
       <div class="ocr-profile-actions">
-        <button id="ocrProfileApply" class="bt" type="button">اعمال پروفایل</button>
+        <button id="ocrProfileApply" class="bt primary" type="button">اعمال پروفایل</button>
         <button id="ocrProfileCreate" class="bt" type="button">ذخیره با نام جدید</button>
-        <button id="ocrProfileUpdate" class="bt" type="button">به‌روزرسانی پروفایل</button>
+        <button id="ocrProfileUpdate" class="bt" type="button">به&#8202;روزرسانی پروفایل</button>
         <button id="ocrProfileDelete" class="bt danger" type="button">حذف پروفایل</button>
         <button id="ocrProfileExport" class="bt" type="button">خروجی تنظیمات فعلی</button>
         <label class="bt file-button">ورود فایل پروفایل<input id="ocrProfileImport" type="file" accept="application/json,.json"></label>
       </div>
-      <p class="hint">پروفایل‌ها روی همین سیستم و مستقل از پروژه ذخیره می‌شوند. فایل JSON فقط تنظیمات OCR دارد، نه متن، تصویر یا کلید API. اعمال پروفایل OCR را شروع نمی‌کند؛ سپس می‌توانید پیش‌نمایش را بررسی کنید.</p>
+      <p class="hint">پروفایل&#8202;ها روی همین سیستم و مستقل از پروژه ذخیره می&#8202;شوند. فایل JSON فقط تنظیمات OCR دارد، نه متن، تصویر یا کلید API. اعمال پروفایل OCR را شروع نمی&#8202;کند؛ سپس می&#8202;توانید پیش&#8202;نمایش را بررسی کنید.</p>
       <p id="ocrProfileStatus" class="hint" role="status" aria-live="polite"></p>
     </details>
-    <div class="form-grid">
-      <label>نوع صفحه و چیدمان<select id="ocrPageMode"><option value="comic">کمیک و مانگا (حباب گفتگو)</option><option value="document">کتاب، مقاله و جزوه (پاراگراف و ستون)</option></select></label>
-      <label>موتور OCR<select id="ocrEngine" title="علامت کنار هر موتور: ✓ آماده به کار · ◐ نصب‌شده (نیازمند فایل زبان انتخابی) · ⬇ نصب‌نشده"></select></label>
-      <label>زبان متن<select id="ocrLanguage"><option value="eng">English</option><option value="fas">فارسی</option><option value="kor">한국어</option><option value="jpn">日本語</option><option value="chi_sim">中文</option></select></label>
-      <label>حداقل اطمینان<input id="ocrConfidence" type="number" min="0" max="0.95" step="0.05" value="0.35"></label>
-      <label>شدت کنتراست OCR (۰٫۵ تا ۳؛ ۱ = حالت معمول) <input id="ocrContrastStrength" type="number" min="0.5" max="3" step="0.1" value="1" dir="ltr"></label>
     </div>
-    <div class="checks">
-      <label><input id="ocrOnlySelected" type="checkbox" checked> فقط تصاویر انتخاب‌شده</label>
-      <details class="ocr-legacy-preprocessing"><summary>تنظیمات پردازش معمول OCR</summary>
-      <div class="checks">
-      <label><input id="ocrPhotoSharpen" type="checkbox"> بهبود عکس تار (تقویت لبهٔ متن؛ فقط نسخهٔ موقت OCR)</label>
-      <label><input id="ocrContrast" type="checkbox" checked> افزایش کنتراست نسخهٔ موقت OCR</label>
-      <label><input id="ocrPrecise" type="checkbox" checked> بزرگ‌نمایی برای دقت بیشتر</label>
-      <label><input id="ocrPersianPreprocess" type="checkbox" title="استخراج متن کادرهای رنگی و تیره، صاف‌کردن خودکار کجی اسکن، حذف سایه، حفظ سرکش گ و نقطه‌ها و تصحیح هوشمند واژگانی و نیم‌فاصله فارسی"> پیش‌پردازش ویژه فارسی (کادر رنگی، رفع کجی و سایه، تقویت نقطه و تصحیح هوشمند)</label>
-      </div></details>
-      <label><input id="ocrGroupLines" type="checkbox" checked> ادغام خودکار خط‌های هم‌خانواده (حباب کمیک یا پاراگراف کتاب)</label>
-      <label><input id="ocrErase" type="checkbox" checked> پاک‌کردن متن قبلی زیر متن نمایش‌داده‌شده</label>
+    <div class="ocr-dialog-footer">
+      <p id="ocrTranslationNotice" class="hint hidden" role="status"></p>
+      <p id="ocrStatus" class="hint diagnostic-message" role="status" aria-live="polite"></p>
+      <button id="copyOcrError" class="bt hidden" type="button">کپی خطای OCR</button>
+      <p class="hint ocr-handling-hint">پیش از ارسال خطا، آن را از نظر اطلاعات شخصی یا محرمانه بررسی کنید. بعد از OCR، متن خوانده&#8202;شده در گزارش و روی تصویر می&#8202;آید تا پیش از ترجمه بررسی و ویرایش شود.</p>
+      <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت OCR" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="ocrProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
+      <div id="ocrActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
+      <div class="dialog-actions"><button id="cancelOcrBtn" class="bt danger hidden" type="button">لغو عملیات</button><button id="startOcrBtn" class="bt primary">شروع OCR</button></div>
     </div>
-    <section id="documentEnhancement" class="hidden"></section>
-    <p id="ocrEngineStatus" class="hint"></p>
-    <div id="ocrEngineQuickActions" class="ocr-engine-quick-actions hidden">
-      <button id="ocrQuickPrepareBtn" class="bt primary hidden" type="button">نصب و دانلود خودکار همین مدل</button>
-      <button id="ocrQuickUpdateBtn" class="bt hidden" type="button">به‌روزرسانی به نسخهٔ جدید</button>
-    </div>
-    <div id="ocrQuickProgressWrap" class="model-live-progress hidden" aria-live="polite">
-      <div class="model-live-progress-head"><span id="ocrQuickProgressLabel">در حال آماده‌سازی مدل…</span><span class="model-live-progress-meta"><strong id="ocrQuickProgressPercent" dir="ltr">0%</strong><button id="ocrQuickCancelBtn" class="bt danger dock-cancel-btn" type="button">لغو عملیات</button></span></div>
-      <div class="bar" role="progressbar" aria-label="پیشرفت دانلود و به‌روزرسانی مدل در پنجره OCR" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="ocrQuickProgress" class="fill"></div></div>
-    </div>
-    <p id="ocrTranslationNotice" class="hint hidden" role="status"></p>
-    <p id="ocrStatus" class="hint diagnostic-message" role="status" aria-live="polite"></p>
-    <button id="copyOcrError" class="bt hidden" type="button">کپی خطای OCR</button>
-    <p class="hint">پیش از ارسال خطا، آن را از نظر اطلاعات شخصی یا محرمانه بررسی کنید.</p>
-    <p class="hint">بعد از OCR، متن خوانده‌شده در گزارش و روی تصویر می‌آید تا پیش از ترجمه بررسی و ویرایش شود.</p>
-    <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت OCR" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="ocrProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
-    <div id="ocrActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
-    <div class="dialog-actions"><button id="cancelOcrBtn" class="bt danger hidden" type="button">لغو عملیات</button><button id="startOcrBtn" class="bt primary">شروع OCR</button></div>
   </dialog>
 
   <dialog id="translationDialog" class="dlg small-dialog">
@@ -1059,14 +1070,14 @@
     </div>
   </div>
   <div id="toast" role="status" popover="manual"></div>
-<script src="/typeset.js?v=4.82"></script>
-<script src="/groups.js?v=4.82"></script>
-<script src="/rich-sanitize.js?v=4.82"></script>
-<script src="/rich-editor.js?v=4.82"></script>
-<script src="/inline-edit-session.js?v=4.82"></script>
-<script src="/help-guide.js?v=4.82"></script>
-<script src="/document-enhancement.js?v=4.82"></script>
-<script src="/ocr-profiles.js?v=4.82"></script>
-<script src="/app.js?v=4.82"></script>
+<script src="/typeset.js?v=4.83"></script>
+<script src="/groups.js?v=4.83"></script>
+<script src="/rich-sanitize.js?v=4.83"></script>
+<script src="/rich-editor.js?v=4.83"></script>
+<script src="/inline-edit-session.js?v=4.83"></script>
+<script src="/help-guide.js?v=4.83"></script>
+<script src="/document-enhancement.js?v=4.83"></script>
+<script src="/ocr-profiles.js?v=4.83"></script>
+<script src="/app.js?v=4.83"></script>
 </body>
 </html>

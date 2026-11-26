@@ -288,3 +288,102 @@ def test_real_chapter_title_stays_separate_from_body():
            line(3, 'and the following line continues the same ordinary paragraph.', 14, 81, width=1000, height=20)]
     blocks = group_ocr_lines(raw, page_mode='document', page_size=(1041, 582))
     assert len(blocks) == 2 and blocks[0]['pageRole'] == 'heading'
+
+
+# Real line boxes taken from the reported book page (Basso, "Switch-Mode Power
+# Supplies", 2nd ed., p. 5).  The first line is indented, the rest start at the
+# column edge, and OCR misread the verb "explains" as "exp1ains".
+_REPORTED_PAGE_BOXES = [
+    (46, 10, 1015), (14, 36, 1017), (14, 62, 1016), (14, 88, 1014), (21, 114, 1013),
+    (14, 140, 1016), (14, 166, 1014), (14, 192, 1015), (14, 218, 1014), (14, 244, 1016),
+    (21, 270, 1013), (14, 296, 1015), (14, 322, 1014), (14, 348, 1015), (14, 374, 1014),
+    (14, 400, 1016), (14, 426, 1014), (21, 452, 1015), (14, 478, 1016), (14, 504, 1013),
+]
+
+
+def _reported_page(first_text):
+    texts = [first_text,
+             'many different topologies that are used in modern power supplies. The first part of this chapter',
+             'describes the basic buck converter and its operation in continuous conduction mode, then the',
+             'boost and buck-boost converters are presented with their main waveforms and design equations.',
+             'The average model of these converters is derived in the following sections so that the small',
+             'signal transfer functions can be calculated for the control loop design. Special attention is',
+             'paid to the effect of the equivalent series resistance of the output capacitor, because it',
+             'introduces a zero in the transfer function of the converter that must be compensated',
+             'properly in the feedback loop. The chapter ends with a short introduction to the isolated',
+             'topologies such as the forward and flyback converters, which are widely used in low power',
+             'applications. A complete design example is given at the end of the chapter to show how',
+             'the theoretical results can be applied in practice, and the simulation of the complete',
+             'converter is carried out with a circuit simulator to verify the analytical results that',
+             'were derived in the previous sections of this chapter, including the losses in the',
+             'switching devices and the magnetic components of the converter. The next chapter deals',
+             'with the steady-state analysis of the converters in more detail and introduces the',
+             'concept of the averaged switch model that is used throughout the book for the',
+             'derivation of the small-signal models of the converters and their control loops',
+             'in the frequency domain, and finally the experimental results are shown to',
+             'validate the theoretical analysis presented in this chapter of the book']
+    return [line(i + 1, text, x0, y0, width=x1 - x0, height=22)
+            for i, ((x0, y0, x1), text) in enumerate(zip(_REPORTED_PAGE_BOXES, texts))]
+
+
+def test_reported_page_keeps_indented_first_line_inside_the_paragraph():
+    raw = _reported_page(
+        'Chapter 1 explains switch-mode power supply techniques and types of converters, and it introduces')
+    blocks = group_ocr_lines(raw, page_mode='document', page_size=(1041, 582))
+    assert len(blocks) == 1
+    assert blocks[0]['pageRole'] == 'paragraph'
+    assert len(blocks[0]['sourceLines']) == 20
+    assert blocks[0]['text'].startswith('Chapter 1 explains switch-mode')
+
+
+def test_misread_prose_verb_after_chapter_number_does_not_become_a_heading():
+    from comic_studio.ocr_grouping import _classify_document_line_role
+    body = {'x0': 46, 'x1': 1015, 'y0': 10, 'y1': 32, 'lineH': 22}
+    for text in (
+        'Chapter 1 exp1ains switch-mode power supply techniques and types of converters, and it introduces',
+        'Chapter 1 switch-mode power supply techniques and types of converters, and it introduces',
+        'Chapter 4 descri bes how the generic switched models are derived from the converter topologies',
+    ):
+        assert _classify_document_line_role({**body, 'text': text}, 22.0, 1000.0) == 'paragraph'
+    raw = _reported_page(
+        'Chapter 1 exp1ains switch-mode power supply techniques and types of converters, and it introduces')
+    blocks = group_ocr_lines(raw, page_mode='document', page_size=(1041, 582))
+    assert len(blocks) == 1 and blocks[0]['pageRole'] == 'paragraph'
+
+
+def test_real_titles_are_still_headings_after_prose_tolerance():
+    from comic_studio.ocr_grouping import _classify_document_line_role
+    body = {'x0': 40, 'x1': 700, 'y0': 10, 'y1': 34, 'lineH': 24}
+    for text in ('Chapter 1 Power Supply Techniques',
+                 'Chapter 3: Control Loop Design',
+                 '2.4.1 Installation Requirements',
+                 '2. Setup',
+                 '1. Introduction to Modern Physics',
+                 'III. RESULTS AND DISCUSSION'):
+        assert _classify_document_line_role({**body, 'text': text}, 22.0, 1000.0) == 'heading', text
+
+
+def test_sentence_ending_short_line_still_breaks_the_paragraph():
+    # A line that really does end early (wide empty tail) and closes a sentence
+    # starts a new paragraph.
+    raw = [line(1, 'The converter operates in continuous conduction mode.', 14, 10, width=700),
+           line(2, 'A new paragraph starts here and continues with more ordinary body text.', 14, 36, width=1000),
+           line(3, 'and this line completes the second paragraph of the page nicely.', 14, 62, width=1000)]
+    blocks = group_ocr_lines(raw, page_mode='document', page_size=(1041, 582))
+    assert len(blocks) == 2
+    assert blocks[0]['text'].endswith('conduction mode.')
+
+
+def test_short_line_without_terminal_punctuation_keeps_the_paragraph_together():
+    raw = [line(1, 'The converter operates in continuous conduction mode and the', 14, 10, width=700),
+           line(2, 'next line continues the very same paragraph without any doubt.', 14, 36, width=1000),
+           line(3, 'and this line completes the paragraph of the page nicely here.', 14, 62, width=1000)]
+    blocks = group_ocr_lines(raw, page_mode='document', page_size=(1041, 582))
+    assert len(blocks) == 1 and len(blocks[0]['sourceLines']) == 3
+
+
+def test_numbered_list_entries_remain_list_items():
+    from comic_studio.ocr_grouping import _classify_document_line_role
+    body = {'x0': 30, 'x1': 400, 'y0': 10, 'y1': 32, 'lineH': 22}
+    for text in ('1. First numbered list entry', '2. Second numbered entry with words'):
+        assert _classify_document_line_role({**body, 'text': text}, 22.0, 1000.0) == 'list', text
