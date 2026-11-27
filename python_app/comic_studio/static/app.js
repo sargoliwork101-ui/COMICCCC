@@ -1444,7 +1444,9 @@ let gridPagerFrame = 0;
 let gridPagerLockUntil = 0;
 let gridPagerSettleTimer = 0;
 let gridPagerJumpToken = 0;
-let gridPagerLastShown = '';
+let gridPagerOpen = false;
+let gridPagerIdleTimer = 0;
+let gridPagerHovered = false;
 
 function gridPagerTotal() {
   return sortedImages().length;
@@ -1463,21 +1465,16 @@ function gridPagerClamp(value) {
   return Math.min(Math.max(number, 1), Math.max(1, total));
 }
 
-function gridPagerRender(current = gridPagerCurrent, opts = {}) {
+function gridPagerRender(current = gridPagerCurrent) {
   const nav = $('gridPager');
-  const input = $('gridPageInput');
-  const totalEl = $('gridPageTotal');
   const rangeEl = $('gridPagerRange');
   const total = gridPagerTotal();
   gridPagerVisible = total;
   if (!nav) return;
-  nav.classList.toggle('hidden', total === 0);
-  if (totalEl) totalEl.textContent = `/ ${total.toLocaleString('fa-IR')}`;
-  if (input) {
-    input.max = String(Math.max(1, total));
-    input.placeholder = total ? `۱ تا ${total.toLocaleString('fa-IR')}` : '—';
-    input.disabled = total === 0;
-  }
+  // The strip is opened on demand (menu entry or Ctrl+F) and closed again with
+  // the ✕ button, Ctrl+F or Escape: it must not sit on top of the grid all the
+  // time just because the project has pages.
+  nav.classList.toggle('hidden', !gridPagerOpen || total === 0);
   const shown = total ? gridPagerClamp(current || 1) : 0;
   gridPagerCurrent = shown;
   if (rangeEl) {
@@ -1489,10 +1486,70 @@ function gridPagerRender(current = gridPagerCurrent, opts = {}) {
   const atEnd = !total || shown >= total;
   ['gridPagerFirst', 'gridPagerPrev'].forEach((id) => { const el = $(id); if (el) el.disabled = atStart; });
   ['gridPagerNext', 'gridPagerLast'].forEach((id) => { const el = $(id); if (el) el.disabled = atEnd; });
-  const goBtn = $('gridPageGoBtn'); if (goBtn) goBtn.disabled = !total;
-  if (!opts.keepInput && document.activeElement !== input && input) {
-    input.value = total ? String(shown) : '';
+  // The page count lives in the footer, not in a bar that covers the grid.
+  const dockCount = $('dockPageCount');
+  if (dockCount) {
+    dockCount.textContent = total ? `${total.toLocaleString('fa-IR')} صفحه` : '';
+    dockCount.classList.toggle('hidden', total === 0);
   }
+}
+
+function gridPagerIsOpen() {
+  return Boolean(gridPagerOpen) && gridPagerTotal() > 0;
+}
+
+function gridPagerOpenStrip() {
+  if (!gridPagerTotal()) {
+    toast('برای رفتن به صفحه اول باید پروژه صفحه داشته باشد.', true);
+    return false;
+  }
+  gridPagerOpen = true;
+  gridPagerRender(gridPagerCurrent || 1);
+  const first = $('gridPagerPrev');
+  try { first?.focus({ preventScroll: true }); } catch (error) { /* not focusable */ }
+  gridPagerArmIdle();
+  return true;
+}
+
+// The strip is a find bar, not a toolbar: it clears itself a few seconds after
+// the last interaction so the grid is never left crowded by it. Hovering or
+// tabbing into it pauses that so it cannot vanish mid-step.
+function gridPagerArmIdle() {
+  clearTimeout(gridPagerIdleTimer);
+  gridPagerIdleTimer = 0;
+  if (!gridPagerOpen) return;
+  gridPagerIdleTimer = setTimeout(() => {
+    gridPagerIdleTimer = 0;
+    // Hovering keeps the strip up indefinitely. Keyboard focus only pauses it:
+    // the strip takes focus when it opens, and treating that as activity would
+    // keep the countdown restarting forever and the bar would never leave.
+    if (gridPagerHovered) return;
+    const nav = $('gridPager');
+    const focused = document.activeElement;
+    if (nav && focused && nav.contains(focused)
+        && focused !== $('gridPagerPrev') && document.hasFocus()) {
+      gridPagerArmIdle();
+      return;
+    }
+    gridPagerCloseStrip();
+  }, 4000);
+}
+
+function gridPagerCloseStrip() {
+  clearTimeout(gridPagerIdleTimer);
+  gridPagerIdleTimer = 0;
+  if (!gridPagerOpen) return;
+  gridPagerOpen = false;
+  const nav = $('gridPager');
+  nav?.classList.add('hidden');
+  // Hand focus back to the grid so the arrow keys keep working afterwards.
+  const card = gridPagerCard(gridPagerCurrent - 1);
+  try { card?.focus({ preventScroll: true }); } catch (error) { /* not focusable */ }
+}
+
+function gridPagerToggleStrip() {
+  if (gridPagerIsOpen()) gridPagerCloseStrip();
+  else gridPagerOpenStrip();
 }
 
 function gridPagerHighlightCard(card) {
@@ -1563,16 +1620,6 @@ function gridPagerSetLabel(index) {
   rangeEl.textContent = total
     ? `${shown.toLocaleString('fa-IR')} از ${total.toLocaleString('fa-IR')}`
     : '۰ از ۰';
-  const input = $('gridPageInput');
-  if (input) {
-    // Do not clobber a number the user is still typing, but do keep the box in
-    // step when it merely echoes the previous page (after a committed jump the
-    // field keeps focus, and scrolling away must still update it).
-    const idle = document.activeElement !== input;
-    const echo = input.value === gridPagerLastShown || input.value === '';
-    if (idle || echo) input.value = total ? String(shown) : '';
-    gridPagerLastShown = total ? String(shown) : '';
-  }
 }
 
 function gridPagerTrackVisible() {
@@ -1628,22 +1675,6 @@ function gridPagerRefresh() {
   gridPagerRender(Math.min(Math.max(gridPagerCurrent || 1, 1), Math.max(1, total)));
 }
 
-function gridPagerJumpFromInput() {
-  const input = $('gridPageInput');
-  if (!input) return;
-  const total = gridPagerTotal();
-  const raw = String(input.value || '').replace(/[۰-۹]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d) >= 0 ? String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)) : d)
-    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
-  const parsed = Number(raw.trim());
-  if (!total || !Number.isFinite(parsed) || parsed <= 0) {
-    gridPagerRender(gridPagerCurrent);
-    return;
-  }
-  const target = gridPagerClamp(parsed);
-  if (parsed > total) toast(`این پروژه ${total.toLocaleString('fa-IR')} صفحه دارد؛ به صفحهٔ ${target.toLocaleString('fa-IR')} رفتیم.`, true);
-  gridPagerGoTo(target, { focusCard: true });
-}
-
 function gridPagerBind() {
   const nav = $('gridPager');
   if (!nav || nav.dataset.bound === '1') return;
@@ -1652,23 +1683,26 @@ function gridPagerBind() {
   $('gridPagerPrev')?.addEventListener('click', () => gridPagerStep(-1));
   $('gridPagerNext')?.addEventListener('click', () => gridPagerStep(1));
   $('gridPagerLast')?.addEventListener('click', () => gridPagerGoTo(gridPagerTotal()));
-  $('gridPageGoBtn')?.addEventListener('click', gridPagerJumpFromInput);
-  const input = $('gridPageInput');
-  if (input) {
-    input.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') { event.preventDefault(); gridPagerJumpFromInput(); }
-      if (event.key === 'ArrowUp') { event.preventDefault(); gridPagerStep(-1); }
-      if (event.key === 'ArrowDown') { event.preventDefault(); gridPagerStep(1); }
-      if (event.key === 'Escape') { input.blur(); gridPagerRender(gridPagerCurrent); }
-    });
-    // "change" fires on blur too, and blur happens when the user clicks any
-    // other pager button; acting on it there would throw the page back to the
-    // stale number in the box. Only Enter and the «برو» button actually jump.
-    input.addEventListener('change', () => {
-      const shown = gridPagerTotal() ? String(gridPagerClamp(gridPagerCurrent)) : '';
-      if (String(input.value || '').trim() !== shown) input.value = shown;
-    });
-  }
+  $('gridPagerClose')?.addEventListener('click', () => gridPagerCloseStrip());
+  // Arrow keys step one page while the strip has focus; Escape closes it, the
+  // same way a find bar behaves.
+  nav.addEventListener('keydown', (event) => {
+    if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') { event.preventDefault(); gridPagerStep(-1); }
+    else if (event.key === 'ArrowDown' || event.key === 'ArrowRight') { event.preventDefault(); gridPagerStep(1); }
+    else if (event.key === 'Home') { event.preventDefault(); gridPagerGoTo(1); }
+    else if (event.key === 'End') { event.preventDefault(); gridPagerGoTo(gridPagerTotal()); }
+    else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); gridPagerCloseStrip(); }
+  });
+  // Every interaction restarts the idle countdown; hovering pauses it outright.
+  nav.addEventListener('pointerdown', gridPagerArmIdle);
+  nav.addEventListener('keydown', gridPagerArmIdle);
+  nav.addEventListener('focusin', gridPagerArmIdle);
+  nav.addEventListener('pointerenter', () => { gridPagerHovered = true; clearTimeout(gridPagerIdleTimer); gridPagerIdleTimer = 0; });
+  nav.addEventListener('pointerleave', () => { gridPagerHovered = false; gridPagerArmIdle(); });
+  $('pagerMenuBtn')?.addEventListener('click', () => {
+    setMenuOpen(false);
+    gridPagerOpenStrip();
+  });
   const mainWrap = $('mainwrap');
   (mainWrap || window).addEventListener('scroll', gridPagerTrackVisible, { passive: true });
   window.addEventListener('resize', gridPagerTrackVisible, { passive: true });
@@ -10398,6 +10432,21 @@ function bindEvents() {
     });
   });
   document.addEventListener('keydown', (event) => {
+    // Ctrl+F / Cmd+F behaves like the find bar in other apps: it opens the page
+    // strip anywhere in the workspace. Inside a text editor the browser's own
+    // find stays untouched so the user can still search inside what they type.
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey
+        && (event.code === 'KeyF' || (event.key || '').toLowerCase() === 'f')) {
+      const targetEl = event.target && typeof event.target.closest === 'function' ? event.target : null;
+      const typing = Boolean(targetEl?.closest('input, textarea, select, [contenteditable="true"]'));
+      const dialogOpen = Boolean(document.querySelector('dialog[open]'));
+      if (!typing && !dialogOpen) {
+        event.preventDefault();
+        event.stopPropagation();
+        gridPagerToggleStrip();
+        return;
+      }
+    }
     if (event.key === 'F1') {
       event.preventDefault();
       event.stopPropagation();

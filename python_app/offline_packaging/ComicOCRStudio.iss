@@ -2,7 +2,7 @@
 ; Automatically invoked by offline_packaging/build_offline_package.py when ISCC.exe is installed.
 
 #ifndef AppVersion
-  #define AppVersion "4.86"
+  #define AppVersion "4.87"
 #endif
 #ifndef SourceDistDir
   #define SourceDistDir "..\dist\HaSaYaStudio"
@@ -14,7 +14,7 @@
   #define OutputDirPath "..\dist"
 #endif
 #ifndef OutputBaseName
-  #define OutputBaseName "HaSaYaStudio-Offline-Setup-4.86"
+  #define OutputBaseName "HaSaYaStudio-Offline-Setup-4.87"
 #endif
 
 [Setup]

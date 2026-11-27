@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>HaSaYa Studio</title>
-  <link rel="stylesheet" href="/style.css?v=4.86">
-  <link rel="stylesheet" href="/rich-editor.css?v=4.86">
+  <link rel="stylesheet" href="/style.css?v=4.87">
+  <link rel="stylesheet" href="/rich-editor.css?v=4.87">
 </head>
 <body>
   <header class="topbar">
@@ -98,6 +98,7 @@
     <button id="resourcesBtn" class="mi"><span>تنظیم منابع سیستم (رم و پردازنده)</span></button>
     <button id="licenseBtn" class="mi"><span>لایسنس و رمز ورود</span></button>
     <button id="lockAppMenuBtn" class="mi hidden"><span>قفل فوری برنامه</span></button>
+    <button id="pagerMenuBtn" class="mi" type="button" aria-keyshortcuts="Control+F">رفتن به صفحه<span class="menu-shortcut" dir="ltr">Ctrl+F</span></button>
     <button id="themeBtn" class="mi">تغییر تم روشن / تیره</button>
     <div class="mi save-line"><span id="saveState">آماده</span><span>ذخیرهٔ خودکار روی همین کامپیوتر</span></div>
   </div>
@@ -242,22 +243,16 @@
         <button id="gridPagerPrev" class="bt pager-btn" type="button" title="صفحهٔ قبل" aria-label="صفحهٔ قبل">
           <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M10.2 3.4 5.6 8l4.6 4.6"/></svg>
         </button>
-        <label class="grid-pager-input" for="gridPageInput">
-          <span>برو به صفحه</span>
-          <input id="gridPageInput" type="number" inputmode="numeric" min="1" step="1" dir="ltr" aria-label="شمارهٔ صفحه برای رفتن">
-        </label>
-        <span id="gridPageTotal" class="grid-pager-total" dir="ltr">/ 0</span>
-        <button id="gridPageGoBtn" class="bt primary pager-btn pager-go" type="button" title="رفتن به صفحه">برو</button>
+        <span id="gridPagerRange" class="grid-pager-range" role="status" aria-live="polite" aria-label="شمارهٔ صفحهٔ جاری و کل صفحات">۰ از ۰</span>
         <button id="gridPagerNext" class="bt pager-btn" type="button" title="صفحهٔ بعد" aria-label="صفحهٔ بعد">
           <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M5.8 3.4 10.4 8l-4.6 4.6"/></svg>
         </button>
         <button id="gridPagerLast" class="bt pager-btn" type="button" title="صفحهٔ آخر" aria-label="صفحهٔ آخر">
           <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M12 3.2v9.6M3.6 3.6 9.4 8l-5.8 4.4Z"/></svg>
         </button>
-      </div>
-      <div class="grid-pager-group grid-pager-count">
-        <span class="grid-pager-label">در نمای فعلی</span>
-        <span id="gridPagerRange" class="grid-pager-range">۰ از ۰</span>
+        <button id="gridPagerClose" class="bt pager-btn pager-close" type="button" title="بستن نوار صفحه (Ctrl+F)" aria-label="بستن نوار صفحه">
+          <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6"/></svg>
+        </button>
       </div>
     </nav>
     <section id="grid" class="grid" aria-live="polite"></section>
@@ -284,6 +279,7 @@
     </div>
     <span class="dock-name-label"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.8 3.6h4.1l1.4 1.6h4.9v7.2a1.1 1.1 0 0 1-1.1 1.1H3.9a1.1 1.1 0 0 1-1.1-1.1V3.6Z"/></svg><span>نام خروجی</span></span>
     <input id="exportName" value="" dir="auto" placeholder="هم‌نام با پروژه (قابل ویرایش)" aria-label="نام فایل خروجی">
+    <span id="dockPageCount" class="dock-page-count" role="status" aria-live="polite" aria-label="تعداد صفحات پروژه"></span>
     <div class="dock-export-group" role="group" aria-label="ساخت خروجی">
       <button id="exportPdfBtn" class="bt success" type="button" title="ساخت و دانلود فایل PDF">
         <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 1.8h5.4L13 5.4v8.2a.9.9 0 0 1-.9.9H4a.9.9 0 0 1-.9-.9V2.7c0-.5.4-.9.9-.9Z"/><path d="M9.2 1.8v3.7H13M5.4 9.2h5.2M5.4 11.6h3.5"/></svg>
@@ -1095,14 +1091,14 @@
     </div>
   </div>
   <div id="toast" role="status" popover="manual"></div>
-<script src="/typeset.js?v=4.86"></script>
-<script src="/groups.js?v=4.86"></script>
-<script src="/rich-sanitize.js?v=4.86"></script>
-<script src="/rich-editor.js?v=4.86"></script>
-<script src="/inline-edit-session.js?v=4.86"></script>
-<script src="/help-guide.js?v=4.86"></script>
-<script src="/document-enhancement.js?v=4.86"></script>
-<script src="/ocr-profiles.js?v=4.86"></script>
-<script src="/app.js?v=4.86"></script>
+<script src="/typeset.js?v=4.87"></script>
+<script src="/groups.js?v=4.87"></script>
+<script src="/rich-sanitize.js?v=4.87"></script>
+<script src="/rich-editor.js?v=4.87"></script>
+<script src="/inline-edit-session.js?v=4.87"></script>
+<script src="/help-guide.js?v=4.87"></script>
+<script src="/document-enhancement.js?v=4.87"></script>
+<script src="/ocr-profiles.js?v=4.87"></script>
+<script src="/app.js?v=4.87"></script>
 </body>
 </html>
