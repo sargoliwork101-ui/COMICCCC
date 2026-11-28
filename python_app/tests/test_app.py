@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.87"
+    assert health.json()["version"] == "4.88"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -3344,7 +3344,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.87"
+    assert APP_VERSION == "4.88"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "HaSaYaStudio"
@@ -5883,6 +5883,42 @@ def test_enhancement_preview_rejects_errors_without_fallback(client, monkeypatch
     assert client.post(route, json={**payload, 'image_id': 'missing'}).status_code == 404
     assert client.post(route, json={**payload, 'page_mode': 'comic'}).status_code == 422
     assert client.post(route, json={**payload, 'enhancement': {'threshold': {'window': 4}}}).status_code == 422
+
+
+def test_enhancement_analyze_proposes_settings_without_applying_them(client):
+    """The analyser is read-only: it must not change state, text or the file."""
+    project = client.post('/api/projects', json={'name': 'Analyse book'}).json()
+    with Image.new('RGB', (700, 900), (250, 248, 244)) as source:
+        draw = ImageDraw.Draw(source)
+        for y in range(60, 840, 34):
+            draw.text((60, y), 'Control systems regulate machine behaviour.', fill=(25, 25, 30))
+        with io.BytesIO() as buffer:
+            source.save(buffer, 'PNG')
+            imported = client.post(f"/api/projects/{project['id']}/files",
+                                   files=[('files', ('page.png', buffer.getvalue(), 'image/png'))])
+    assert imported.status_code == 200
+    item = imported.json()['images'][0]
+    before = client.get(f"/api/projects/{project['id']}").json()
+
+    response = client.post(f"/api/projects/{project['id']}/enhancement-analyze",
+                           json={'image_id': item['id']})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert set(body) >= {'stats', 'proposed', 'enabled', 'reasons', 'notes', 'is_empty_page'}
+    assert body['stats']['width'] == 700
+    assert body['proposed']['threshold']['enabled'] is False
+    assert isinstance(body['enabled'], list)
+    # Proposals are data, never an accuracy promise.
+    assert 'image' not in body
+    assert body['is_empty_page'] is False
+
+    after = client.get(f"/api/projects/{project['id']}").json()
+    assert after == before
+
+    assert client.post(f"/api/projects/{project['id']}/enhancement-analyze",
+                       json={'image_id': 'missing'}).status_code == 404
+    assert client.post(f"/api/projects/{project['id']}/enhancement-analyze",
+                       json={'image_id': item['id'], 'page_mode': 'comic'}).status_code == 422
 
 
 def test_enhancement_preview_cmyk_without_filters(client):

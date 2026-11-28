@@ -34,6 +34,12 @@ class OcrRequest(BaseModel):
     batch_total: int | None = Field(default=None, ge=1)
 
 
+class EnhancementAnalyzeRequest(BaseModel):
+    """Analyse one page and propose filter settings; nothing is applied."""
+    image_id: str
+    page_mode: Literal["document"] = "document"
+
+
 class EnhancementPreviewRequest(BaseModel):
     image_id: str
     page_mode: Literal["document"] = "document"

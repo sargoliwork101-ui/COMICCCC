@@ -145,3 +145,137 @@ def test_contrast_order_changes_actual_pixels():
     with de.prepare_document(image, cfg) as after:
         assert not np.array_equal(pixels, np.array(after))
     image.close()
+
+
+# --------------------------------------------------------------------------
+# 4.88: dependency-aware ordering and the page analyser.
+# These are image-statistics tests, not an OCR accuracy benchmark.
+# --------------------------------------------------------------------------
+
+def _page(width=700, height=900, *, blur=0.0, noise=0.0, contrast=1.0, uneven=False):
+    """A synthetic text page with adjustable defects."""
+    image = Image.new('RGB', (width, height), (250, 248, 244))
+    draw = ImageDraw.Draw(image)
+    y = 60
+    while y < height - 60:
+        draw.text((60, y), 'Control systems regulate machine behaviour.', fill=(25, 25, 30))
+        y += 34
+    if uneven:
+        ramp = np.linspace(1.06, 0.74, width, dtype=np.float32)[None, :, None]
+        image = Image.fromarray(np.clip(np.asarray(image, np.float32) * ramp, 0, 255).astype(np.uint8))
+    if contrast != 1.0:
+        arr = np.asarray(image, np.float32)
+        image = Image.fromarray(np.clip(128 + (arr - 128) * contrast, 0, 255).astype(np.uint8))
+    if blur:
+        image = image.filter(ImageFilter.GaussianBlur(blur))
+    if noise:
+        rng = np.random.default_rng(3)
+        arr = np.asarray(image, np.float32) + rng.normal(0, noise, (height, width, 3))
+        image = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+    return image
+
+
+def test_threshold_then_contrast_really_is_a_no_op():
+    """A binarsing stage leaves nothing for a later contrast/CLAHE to change.
+
+    The UI warns about this order, so the warning must be true.
+    """
+    image = _page()
+    cfg = de.EnhancementSettings(enabled=True, threshold={'enabled': True})
+    cfg.order = [*[name for name in de.STAGES if name != 'threshold'], 'threshold']
+    with de.prepare_document(image, cfg) as after_threshold:
+        threshold_only = np.array(after_threshold.convert('L'))
+    cfg.order = ['upscale', 'grayscale', 'clahe', 'denoise', 'unsharp', 'threshold', 'contrast']
+    cfg.contrast.enabled = True
+    cfg.contrast.strength = 2.5
+    with de.prepare_document(image, cfg) as after_contrast:
+        with_contrast = np.array(after_contrast.convert('L'))
+    image.close()
+    assert set(np.unique(threshold_only)) <= {0, 255}
+    assert np.array_equal(threshold_only, with_contrast)
+
+
+def test_order_issues_reports_stages_that_run_after_threshold():
+    cfg = de.EnhancementSettings(enabled=True, threshold={'enabled': True},
+                                 contrast={'enabled': True}, clahe={'enabled': True})
+    cfg.order = ['upscale', 'grayscale', 'clahe', 'denoise', 'unsharp', 'threshold', 'contrast']
+    stages = {issue.stage for issue in cfg.order_issues()}
+    assert stages == {'contrast'}
+    assert all(issue.reason == 'after_threshold' for issue in cfg.order_issues())
+    # Nothing is reported when the binariser is off or already last.
+    cfg.threshold.enabled = False
+    assert cfg.order_issues() == []
+    cfg.threshold.enabled = True
+    cfg.order = ['upscale', 'grayscale', 'clahe', 'denoise', 'unsharp', 'contrast', 'threshold']
+    assert cfg.order_issues() == []
+
+
+def test_normalize_order_only_moves_threshold():
+    """A deliberate denoise-before-upscale preference must survive."""
+    order = ['upscale', 'threshold', 'grayscale', 'clahe', 'denoise', 'unsharp', 'contrast']
+    fixed = de.normalize_order(order)
+    assert fixed[-1] == 'threshold'
+    assert fixed[:-1] == ['upscale', 'grayscale', 'clahe', 'denoise', 'unsharp', 'contrast']
+    assert sorted(fixed) == sorted(de.STAGES)
+    # Missing stages are added rather than dropped.
+    assert sorted(de.normalize_order(['upscale', 'grayscale'])) == sorted(de.STAGES)
+
+
+def test_blur_metric_separates_sharp_from_blurred():
+    """The blur score must not be fooled by low contrast (it normalises by it)."""
+    sharp = de.analyze_page(_page())['stats']
+    blurred = de.analyze_page(_page(blur=1.6))['stats']
+    assert sharp['blur'] < 0.3
+    assert blurred['blur'] > sharp['blur'] + 0.3
+    # A faded but sharp page must not be reported as blurred.
+    faded = de.analyze_page(_page(contrast=0.35))['stats']
+    assert faded['blur'] < 0.3
+    assert faded['contrast'] < sharp['contrast'] - 40
+
+
+def test_analyze_page_proposes_matching_filters():
+    blurred = de.analyze_page(_page(blur=1.6))
+    assert 'unsharp' in blurred['enabled']
+    assert any(entry['stage'] == 'unsharp' for entry in blurred['reasons'])
+
+    noisy = de.analyze_page(_page(noise=22))
+    assert 'denoise' in noisy['enabled']
+
+    uneven = de.analyze_page(_page(uneven=True))
+    assert 'clahe' in uneven['enabled']
+
+    clean = de.analyze_page(_page())
+    assert 'unsharp' not in clean['enabled']
+    assert 'denoise' not in clean['enabled']
+
+
+def test_analyze_page_never_claims_accuracy_and_never_auto_binarises():
+    """No proposal may assert better OCR accuracy, and threshold stays opt-in."""
+    for kwargs in ({}, {'blur': 1.6}, {'noise': 22}, {'contrast': 0.3}, {'uneven': True}):
+        with _page(**kwargs) as image:
+            result = de.analyze_page(image)
+        assert result['proposed']['enabled'] is True
+        assert result['proposed']['threshold']['enabled'] is False
+        assert isinstance(result['notes'], list)
+        # The payload is data only. No message may promise, imply or measure
+        # OCR accuracy — only image statistics and a "starting point" framing.
+        for text in result['notes']:
+            assert 'دقت' not in text or 'تضمین' in text or 'تضمین دقت' in text
+    # Every proposed stage must be enabled in its own settings block.
+    for name in de.STAGES:
+        assert isinstance(result['proposed'][name], dict)
+
+
+def test_analyze_page_proposal_uses_a_dependency_safe_order():
+    with _page(blur=1.4, contrast=0.5) as image:
+        result = de.analyze_page(image)
+    order = result['proposed']['order']
+    assert sorted(order) == sorted(de.STAGES)
+    assert order[-1] == 'threshold'
+
+
+def test_analyze_page_rejects_an_empty_image_cleanly():
+    with Image.new('RGB', (10, 10)) as blank:
+        result = de.analyze_page(blank)
+    assert result['is_empty_page'] is True
+    assert result['stats']['width'] == 10

@@ -33,6 +33,20 @@
       refreshPreview?.();
     }, 300);
   }
+  // Mirrors document_enhancement.AFTER_THRESHOLD_POINTLESS. A stage that runs
+  // after the binariser cannot change its output; say so instead of letting the
+  // user wait for a filter that does nothing.
+  const AFTER_THRESHOLD_POINTLESS = new Set(['contrast', 'clahe', 'grayscale']);
+  function orderWarnings(cfg) {
+    const enabled = cfg.order.filter(key => cfg[key] && cfg[key].enabled);
+    if (!enabled.includes('threshold')) return [];
+    const at = enabled.indexOf('threshold');
+    return enabled.slice(at + 1)
+      .filter(key => AFTER_THRESHOLD_POINTLESS.has(key) || key === 'unsharp')
+      .map(key => AFTER_THRESHOLD_POINTLESS.has(key)
+        ? `«${names[key]}» بعد از «سیاه‌وسفید تطبیقی» هیچ پیکسلی را عوض نمی‌کند؛ خروجی آن مرحله فقط سیاه و سفید است.`
+        : '«وضوح لبه» بعد از «سیاه‌وسفید تطبیقی» فقط لبه‌ها را نرم می‌کند.');
+  }
   const copy = value => JSON.parse(JSON.stringify(value));
   function collect() {
     if (!host) return copy(config);
@@ -72,7 +86,11 @@
       reorder = !reorder; controls.querySelectorAll('.enhancement-stage-head').forEach(head => { head.draggable = reorder; }); controls.classList.toggle('is-reordering', reorder); orderButton.setAttribute('aria-pressed', String(reorder));
     });
     orderButton.setAttribute('aria-pressed', String(reorder)); controls.classList.toggle('is-reordering', reorder);
-    tools.append(orderButton); controls.append(tools);
+    tools.append(orderButton);
+    // The advisor sits on its own row under the filters heading, so it never
+    // displaces the reorder toggle that sits beside the heading.
+    tools.append(buildAdvisor(controls));
+    controls.append(tools);
     const list = el('div', null, 'enhancement-stages'); controls.append(list);
     config.order.forEach((key, index) => {
       const row = el('section', null, 'enhancement-stage'); row.dataset.stage = key;
@@ -118,6 +136,22 @@
       }
       list.append(row);
     });
+    const warnings = orderWarnings(config);
+    if (warnings.length) {
+      const warn = el('div', null, 'enhancement-order-warning');
+      warn.setAttribute('role', 'status');
+      warn.append(el('strong', 'چیدمان فعلی بخشی از کار را هدر می‌دهد'));
+      warnings.forEach(text => warn.append(el('p', text)));
+      const fix = button('درست کردن ترتیب', () => {
+        collect();
+        const rest = config.order.filter(key => key !== 'threshold');
+        config.order = [...rest, 'threshold'];
+        render(); changed(collect());
+      });
+      fix.dataset.fixOrder = '';
+      warn.append(fix);
+      controls.append(warn);
+    }
     controls.append(note);
     host.append(button('بازگرداندن همه به پیش‌فرض (خاموش)', () => { config = defaults(); reorder = false; previewPage = ''; previewApi?.reset?.(); render(false); changed(collect()); }));
     if (previewApi?.save) {
@@ -158,6 +192,114 @@
       changed(collect());
     }));
   }
+  // ---- Smart combination + ordering -------------------------------------
+  // The analyser measures the page (contrast, noise, blur, uneven light) and
+  // proposes which filters to enable and in what order. It never applies
+  // anything by itself: the proposal is shown first so the user can accept it,
+  // edit it, or start OCR straight from the accepted settings.
+  function stageLine(label, value) {
+    const row = el('span', null, 'advisor-why');
+    row.append(el('b', label + ': '), document.createTextNode(value));
+    return row;
+  }
+  function buildAdvisor(controls) {
+    const box = el('div', null, 'enhancement-advisor');
+    const state = { proposal: null, busy: false };
+    const status = el('p', '', 'hint advisor-status');
+    status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
+    const result = el('div', null, 'advisor-result hidden');
+    const goBtn = button('تشخیص بهترین ترکیب', async () => {
+      if (state.busy) return;
+      const pages = previewApi?.pages?.() || [];
+      if (!pages.length) { status.textContent = 'ابتدا حداقل یک صفحه در پروژه انتخاب کنید.'; return; }
+      if (!previewApi?.analyze) { status.textContent = 'تحلیل در این نسخه در دسترس نیست.'; return; }
+      const select = host.querySelector('[data-preview-page]');
+      const page = pages.find(item => item.id === select?.value) || pages[0];
+      state.busy = true; goBtn.disabled = true;
+      status.textContent = 'در حال بررسی صفحه…';
+      result.classList.add('hidden');
+      try {
+        const data = await previewApi.analyze(page.id);
+        state.proposal = data;
+        renderProposal(data, page);
+        status.textContent = '';
+      } catch (error) {
+        status.textContent = `تحلیل انجام نشد: ${error.message}`;
+      } finally {
+        state.busy = false; goBtn.disabled = false;
+      }
+    });
+    goBtn.dataset.smartEnhance = '';
+    goBtn.className = 'bt primary';
+    goBtn.title = 'صفحه را بررسی می‌کند و بهترین ترکیب و ترتیب فیلترها را پیشنهاد می‌دهد؛ تا تأیید نکنید اعمال نمی‌شود.';
+
+    function renderProposal(data, page) {
+      result.replaceChildren();
+      result.classList.remove('hidden');
+      const proposed = data.proposed || {};
+      const stages = (proposed.order || []).filter(key => proposed[key] && proposed[key].enabled);
+      if (!stages.length) {
+        result.append(el('p', 'برای این صفحه فیلتری لازم نیست؛ با همین تصویر اصلی ادامه دهید.', 'advisor-empty'));
+        return;
+      }
+      result.append(el('p', `پیشنهاد برای صفحهٔ «${page.name}» — ترتیب از بالا به پایین:`, 'advisor-title'));
+      const list = el('ol', null, 'advisor-stages');
+      stages.forEach(key => {
+        const li = el('li');
+        li.append(el('b', names[key]));
+        const why = (data.reasons || []).find(entry => entry.stage === key);
+        if (why) li.append(document.createTextNode(` — ${why.why}`));
+        list.append(li);
+      });
+      result.append(list);
+      if ((data.reasons || []).length) {
+        const whyBox = el('div', null, 'advisor-why-box');
+        whyBox.append(el('strong', 'چرا این ترکیب؟'));
+        (data.reasons || []).forEach(entry => whyBox.append(stageLine(names[entry.stage], entry.why)));
+        result.append(whyBox);
+      }
+      const stats = data.stats || {};
+      const measured = el('div', null, 'advisor-why-box advisor-stats');
+      measured.append(el('strong', 'اندازه‌گیری صفحه (نه درصد دقت):'));
+      measured.append(stageLine('کنتراست', `${stats.contrast}`));
+      measured.append(stageLine('نویز', `${stats.noise}`));
+      measured.append(stageLine('تاری لبه', `${Math.round((stats.blur || 0) * 100)}٪`));
+      result.append(measured);
+      (data.notes || []).forEach(note => result.append(el('p', note, 'hint advisor-note')));
+      result.append(el('p', 'این پیشنهاد بر اساس ظاهر تصویر است، نه تضمین دقت OCR. اگر نپسندیدید، هیچ‌چیز عوض نشده است.', 'hint advisor-disclaimer'));
+      const actions = el('div', null, 'advisor-actions');
+      const accept = button('تأیید و پیش‌نمایش', () => applyProposal(data, false));
+      accept.className = 'bt primary'; accept.dataset.acceptProposal = '';
+      const acceptRun = button('تأیید و شروع OCR', () => applyProposal(data, true));
+      acceptRun.dataset.acceptAndRun = '';
+      const dismiss = button('رد کردن', () => { state.proposal = null; result.classList.add('hidden'); status.textContent = 'پیشنهاد رد شد؛ تنظیمات دست‌نخورده ماند.'; });
+      actions.append(accept, acceptRun, dismiss);
+      result.append(actions);
+    }
+
+    function applyProposal(data, runOcr) {
+      // Merge onto the defaults so every stage keeps a complete parameter set,
+      // then lift the proposal over it and re-render the normal controls.
+      const next = defaults();
+      next.enabled = true;
+      const proposed = data.proposed || {};
+      Object.keys(names).forEach(key => {
+        if (proposed[key] && typeof proposed[key] === 'object') Object.assign(next[key], proposed[key]);
+      });
+      if (Array.isArray(proposed.order) && proposed.order.length === Object.keys(names).length) next.order = [...proposed.order];
+      config = next; reorder = false;
+      render(false);
+      changed(collect());
+      status.textContent = runOcr ? 'تنظیمات پیشنهادی اعمال شد و OCR شروع می‌شود…' : 'تنظیمات پیشنهادی اعمال شد؛ پیش‌نمایش ساخته می‌شود.';
+      result.classList.add('hidden');
+      if (runOcr && typeof root.__comicStartOcr === 'function') root.__comicStartOcr();
+      else requestAutoPreview();
+    }
+
+    box.append(goBtn, status, result);
+    return box;
+  }
+
   function appendPreview() {
     if (!previewApi) return;
     const section = el('section', null, 'enhancement-preview');
@@ -325,6 +467,10 @@
   root.DocumentEnhancement = { defaults, collect, load,
     mount(node, onChange, preview) { host = node; changed = value => { onChange(value); requestAutoPreview(); }; previewApi = preview; render(false); },
     setDocumentMode(value) { documentMode = value; render(false); requestAutoPreview(); },
+    // Read/override the host-provided transport (page list, preview, analyser).
+    // Test harnesses and future callers need it; the UI itself never uses it.
+    get previewApi() { return previewApi; },
+    set previewApi(value) { previewApi = value; },
     validate() { return !documentMode || !config.enabled || [...host.querySelectorAll('[data-param]')].every(input => input.reportValidity()); },
   };
 })(typeof window === 'undefined' ? globalThis : window);

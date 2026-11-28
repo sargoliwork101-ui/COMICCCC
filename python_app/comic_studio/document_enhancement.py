@@ -11,6 +11,29 @@ Stage = Literal['upscale', 'grayscale', 'clahe', 'denoise', 'unsharp', 'threshol
 STAGES = ['upscale', 'grayscale', 'clahe', 'denoise', 'unsharp', 'threshold', 'contrast']
 MAX_PIXELS = 16_000_000
 
+# The order the classic filter chain is listed in: cheapest and most broadly
+# useful first, heavier/edge-specialised stages later. Used when a caller only
+# wants "a sensible order" and for sorting the analyser's proposals.
+DEFAULT_ORDER = ['grayscale', 'denoise', 'clahe', 'contrast', 'upscale', 'unsharp', 'threshold']
+
+# Two stages contradict each other: `threshold` outputs a 1-bit image, so a
+# following `contrast`/`clahe`/`grayscale` cannot change a single pixel, and an
+# `unsharp` after it only re-blurs the hard edges OCR wants. Measured on real
+# output: threshold-then-contrast changed 0 of 1,080,000 pixels.
+AFTER_THRESHOLD_POINTLESS = frozenset({'contrast', 'clahe', 'grayscale'})
+# `threshold` itself must stay last when enabled: anything after it is either a
+# no-op or destructive.
+THRESHOLD_TERMINAL = frozenset({'threshold'})
+
+
+class OrderIssue(BaseModel):
+    """A stage in the current chain whose work is thrown away by a later one."""
+    model_config = ConfigDict(extra='forbid')
+    stage: Stage
+    reason: Literal['after_threshold', 'threshold_not_last']
+    message: str
+
+
 
 class EnhancementError(ValueError):
     """Safe, actionable message; never include paths or native diagnostics."""
@@ -101,6 +124,56 @@ class EnhancementSettings(BaseModel):
 
     def active(self, page_mode: str) -> bool:
         return page_mode == 'document' and self.enabled and any(getattr(self, name).enabled for name in self.order)
+
+    def order_issues(self) -> list[OrderIssue]:
+        """Stages whose output a later stage throws away.
+
+        Reported, never silently "fixed": the user may have a reason, and the
+        analyser offers a corrected order they can accept explicitly.
+        """
+        issues: list[OrderIssue] = []
+        enabled = [name for name in self.order if getattr(self, name).enabled]
+        if 'threshold' not in enabled:
+            return issues
+        after = [name for name in enabled if enabled.index(name) > enabled.index('threshold')]
+        for name in after:
+            if name in AFTER_THRESHOLD_POINTLESS:
+                issues.append(OrderIssue(
+                    stage=name, reason='after_threshold',
+                    message=f'«{FILTER_LABELS[name]}» بعد از «سیاه‌وسفید تطبیقی» اجرا می‌شود، ولی خروجی آن مرحله فقط سیاه و سفید است؛ '
+                            f'پس این مرحله هیچ پیکسلی را عوض نمی‌کند.',
+                ))
+            elif name == 'unsharp':
+                issues.append(OrderIssue(
+                    stage=name, reason='after_threshold',
+                    message='«وضوح لبه» بعد از «سیاه‌وسفید تطبیقی» فقط لبه‌های سخت را نرم می‌کند و کار مفیدی انجام نمی‌دهد.',
+                ))
+        return issues
+
+
+FILTER_LABELS = {
+    'upscale': 'بزرگ‌نمایی', 'grayscale': 'خاکستری', 'clahe': 'کنتراست موضعی',
+    'denoise': 'کاهش نویز', 'unsharp': 'وضوح لبه',
+    'threshold': 'سیاه‌وسفید تطبیقی', 'contrast': 'کنتراست معمولی',
+}
+
+
+def normalize_order(order: list[str], enabled: dict[str, bool] | None = None) -> list[str]:
+    """Return a dependency-safe order, keeping the user's relative choices.
+
+    Only ordering that provably matters is changed: `threshold` moves to the
+    end, because every other stage after it is a measured no-op or a blur.
+    Everything else keeps its existing relative position, so a deliberate
+    `denoise`-before-`upscale` preference survives.
+    """
+    current = [name for name in order if name in STAGES]
+    for name in STAGES:
+        if name not in current:
+            current.append(name)
+    if 'threshold' not in current:
+        return current
+    rest = [name for name in current if name != 'threshold']
+    return [*rest, 'threshold']
 
 
 def _array(image):
@@ -271,3 +344,156 @@ def run_document_ocr(image: Image.Image, settings: EnhancementSettings | None, p
             raise
         warn(f'پیش‌پردازش کتاب اجرا نشد ({type(exc).__name__})؛ OCR با روش قبلی ادامه می‌یابد.')
     return legacy()
+
+
+# --------------------------------------------------------------------------
+# Page analysis: propose a starting configuration for this page.
+# --------------------------------------------------------------------------
+# These are image statistics, not a measurement of OCR accuracy. Every proposal
+# is explicitly a starting point the user confirms in the OCR dialog; nothing
+# here is allowed to claim or imply a guaranteed accuracy gain.
+
+def _profile(image: Image.Image) -> dict[str, float]:
+    import cv2
+    import numpy as np
+
+    with image.convert('L') as gray_image:
+        gray = np.asarray(gray_image, dtype=np.float32)
+    if gray.size == 0:
+        raise EnhancementError('این صفحه تصویری برای تحلیل ندارد.')
+    # Downscale huge scans: statistics are scale-invariant and this keeps the
+    # analysis cheap enough to run while the user is looking at the dialog.
+    h, w = gray.shape
+    if max(h, w) > 1400:
+        scale = 1400 / max(h, w)
+        gray = cv2.resize(gray, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
+
+    # Percentiles rather than min/max so a single speck of dust cannot define
+    # "paper white" or "ink black". The paper reference is the brightest mode;
+    # the ink reference must come from the darkest tail of the *content*, not
+    # from a fixed percentile, otherwise a washed-out scan reports that it has
+    # no contrast at all (its darkest 5% is still paper).
+    paper = float(np.percentile(gray, 90))
+    ink = float(gray.min())
+    # Use the 2nd percentile of the whole page but only trust it when it is
+    # clearly below the paper; fall back to the true minimum for faded ink.
+    dark_tail = float(np.percentile(gray, 2))
+    if dark_tail > paper - 8:
+        dark_tail = ink
+    contrast = max(paper - dark_tail, 1.0)
+
+    # Text pixels as a fraction of the page. Very low means the page is mostly
+    # blank or a drawing; very high means a dark scan or a photo.
+    ink_ratio = float((gray < paper - contrast * 0.35).mean())
+
+    # Noise: median absolute deviation of the second difference. Extremely
+    # cheap and insensitive to text (which is a small fraction of pixels).
+    residual = np.abs(gray[1:-1, 1:-1] * 4 - gray[:-2, 1:-1] - gray[2:, 1:-1] - gray[1:-1, :-2] - gray[1:-1, 2:])
+    noise = float(np.median(residual)) if residual.size else 0.0
+
+    # Blur: a sharp edge jumps from paper to ink in a pixel or two, so its
+    # gradient reaches several times the page contrast. Blur spreads that jump
+    # over many pixels and the peak gradient collapses. Measuring the peak
+    # against page contrast (not against the mean, which also falls) keeps this
+    # independent of how dark or faded the scan is: a low-contrast page that is
+    # still sharp scores the same as a crisp black one.
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    magnitude = cv2.magnitude(gx, gy)
+    edge_peak_ratio = float(np.percentile(magnitude, 99.9)) / contrast
+    # Calibrated on measured output: ~4.2 crisp, ~2.7 at 1px blur, ~1.9 at 1.6px.
+    blur = float(np.clip((3.6 - edge_peak_ratio) / 1.8, 0.0, 1.0))
+
+    # Illumination unevenness: brightness of the paper across a coarse grid.
+    tile_h = max(1, h // 6)
+    tile_w = max(1, w // 6)
+    tiles = []
+    for ty in range(0, h - tile_h + 1, tile_h):
+        for tx in range(0, w - tile_w + 1, tile_w):
+            block = gray[ty:ty + tile_h, tx:tx + tile_w]
+            tiles.append(float(np.percentile(block, 90)))
+    tile_spread = float(np.percentile(tiles, 95) - np.percentile(tiles, 5)) if tiles else 0.0
+
+    return {
+        'paper': round(paper, 1),
+        'ink': round(ink, 1),
+        'contrast': round(contrast, 1),
+        'ink_ratio': round(ink_ratio, 4),
+        'noise': round(noise, 2),
+        'blur': round(blur, 3),
+        'edge_peak_ratio': round(edge_peak_ratio, 1),
+        'tile_spread': round(tile_spread, 1),
+        'width': int(image.width),
+        'height': int(image.height),
+    }
+
+
+def analyze_page(image: Image.Image) -> dict[str, Any]:
+    """Propose an enabled set, parameters and order for one page.
+
+    Returns plain data so the UI can show it before anything is applied. The
+    proposal never claims improved accuracy; the caller must present it as a
+    starting point for the user to accept, edit or reject.
+    """
+    stats = _profile(image)
+    reasons: list[dict[str, str]] = []
+    proposed = EnhancementSettings(enabled=True, order=list(DEFAULT_ORDER))
+    notes: list[str] = []
+
+    low_contrast = stats['contrast'] < 150
+    heavy_noise = stats['noise'] > 6.0
+    looks_blurred = stats['blur'] > 0.45
+    uneven = stats['tile_spread'] > 45
+    faint = stats['ink_ratio'] < 0.012
+    small_text = stats['width'] < 1100
+
+    if low_contrast or uneven:
+        proposed.clahe.enabled = True
+        if uneven:
+            proposed.clahe.clip_limit = 2.5
+            proposed.clahe.tile_grid = 12
+        reasons.append({'stage': 'clahe', 'why': 'کنتراست صفحه کم است' if low_contrast else 'روشنایی صفحه یکدست نیست'})
+    if heavy_noise:
+        proposed.denoise.enabled = True
+        proposed.denoise.diameter = 7
+        proposed.denoise.sigma_color = 40
+        reasons.append({'stage': 'denoise', 'why': 'نویز نقطهای صفحه زیاد است'})
+    if looks_blurred:
+        proposed.unsharp.enabled = True
+        proposed.unsharp.amount = 1.4
+        proposed.unsharp.radius = 1.4
+        reasons.append({'stage': 'unsharp', 'why': 'لبه‌های حروف نرم و تار هستند'})
+    if small_text:
+        proposed.upscale.enabled = True
+        proposed.upscale.factor = 2
+        reasons.append({'stage': 'upscale', 'why': 'عرض صفحه کم است و حروف ریز'})
+    if low_contrast and not uneven and not heavy_noise:
+        proposed.contrast.enabled = True
+        proposed.contrast.strength = 1.25
+        reasons.append({'stage': 'contrast', 'why': 'متن خاکستری است، نه سیاه'})
+    if faint and (low_contrast or uneven):
+        # Binarising a faint page usually destroys thin strokes, so it stays off
+        # here and the note explains how to turn it on deliberately.
+        if not looks_blurred:
+            notes.append('اگر با این تنظیمات هنوز متن روشن ناخوانا بود، «سیاه‌وسفید تطبیقی» را دستی روشن کنید؛ به‌صورت خودکار روشن نمی‌شود چون خط‌های نازک را ممکن است حذف کند.')
+
+    if not reasons:
+        reasons.append({'stage': 'grayscale', 'why': 'صفحه تمیز است؛ فقط پیش‌نیاز ساده لازم است'})
+        proposed.grayscale.enabled = True
+
+    # Put the enabled stages in dependency order but keep the user's list intact.
+    proposed.order = normalize_order(list(DEFAULT_ORDER))
+    enabled_stages = [name for name in proposed.order if getattr(proposed, name).enabled]
+    for name in AFTER_THRESHOLD_POINTLESS:
+        if name in enabled_stages and 'threshold' in enabled_stages:
+            issues = proposed.order_issues()
+            notes.extend(issue.message for issue in issues)
+
+    return {
+        'stats': stats,
+        'proposed': proposed.model_dump(),
+        'enabled': enabled_stages,
+        'reasons': reasons,
+        'notes': notes,
+        'is_empty_page': stats['ink_ratio'] < 0.0008,
+    }

@@ -5117,10 +5117,10 @@ function check(name, condition) {
   const v487Pager = await vm.runInContext(`
     (() => {
       const pager = document.getElementById('gridPager');
-      const ids = ['gridPagerFirst', 'gridPagerPrev', 'gridPagerNext', 'gridPagerLast', 'gridPagerClose', 'gridPagerRange'];
+      const ids = ['gridPagerFirst', 'gridPagerPrev', 'gridPagerNext', 'gridPagerLast', 'gridPagerClose', 'gridPagerRange', 'gridPageInput'];
       const missingIds = ids.filter((id) => !document.getElementById(id));
       // The crowded controls the user asked to remove must be gone for good.
-      const removed = ['gridPageInput', 'gridPageTotal', 'gridPageGoBtn']
+      const removed = ['gridPageTotal', 'gridPageGoBtn']
         .filter((id) => document.getElementById(id));
       state.project = {id:'v487', images: Array.from({length: 600}, (_, i) => ({id:'p' + (i + 1), name:'صفحهٔ ' + (i + 1)}))};
       gridPagerCurrent = 1;
@@ -5156,7 +5156,9 @@ function check(name, condition) {
   check('v4.87 the page strip is hidden until asked for and closes again, instead of covering the grid',
     v487Pager.hiddenByDefault && v487Pager.openOk && v487Pager.shownWhenOpen && v487Pager.hiddenAfterClose,
     JSON.stringify(v487Pager));
-  check('v4.87 the crowded number box, total and «برو» button are gone and only the page number remains',
+  check('v4.87 the total and «برو» button are gone; only the page number field remains',
+    // 4.88 brought the number field back (a page finder needs somewhere to
+    // type), but the duplicate total and the extra «برو» button stay removed.
     v487Pager.removed.length === 0 && v487Pager.missingIds.length === 0,
     JSON.stringify(v487Pager));
   check('v4.87 the page total moved to the footer as a plain count',
@@ -5167,6 +5169,22 @@ function check(name, condition) {
   check('v4.87 jumping to page 600 reports «۶۰۰ از ۶۰۰» with Persian digits',
     v487Pager.cur600 === 600 && v487Pager.label600 === '۶۰۰ از ۶۰۰' && v487Pager.label1 === '۱ از ۶۰۰',
     JSON.stringify(v487Pager));
+  check('v4.88 typing a page number in the strip jumps there, Persian digits included',
+    await vm.runInContext(`(() => {
+      const input = document.getElementById('gridPageInput');
+      if (!input) return false;
+      input.focus(); input.value = '600';
+      input.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      const latin = gridPagerCurrent === 600 && document.getElementById('gridPagerRange').textContent === '۶۰۰ از ۶۰۰';
+      input.value = '۳۰۰';
+      input.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      const persian = gridPagerCurrent === 300;
+      input.value = '2a4';
+      input.dispatchEvent(new window.Event('input', { bubbles: true }));
+      const filtered = input.value === '24';
+      return latin && persian && filtered;
+    })()`, context));
+
   check('v4.87 the page counter survives a grid re-render instead of resetting to 1',
     v487Pager.keptAfterRefresh === 300 && v487Pager.label300 === '۳۰۰ از ۶۰۰',
     JSON.stringify(v487Pager));
@@ -5187,6 +5205,80 @@ function check(name, condition) {
     Array.isArray(v485Incomplete.incomplete) && v485Incomplete.incomplete.length === 1
       && v485Incomplete.incomplete[0] === 'a' && v485Incomplete.none.length === 0,
     JSON.stringify(v485Incomplete));
+
+  // 4.88 — the filter-order warning and the smart-combination panel.
+  const warnCfg = enhancement.collect();
+  enhancement.load({ ...warnCfg, enabled: true,
+    threshold: { ...warnCfg.threshold, enabled: true },
+    contrast: { ...warnCfg.contrast, enabled: true },
+    order: ['upscale', 'grayscale', 'clahe', 'denoise', 'unsharp', 'threshold', 'contrast'] });
+  await sleep(20);
+  const orderWarning = enhancementPanel.querySelector('.enhancement-order-warning');
+  check('v4.88 a filter that runs after the binariser is flagged instead of silently wasted',
+    Boolean(orderWarning) && orderWarning.textContent.includes('هیچ پیکسلی را عوض نمی‌کند') && Boolean(orderWarning.querySelector('[data-fix-order]')));
+  orderWarning.querySelector('[data-fix-order]').click();
+  await sleep(20);
+  check('v4.88 the fix moves the binariser last and clears the warning',
+    enhancement.collect().order.at(-1) === 'threshold' && !enhancementPanel.querySelector('.enhancement-order-warning'));
+
+  const smartButton = enhancementPanel.querySelector('[data-smart-enhance]');
+  check('v4.88 the smart-combination button exists and promises no accuracy gain',
+    Boolean(smartButton) && /تشخیص بهترین ترکیب/.test(smartButton.textContent)
+      && !/دقت/.test(smartButton.title.replace('تضمین دقت', '')));
+
+  // Drive the panel with a stubbed analyser: the UI contract, not real OCR.
+  check('v4.88 no proposal is shown until the user asks for one',
+    enhancementPanel.querySelector('.advisor-result').classList.contains('hidden'));
+  // The panel is already mounted; hand its live preview API an analyser so the
+  // rest of the harness (page list, preview transport) stays exactly as it was.
+  const liveApi = enhancement.previewApi;
+  const realAnalyze = liveApi.analyze;
+  // This harness has no selected pages at this point in the run; the advisor
+  // only needs the page list to name the page it analysed.
+  const realPages = liveApi.pages;
+  const stubPages = () => [{ id: 'enh-page', name: 'صفحهٔ آزمایشی', original: 'data:image/png;base64,AA==' }];
+  liveApi.analyze = async () => ({
+    stats: { contrast: 108, noise: 4, blur: 0.53, width: 700, height: 900 },
+    proposed: { enabled: true, order: ['grayscale', 'denoise', 'clahe', 'contrast', 'upscale', 'unsharp', 'threshold'],
+      grayscale: { enabled: false }, denoise: { enabled: false }, clahe: { enabled: true, clip_limit: 2.5, tile_grid: 12 },
+      contrast: { enabled: true, strength: 1.25 }, upscale: { enabled: true, factor: 2 },
+      unsharp: { enabled: true, amount: 1.4, radius: 1.4 }, threshold: { enabled: false } },
+    enabled: ['clahe', 'contrast', 'upscale', 'unsharp'],
+    reasons: [{ stage: 'unsharp', why: 'لبه‌های حروف نرم و تار هستند' }],
+    notes: [], is_empty_page: false,
+  });
+  liveApi.pages = stubPages;
+  void realAnalyze;
+  const smartAgain = enhancementPanel.querySelector('[data-smart-enhance]');
+  smartAgain.click();
+  await sleep(250);
+  // mount() re-renders the panel, so the result node must be looked up again.
+  const advisorResult = enhancementPanel.querySelector('.advisor-result');
+  check('v4.88 the proposal lists the stages in order with the reason for each',
+    !advisorResult.classList.contains('hidden')
+      && advisorResult.querySelectorAll('.advisor-stages li').length === 4
+      && advisorResult.textContent.includes('لبه‌های حروف نرم و تار هستند'));
+  check('v4.88 the proposal says it is not an OCR accuracy guarantee',
+    advisorResult.querySelector('.advisor-disclaimer')?.textContent.includes('نه تضمین دقت OCR'));
+  check('v4.88 the user can accept, accept-and-run-OCR, or reject',
+    Boolean(advisorResult.querySelector('[data-accept-proposal]'))
+      && Boolean(advisorResult.querySelector('[data-accept-and-run]'))
+      && [...advisorResult.querySelectorAll('.advisor-actions .bt')].some(b => b.textContent.includes('رد کردن')));
+  [...advisorResult.querySelectorAll('.advisor-actions .bt')].find(b => b.textContent.includes('رد کردن')).click();
+  await sleep(20);
+  check('v4.88 rejecting leaves the current settings untouched',
+    advisorResult.classList.contains('hidden') && enhancement.collect().order.at(-1) === 'threshold');
+
+  smartAgain.click();
+  await sleep(60);
+  advisorResult.querySelector('[data-accept-proposal]').click();
+  await sleep(80);
+  const applied = enhancement.collect();
+  liveApi.pages = realPages;
+  check('v4.88 accepting applies the proposed filters and order',
+    applied.enabled && applied.clahe.enabled && applied.upscale.enabled && applied.unsharp.enabled
+      && !applied.threshold.enabled && applied.order.at(-1) === 'threshold'
+      && applied.unsharp.amount === 1.4);
 
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;
   window.dispatchEvent(new window.Event('beforeunload'));

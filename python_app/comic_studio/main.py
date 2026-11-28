@@ -73,7 +73,7 @@ from .license_guard import (
 )
 from .local_nmt import DEFAULT_LOCAL_NMT_MODEL, LOCAL_NMT_MODELS, LocalNmtError
 from .schemas import (
-    EnhancementPreviewRequest, AiConnectionTest, AiSettings, BackupRequest, ContextPreviewRequest, ContextStartRequest, ContextStepRequest, ContextTextRequest, EngineDownloadRequest, EngineTestRequest, EngineUpdateCheckRequest, EngineUpdateRequest, ExportRequest,
+    EnhancementAnalyzeRequest, EnhancementPreviewRequest, AiConnectionTest, AiSettings, BackupRequest, ContextPreviewRequest, ContextStartRequest, ContextStepRequest, ContextTextRequest, EngineDownloadRequest, EngineTestRequest, EngineUpdateCheckRequest, EngineUpdateRequest, ExportRequest,
     LicenseActivateRequest, LocalLoginRequest, LocalNmtModelActionRequest, LocalNmtTestRequest, LocalPasswordUpdateRequest, OcrRequest, ProjectCreate,
     ResourceBudget, SessionRequest, StateUpdate, StorageFolderPickRequest, StorageSettingsUpdate, TextTranslateRequest, TranslateRequest,
 )
@@ -1343,6 +1343,31 @@ def create_app() -> FastAPI:
         except KeyError as exc:
             raise HTTPException(404, "پروفایل OCR پیدا نشد.") from exc
         return {"ok": True}
+
+    @app.post("/api/projects/{project_id}/enhancement-analyze")
+    async def enhancement_analyze(project_id: str, values: EnhancementAnalyzeRequest) -> dict[str, Any]:
+        """Propose filter settings for one page; never applies or saves them."""
+        require_module_license("ocr")
+        project(project_id)
+        try:
+            path = store.image_path(project_id, values.image_id)
+        except (KeyError, FileNotFoundError) as exc:
+            raise HTTPException(404, "صفحه‌ای برای تحلیل پیدا نشد.") from exc
+
+        def analyze():
+            from PIL import Image
+            from .document_enhancement import EnhancementError, analyze_page
+            try:
+                with Image.open(path) as source:
+                    source.load()
+                    return analyze_page(source)
+            except EnhancementError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            except MemoryError as exc:
+                raise HTTPException(400, "حافظه برای تحلیل این صفحه کافی نیست؛ صفحهٔ کوچک‌تری انتخاب کنید.") from exc
+            except (ValueError, OSError, RuntimeError) as exc:
+                raise HTTPException(400, f"خواندن تصویر برای تحلیل ناموفق بود ({type(exc).__name__})؛ فرمت فایل را بررسی کنید.") from exc
+        return await run_in_threadpool(analyze)
 
     @app.post("/api/projects/{project_id}/enhancement-preview")
     async def enhancement_preview(project_id: str, values: EnhancementPreviewRequest) -> dict[str, Any]:

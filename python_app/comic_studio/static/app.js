@@ -1482,6 +1482,14 @@ function gridPagerRender(current = gridPagerCurrent) {
       ? `${shown.toLocaleString('fa-IR')} از ${total.toLocaleString('fa-IR')}`
       : '۰ از ۰';
   }
+  const input = $('gridPageInput');
+  if (input) {
+    input.placeholder = total ? `۱ تا ${total.toLocaleString('fa-IR')}` : '—';
+    input.disabled = total === 0;
+    // Never overwrite a number the user is still typing; only echo the page
+    // that is actually on screen.
+    if (document.activeElement !== input) input.value = total ? String(shown) : '';
+  }
   const atStart = !total || shown <= 1;
   const atEnd = !total || shown >= total;
   ['gridPagerFirst', 'gridPagerPrev'].forEach((id) => { const el = $(id); if (el) el.disabled = atStart; });
@@ -1505,8 +1513,9 @@ function gridPagerOpenStrip() {
   }
   gridPagerOpen = true;
   gridPagerRender(gridPagerCurrent || 1);
-  const first = $('gridPagerPrev');
-  try { first?.focus({ preventScroll: true }); } catch (error) { /* not focusable */ }
+  // Focus the number box: the whole point of the strip is typing a page.
+  const focusTarget = $('gridPageInput') || $('gridPagerPrev');
+  try { focusTarget?.focus({ preventScroll: true }); focusTarget?.select?.(); } catch (error) { /* not focusable */ }
   gridPagerArmIdle();
   return true;
 }
@@ -1620,6 +1629,10 @@ function gridPagerSetLabel(index) {
   rangeEl.textContent = total
     ? `${shown.toLocaleString('fa-IR')} از ${total.toLocaleString('fa-IR')}`
     : '۰ از ۰';
+  const input = $('gridPageInput');
+  // Scrolling moves the current page, so the box follows it — unless the user
+  // has already typed something different into it.
+  if (input && document.activeElement !== input) input.value = total ? String(shown) : '';
 }
 
 function gridPagerTrackVisible() {
@@ -1675,6 +1688,30 @@ function gridPagerRefresh() {
   gridPagerRender(Math.min(Math.max(gridPagerCurrent || 1, 1), Math.max(1, total)));
 }
 
+function gridPagerJumpFromInput() {
+  const input = $('gridPageInput');
+  if (!input) return;
+  const total = gridPagerTotal();
+  if (!total) return;
+  // Accept Persian and Arabic-Indic digits, the way the rest of the app does.
+  const raw = String(input.value || '')
+    .replace(/[۰-۹]/g, (d) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)))
+    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
+  const parsed = Number(raw.trim());
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    gridPagerRender(gridPagerCurrent);
+    return false;
+  }
+  const target = gridPagerClamp(parsed);
+  if (parsed > total) {
+    toast(`این پروژه ${total.toLocaleString('fa-IR')} صفحه دارد؛ به صفحهٔ ${target.toLocaleString('fa-IR')} رفتیم.`, true);
+  }
+  gridPagerGoTo(target, { focusCard: true });
+  input.blur();
+  gridPagerArmIdle();
+  return true;
+}
+
 function gridPagerBind() {
   const nav = $('gridPager');
   if (!nav || nav.dataset.bound === '1') return;
@@ -1684,9 +1721,48 @@ function gridPagerBind() {
   $('gridPagerNext')?.addEventListener('click', () => gridPagerStep(1));
   $('gridPagerLast')?.addEventListener('click', () => gridPagerGoTo(gridPagerTotal()));
   $('gridPagerClose')?.addEventListener('click', () => gridPagerCloseStrip());
+  const input = $('gridPageInput');
+  if (input) {
+    // The field is a text input because type=number silently rejects Persian
+    // and Arabic-Indic digits; filter out anything that is not a digit instead.
+    input.addEventListener('input', () => {
+      const cleaned = String(input.value || '').replace(/[^0-9۰-۹٠-٩]/g, '');
+      if (cleaned !== input.value) {
+        const atEnd = input.selectionStart === input.value.length;
+        input.value = cleaned;
+        if (atEnd) input.setSelectionRange(cleaned.length, cleaned.length);
+      }
+    });
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') { event.preventDefault(); gridPagerJumpFromInput(); }
+      else if (event.key === 'ArrowUp') { event.preventDefault(); gridPagerStep(-1); }
+      else if (event.key === 'ArrowDown') { event.preventDefault(); gridPagerStep(1); }
+      else if (event.key === 'Escape') {
+        event.preventDefault(); event.stopPropagation();
+        // First Escape only restores the shown page; a second one closes the strip.
+        const shown = String(gridPagerCurrent || '');
+        if (String(input.value || '') !== shown && shown) { input.value = shown; input.blur(); }
+        else gridPagerCloseStrip();
+      }
+    });
+    // "change" fires on blur too. Acting on it there would re-jump to a stale
+    // number when the user clicks any other pager button, so only Enter (above)
+    // and the step buttons move the grid.
+    input.addEventListener('change', () => {
+      if (!input.value) return;
+      const shown = gridPagerTotal() ? String(gridPagerClamp(gridPagerCurrent)) : '';
+      input.value = shown;
+    });
+    // Focusing the box must not let the idle timer close it mid-typing.
+    input.addEventListener('focus', () => { clearTimeout(gridPagerIdleTimer); gridPagerIdleTimer = 0; });
+    input.addEventListener('blur', () => gridPagerArmIdle());
+  }
   // Arrow keys step one page while the strip has focus; Escape closes it, the
   // same way a find bar behaves.
   nav.addEventListener('keydown', (event) => {
+    // Keys typed into the number box are handled by its own listener; letting
+    // the strip also act on them would skip two pages per arrow press.
+    if (event.target === $('gridPageInput')) return;
     if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') { event.preventDefault(); gridPagerStep(-1); }
     else if (event.key === 'ArrowDown' || event.key === 'ArrowRight') { event.preventDefault(); gridPagerStep(1); }
     else if (event.key === 'Home') { event.preventDefault(); gridPagerGoTo(1); }
@@ -9859,6 +9935,12 @@ function bindEvents() {
       if (state.project?.id !== projectId || !selectedImages().some(item => item.id === imageId)) throw new Error('پروژه یا انتخاب صفحه تغییر کرده؛ دوباره پیش‌نمایش بگیرید.');
       return result;
     },
+    analyze: async (imageId) => {
+      const projectId = state.project?.id;
+      const result = await api(`/api/projects/${projectId}/enhancement-analyze`, jsonOptions('POST', { image_id: imageId, page_mode: 'document' }));
+      if (state.project?.id !== projectId || !selectedImages().some(item => item.id === imageId)) throw new Error('پروژه یا انتخاب صفحه تغییر کرده؛ دوباره تحلیل بگیرید.');
+      return result;
+    },
   });
   $('ocrPageMode')?.addEventListener('change', () => {
     window.DocumentEnhancement.setDocumentMode($('ocrPageMode').value === 'document');
@@ -9890,7 +9972,10 @@ function bindEvents() {
     const engine = state.engines.find((entry) => entry.id === $('ocrEngine').value);
     if (engine) updateEngine(engine, { languageOverride: $('ocrLanguage').value, fromOcrDialog: true }).catch(() => {});
   });
-  $('startOcrBtn').addEventListener('click', () => runOcr().catch(() => {})); $('cancelOcrBtn')?.addEventListener('click', () => requestCancelOcrDialog().catch(() => {})); $('cancelTranslationBtn')?.addEventListener('click', () => requestCancelTranslationDialog().catch(() => {})); $('translateBtn').addEventListener('click', () => runTranslation().catch(() => {}));
+  $('startOcrBtn').addEventListener('click', () => runOcr().catch(() => {}));
+  // The enhancement panel's "تأیید و شروع OCR" needs the same entry point the
+  // dialog's own start button uses, so the two can never drift apart.
+  window.__comicStartOcr = () => runOcr().catch(() => {}); $('cancelOcrBtn')?.addEventListener('click', () => requestCancelOcrDialog().catch(() => {})); $('cancelTranslationBtn')?.addEventListener('click', () => requestCancelTranslationDialog().catch(() => {})); $('translateBtn').addEventListener('click', () => runTranslation().catch(() => {}));
   $('ocrDialog').addEventListener('cancel', (event) => {
     if ((ocrRunning && !ocrClosingNormally) || (state.modelBusy && modelFromOcrDialog)) { event.preventDefault(); requestCancelOcrDialog().catch(() => {}); }
   });
