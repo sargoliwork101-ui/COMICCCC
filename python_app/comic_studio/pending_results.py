@@ -127,7 +127,7 @@ def inspect(store: ProjectStore, project_id: str, entry: dict[str, Any]) -> dict
         can_apply = isinstance(current_run, dict) and digest(current_run) == entry['runDigest']
         blocks = _lookup(state)
         results = distribute_translation([part['text'] for part in entry['chosen']], entry['translated'])
-        for part, result in zip(entry['chosen'], results):
+        for part, result in zip(entry['chosen'], results, strict=True):
             job = entry['run']['jobs'][part['job']]
             for ref in job['refs']:
                 key = f"{ref['imageId']}:{ref['blockId']}"
@@ -183,7 +183,7 @@ def resolve(store: ProjectStore, project_id: str, token: str, revision: str,
         if entry['kind'] == 'ocr':
             images = {item['id']: item for item in state['images']}
             replace = []
-            for row, output in zip(view['rows'], entry['outputs']):
+            for row, output in zip(view['rows'], entry['outputs'], strict=True):
                 if row['missing'] or (row['conflict'] and choices[row['key']] == 'keep'): continue
                 item = images[output['id']]
                 item['blocks'] = copy.deepcopy(output['blocks']); item['ocrCompleted'] = True; item['edited'] = False; item['approved'] = False

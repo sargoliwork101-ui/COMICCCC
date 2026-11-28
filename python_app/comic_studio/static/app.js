@@ -2072,7 +2072,13 @@ function drawGroupOutlines() {
 async function refreshProjectList(prefetched = null) {
   const projects = Array.isArray(prefetched) ? prefetched : await api('/api/projects');
   const select = $('projectSelect'); const current = state.project?.id; select.textContent = '';
-  projects.forEach((project) => { const option = document.createElement('option'); option.value = project.id; option.textContent = `${project.name} (${project.images})`; option.selected = project.id === current; select.appendChild(option); });
+  projects.forEach((project) => {
+    const option = document.createElement('option');
+    option.value = project.id;
+    option.textContent = project.damaged ? `${project.name} (آسیب‌دیده)` : `${project.name} (${project.images})`;
+    option.selected = project.id === current;
+    select.appendChild(option);
+  });
 }
 async function loadProject(id) {
   const revision = ++projectLoadRevision;

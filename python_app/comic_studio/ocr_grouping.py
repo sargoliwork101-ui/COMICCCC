@@ -1108,7 +1108,7 @@ def group_document_lines(
         texts = [t for t, _ in paired]
         if paired:
             weights = [max(1, len(t)) for t, _ in paired]
-            weighted_conf = round(sum(c * w for (_, c), w in zip(paired, weights)) / sum(weights), 2)
+            weighted_conf = round(sum(c * w for (_, c), w in zip(paired, weights, strict=True)) / sum(weights), 2)
         else:
             weighted_conf = round(sum(float(m.get("conf", 0)) for m in members) / max(1, len(members)), 2)
         bold_votes = sum(1 for m in non_empty if m.get("_detectedBold") or m.get("_explicitBold") or m.get("bold"))
@@ -1240,7 +1240,7 @@ def _group_comic_lines(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         texts = [t for t, _ in paired]
         if paired:
             weights = [max(1, len(text)) for text, _ in paired]
-            weighted_conf = round(sum(c * w for (_, c), w in zip(paired, weights)) / sum(weights), 2)
+            weighted_conf = round(sum(c * w for (_, c), w in zip(paired, weights, strict=True)) / sum(weights), 2)
         else:
             weighted_conf = first.get("conf", 0)
         bold_votes = sum(1 for b in non_empty if b.get("_detectedBold") or b.get("_explicitBold") or b.get("bold"))

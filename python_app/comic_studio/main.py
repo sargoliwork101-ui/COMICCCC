@@ -78,7 +78,7 @@ from .schemas import (
     ResourceBudget, SessionRequest, StateUpdate, StorageFolderPickRequest, StorageSettingsUpdate, TextTranslateRequest, TranslateRequest,
 )
 from .sessions import SessionManager
-from .store import ProjectChangedError, ProjectStore
+from .store import ProjectChangedError, ProjectCorruptError, ProjectStore
 from .translation import (
     AI_PROVIDERS, TARGET_LANGUAGES, TranslationError, InvalidContextResponse, TranslationService, combine_translation_texts,
     distribute_translation, normalize_ai_skill, normalize_target_language, context_uses_json, _redact_diagnostic,
@@ -616,6 +616,19 @@ def create_app() -> FastAPI:
     @app.exception_handler(ProjectChangedError)
     async def project_changed(_: Request, exc: ProjectChangedError) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=409)
+
+    @app.exception_handler(ProjectCorruptError)
+    async def project_corrupt(_: Request, exc: ProjectCorruptError) -> JSONResponse:
+        """Say the file is damaged instead of pretending the project vanished."""
+        activity.add(f"فایل پروژهٔ {exc} خوانا نیست؛ پروژه نیاز به بازیابی دارد.", "error")
+        return JSONResponse(
+            {
+                "detail": "فایل اطلاعات این پروژه آسیب دیده و خوانده نمی‌شود. "
+                          "پوشهٔ پروژه در بخش داده‌های برنامه دست‌نخورده باقی مانده است؛ "
+                          "برای بازگرداندن آن از «بازیابی بک‌آپ» استفاده کنید."
+            },
+            status_code=500,
+        )
 
     @app.exception_handler(Exception)
     async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:

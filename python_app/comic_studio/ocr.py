@@ -2051,7 +2051,7 @@ def _lines_from_tesseract(payload: str, language: str = "eng") -> list[OcrLine]:
                 for row in words for ch in (row.get("text") or "")
             )
             if has_rtl_chars and first_cx + 4.0 < last_cx:
-                paired = sorted(zip(boxes, words), key=lambda pair: -(pair[0][0] + pair[0][2]))
+                paired = sorted(zip(boxes, words, strict=True), key=lambda pair: -(pair[0][0] + pair[0][2]))
                 ordered_words = [w for _, w in paired]
         text = " ".join((row.get("text") or "").strip() for row in ordered_words).strip()
         if is_persian and text:
@@ -4993,7 +4993,7 @@ def _result_metrics(blocks: list[dict[str, Any]]) -> tuple[int, float]:
         return 0, 0.0
     weighted = sum(
         max(0.0, min(1.0, float(block.get("conf", 0.0)) / 100.0)) * count
-        for block, count in zip(blocks, counts)
+        for block, count in zip(blocks, counts, strict=True)
     )
     return total, weighted / total
 

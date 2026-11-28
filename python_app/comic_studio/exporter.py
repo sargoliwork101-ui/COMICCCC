@@ -124,7 +124,16 @@ def image_payload(
         and edited_path.stat().st_size > 0
     )
     source_path = edited_path if has_edited else project_root(project_id) / "images" / item["file"]
-    content = source_path.read_bytes()
+    # A page whose file was removed outside the app (a half-finished delete, an
+    # antivirus quarantine, a manual cleanup) used to surface as an internal
+    # error carrying the absolute path. Say what happened without the path.
+    try:
+        content = source_path.read_bytes()
+    except OSError as exc:
+        raise ValueError(
+            f"فایل تصویر صفحهٔ «{item.get('name') or item.get('id')}» روی دیسک پیدا نشد؛ "
+            "آن صفحه را دوباره وارد کنید یا از پروژه حذفش کنید."
+        ) from exc
     crop = crop_box(item)
     needs_backend_wm = (not has_edited) and has_active_watermark(item.get("watermark"))
     target = image_format if image_format in {"png", "jpg"} else "orig"
@@ -1318,7 +1327,14 @@ def _prepare_docx_pages(
         try:
             for item in item_members:
                 source_path = project_root(project_id) / "images" / item["file"]
-                with Image.open(source_path) as opened:
+                try:
+                    content = source_path.read_bytes()
+                except OSError as exc:
+                    raise ValueError(
+                        f"فایل تصویر صفحهٔ «{item.get('name') or item.get('id')}» روی دیسک پیدا نشد؛ "
+                        "آن صفحه را دوباره وارد کنید یا از پروژه حذفش کنید."
+                    ) from exc
+                with Image.open(io.BytesIO(content)) as opened:
                     im = opened.convert("RGB")
                 crop = crop_box(item)
                 off_x, off_y = (float(crop[0]), float(crop[1])) if crop else (0.0, 0.0)

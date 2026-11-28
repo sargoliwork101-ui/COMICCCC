@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import zipfile
 
 import httpx
@@ -44,7 +45,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.88"
+    assert health.json()["version"] == "4.89"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -3344,7 +3345,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.88"
+    assert APP_VERSION == "4.89"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "HaSaYaStudio"
@@ -6013,3 +6014,88 @@ def test_corrupt_ocr_profiles_are_not_silently_overwritten(client):
     assert client.get('/api/ocr-profiles').status_code == 400
     assert client.post('/api/ocr-profiles', json={'name': 'new', 'settings': {}}).status_code == 400
     assert path.read_text(encoding='utf-8') == 'broken file'
+
+
+def test_image_path_cannot_escape_the_project_images_directory(client):
+    """A corrupted or hand-edited "file" value must never resolve outside images/."""
+    from comic_studio import paths
+    from comic_studio.store import ProjectStore
+
+    project, image = make_project(client)
+    project_id = project["id"]
+    store = ProjectStore()
+    images_dir = (paths.project_root(project_id) / "images").resolve()
+
+    secret = images_dir.parent / "secret.txt"
+    secret.write_text("TOP SECRET", encoding="utf-8")
+    state = store.get(project_id)
+    state["images"][0]["file"] = "../../secret.txt"
+    store.save(state)
+    store._image_meta_cache = None
+
+    with pytest.raises(FileNotFoundError):
+        store.image_path(project_id, image["id"])
+
+
+def test_image_path_still_serves_a_valid_page(client):
+    """The traversal guard must not break the normal lookup path."""
+    from comic_studio.store import ProjectStore
+
+    project, image = make_project(client)
+    path = ProjectStore().image_path(project["id"], image["id"])
+    assert path.is_file()
+    assert path.suffix.lower() == ".png"
+
+
+def test_corrupt_project_json_reports_damage_instead_of_vanishing(client):
+    """A truncated project.json must not look like a project that never existed."""
+    from comic_studio import paths
+
+    project, _ = make_project(client)
+    project_id = project["id"]
+    (paths.project_root(project_id) / "project.json").write_text('{"id": "broken', encoding="utf-8")
+
+    response = client.get(f"/api/projects/{project_id}")
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    assert "آسیب" in detail
+    assert "بک‌آپ" in detail
+
+    listing = client.get("/api/projects").json()
+    damaged = [item for item in listing if item["id"] == project_id]
+    assert damaged, "a damaged project must stay visible in the list"
+    assert damaged[0]["damaged"] is True
+
+
+def test_malformed_project_fields_do_not_crash_state_updates(client):
+    """A hand-edited or half-written project used to raise TypeError -> 500."""
+    from comic_studio import paths
+
+    for shape in ({"images": "oops"}, {"images": None}, {"settings": "bad"}, {"images": [{"no_id": 1}]}):
+        project, _ = make_project(client)
+        project_id = project["id"]
+        path = paths.project_root(project_id) / "project.json"
+        state = json.loads(path.read_text(encoding="utf-8"))
+        state.update(shape)
+        path.write_text(json.dumps(state), encoding="utf-8")
+
+        assert client.get(f"/api/projects/{project_id}").status_code == 200
+        assert client.put(f"/api/projects/{project_id}/state", json={"state": {"images": []}}).status_code == 200
+
+
+def test_export_of_a_page_whose_file_vanished_says_so_without_leaking_a_path(client):
+    """A page deleted or quarantined outside the app must not yield a raw 500."""
+    from comic_studio import paths
+
+    project, image = make_project(client)
+    (paths.project_root(project["id"]) / "images" / image["file"]).unlink()
+
+    response = client.post(
+        f"/api/projects/{project['id']}/export",
+        json={"kind": "pdf", "image_ids": [image["id"]]},
+    )
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "پیدا نشد" in detail
+    assert str(paths.data_dir()) not in detail, "the response must not leak the data directory"
+    assert "Traceback" not in detail

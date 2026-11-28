@@ -30,6 +30,15 @@ class ProjectChangedError(Exception):
     """A long-running operation was based on an outdated project snapshot."""
 
 
+class ProjectCorruptError(Exception):
+    """A project file exists on disk but its JSON cannot be read.
+
+    Raised instead of KeyError so a damaged project is never reported to the
+    reader as "not found": that message told them their work had vanished and
+    left no hint that the file was damaged and recoverable.
+    """
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -178,13 +187,30 @@ class ProjectStore:
                 result.append(dict(cached[2]))
                 continue
             state = read_json(path, {})
+            if not isinstance(state, dict):
+                state = {}
             if state.get("id"):
+                images = state.get("images")
                 summary = {
                     "id": state["id"], "name": state.get("name", "پروژه"),
-                    "updatedAt": state.get("updatedAt", ""), "images": len(state.get("images", [])),
+                    "updatedAt": state.get("updatedAt", ""),
+                    "images": len(images) if isinstance(images, list) else 0,
                 }
                 self._list_summary_cache[key] = (st.st_mtime_ns, st.st_size, summary)
                 result.append(dict(summary))
+            else:
+                # The folder is there but its project.json cannot be parsed.
+                # Dropping it from the list made the reader's whole project
+                # disappear with no explanation; keep it listed and marked so
+                # they can see it is damaged and restore a backup.
+                directory = path.parent.name
+                if directory.isascii() and directory.isalnum():
+                    summary = {
+                        "id": directory, "name": state.get("name") if isinstance(state.get("name"), str) and state.get("name") else "پروژهٔ آسیب‌دیده",
+                        "updatedAt": state.get("updatedAt") if isinstance(state.get("updatedAt"), str) else "",
+                        "images": 0, "damaged": True,
+                    }
+                    result.append(dict(summary))
         if len(self._list_summary_cache) > len(active_keys) + 8:
             for stale_key in list(self._list_summary_cache):
                 if stale_key not in active_keys:
@@ -194,9 +220,23 @@ class ProjectStore:
     def get(self, project_id: str) -> dict[str, Any]:
         if not project_id.isascii() or not project_id.isalnum():
             raise KeyError(project_id)
-        state = read_json(project_root(project_id) / "project.json", None)
-        if not state:
+        path = project_root(project_id) / "project.json"
+        if not path.is_file():
             raise KeyError(project_id)
+        state = read_json(path, None)
+        if not isinstance(state, dict) or not state.get("id"):
+            raise ProjectCorruptError(project_id)
+        # A truncated write or a hand-edited file used to reach the rest of the
+        # app as a string or None and crash later with TypeError -> HTTP 500.
+        # Repair the containers here so every caller works with real lists and
+        # dicts; individual malformed entries are dropped by the callers below.
+        if not isinstance(state.get("images"), list):
+            state["images"] = []
+        if not isinstance(state.get("settings"), dict):
+            state["settings"] = {}
+        if not isinstance(state.get("name"), str):
+            state["name"] = ""
+        state["images"] = [item for item in state["images"] if isinstance(item, dict) and item.get("id")]
         return state
 
     def save(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -333,7 +373,15 @@ class ProjectStore:
 
     def image_path(self, project_id: str, image_id: str, edited: bool = False) -> Path:
         item = self._image_meta(project_id, image_id)
-        path = project_root(project_id) / "images" / (f"{image_id}-edited.png" if edited else item["file"])
+        images_dir = (project_root(project_id) / "images").resolve()
+        name = f"{image_id}-edited.png" if edited else str(item.get("file", ""))
+        path = (images_dir / name).resolve()
+        # Project state is written by restore and by other code paths, so a
+        # corrupted or hand-edited "file" value must never be able to reach a
+        # file outside this project's images directory. Without this check a
+        # value like "../../../secret.txt" resolved and was readable.
+        if path.parent != images_dir or path.name != name:
+            raise FileNotFoundError(path)
         if not path.is_file() or (edited and path.stat().st_size == 0):
             raise FileNotFoundError(path)
         return path

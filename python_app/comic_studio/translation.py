@@ -266,7 +266,7 @@ def distribute_translation(source_texts: list[str], translated: str) -> list[str
         raise TranslationError(f"تعداد خطوط پاسخ ({len(actual)}) با متن مبدأ ({len(expected)}) یکسان نیست؛ هیچ ترجمه‌ای جابه‌جا نشد.")
     # Empty input lines must stay empty, and a nonempty source cannot map to an
     # empty output; otherwise the positions of later blocks cannot be trusted.
-    if any(bool(source.strip()) != bool(result.strip()) for source, result in zip(expected, actual)):
+    if any(bool(source.strip()) != bool(result.strip()) for source, result in zip(expected, actual, strict=True)):
         raise TranslationError("خط خالی پاسخ با متن مبدأ سازگار نیست؛ هیچ ترجمه‌ای جابه‌جا نشد.")
     output = []
     cursor = 0
